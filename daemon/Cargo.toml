@@ -1,0 +1,64 @@
+[package]
+name = "doormand"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "doormand"
+path = "src/main.rs"
+
+[dependencies]
+doorman-shared = { path = "../shared" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# ML Backends
+ort = { version = "2.0.7", features = ["load-dynamic"], optional = true }
+tract-onnx = { version = "0.21", optional = true }
+tract-ndarray = { version = "0.21", optional = true }
+async-trait = "0.1"
+
+# Video decoding
+opencv = { version = "0.93", optional = true, default-features = false, features = ["videoio"] }
+
+# Camera access
+nokhwa = { version = "0.10", features = ["input-native"] }
+
+# Image processing
+image = "0.25"
+
+# Embedding storage
+bincode = "1.3"
+
+# Signal handling
+tokio-util = "0.7"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+# Permissions
+nix = { version = "0.29", features = ["user", "fs"] }
+
+# Timestamps
+chrono = "0.4"
+
+[features]
+default = ["backend-tract"]
+backend-tract = ["tract-onnx", "tract-ndarray"]
+backend-ort = ["ort"]
+video = ["opencv"]
+gpu = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[dev-dependencies]
+tempfile = "3.13"
+tokio-test = "0.4"
+
