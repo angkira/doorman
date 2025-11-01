@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use doorman_shared::Config;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
@@ -10,23 +11,34 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// Initialize the camera
-    pub async fn new() -> Result<Self> {
-        info!("Opening camera...");
+    /// Initialize camera with config
+    pub async fn new_with_config(config: &Config) -> Result<Self> {
+        info!("Opening camera {}...", config.camera.device_index);
         
-        // Try to find the first available camera
-        let index = CameraIndex::Index(0);
+        let index = CameraIndex::Index(config.camera.device_index);
         
-        // Request a reasonable resolution (will downscale anyway)
+        // Request specific resolution from config
         let requested = RequestedFormat::new::<RgbFormat>(
-            RequestedFormatType::AbsoluteHighestResolution
+            RequestedFormatType::Closest(Resolution::new(
+                config.camera.width,
+                config.camera.height,
+            ))
         );
 
         let camera = NokhwaCamera::new(index, requested)
             .context("Failed to open camera")?;
 
-        info!("Camera opened successfully");
+        info!(
+            "Camera opened: {}x{} @ {}fps",
+            config.camera.width, config.camera.height, config.camera.fps
+        );
+        
         Ok(Self { camera })
+    }
+    
+    /// Initialize with defaults
+    pub async fn new() -> Result<Self> {
+        Self::new_with_config(&Config::default())
     }
 
     /// Capture a frame from the camera

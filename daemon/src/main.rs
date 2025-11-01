@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     let storage = Arc::new(RwLock::new(storage::Storage::new().await?));
 
     info!("Initializing camera...");
-    let camera = Arc::new(RwLock::new(camera::Camera::new().await.ok()));
+    let camera = Arc::new(RwLock::new(camera::Camera::new_with_config(&config).await.ok()));
 
     let state = DaemonState {
         camera,
