@@ -1,10 +1,17 @@
+#[cfg(feature = "backend-tract")]
 use super::backend::{Face, MLBackend};
+#[cfg(feature = "backend-tract")]
 use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "backend-tract")]
 use async_trait::async_trait;
+#[cfg(feature = "backend-tract")]
 use image::{DynamicImage, GenericImageView};
+#[cfg(feature = "backend-tract")]
 use std::path::Path;
+#[cfg(feature = "backend-tract")]
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "backend-tract")]
 /// Tract-based ML backend (pure Rust, no external deps)
 pub struct TractBackend {
     detector: Option<tract_onnx::prelude::TypedModel>,
@@ -12,6 +19,7 @@ pub struct TractBackend {
     recognizer: Option<tract_onnx::prelude::TypedModel>,
 }
 
+#[cfg(feature = "backend-tract")]
 impl TractBackend {
     pub fn new(models_dir: &Path) -> Result<Self> {
         info!("Initializing Tract backend...");
@@ -73,6 +81,7 @@ impl TractBackend {
     }
 }
 
+#[cfg(feature = "backend-tract")]
 #[async_trait]
 impl MLBackend for TractBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {

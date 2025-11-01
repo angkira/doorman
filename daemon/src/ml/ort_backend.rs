@@ -1,12 +1,21 @@
+#[cfg(feature = "backend-ort")]
 use super::backend::{Face, MLBackend};
+#[cfg(feature = "backend-ort")]
 use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "backend-ort")]
 use async_trait::async_trait;
+#[cfg(feature = "backend-ort")]
 use doorman_shared::Config;
+#[cfg(feature = "backend-ort")]
 use image::{DynamicImage, GenericImageView};
+#[cfg(feature = "backend-ort")]
 use ort::{GraphOptimizationLevel, Session};
+#[cfg(feature = "backend-ort")]
 use std::path::Path;
+#[cfg(feature = "backend-ort")]
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "backend-ort")]
 /// ONNX Runtime backend (supports GPU via ROCm/CUDA)
 pub struct OrtBackend {
     detector: Option<Session>,
@@ -14,6 +23,7 @@ pub struct OrtBackend {
     recognizer: Option<Session>,
 }
 
+#[cfg(feature = "backend-ort")]
 impl OrtBackend {
     pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend...");
@@ -83,6 +93,7 @@ impl OrtBackend {
     }
 }
 
+#[cfg(feature = "backend-ort")]
 #[async_trait]
 impl MLBackend for OrtBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {

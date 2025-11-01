@@ -1,5 +1,7 @@
 mod backend;
+#[cfg(feature = "backend-tract")]
 mod tract_backend;
+#[cfg(feature = "backend-ort")]
 mod ort_backend;
 
 pub use backend::{Face, MLBackend, BackendType};
@@ -27,14 +29,28 @@ impl MLPipeline {
         
         let backend: Arc<dyn MLBackend> = match backend_type {
             BackendType::Tract => {
-                Arc::new(tract_backend::TractBackend::new(&models_dir)?)
+                #[cfg(feature = "backend-tract")]
+                {
+                    Arc::new(tract_backend::TractBackend::new(&models_dir)?)
+                }
+                #[cfg(not(feature = "backend-tract"))]
+                {
+                    return Err(anyhow::anyhow!("Tract backend not compiled. Build with --features backend-tract"));
+                }
             }
             BackendType::OnnxRuntime => {
-                Arc::new(ort_backend::OrtBackend::new(&models_dir, config)?)
+                #[cfg(feature = "backend-ort")]
+                {
+                    Arc::new(ort_backend::OrtBackend::new(&models_dir, config)?)
+                }
+                #[cfg(not(feature = "backend-ort"))]
+                {
+                    return Err(anyhow::anyhow!("ORT backend not compiled. Build with --features backend-ort"));
+                }
             }
             BackendType::Candle => {
-                warn!("Candle backend not yet implemented, falling back to Tract");
-                Arc::new(tract_backend::TractBackend::new(&models_dir)?)
+                warn!("Candle backend not yet implemented");
+                return Err(anyhow::anyhow!("Candle backend not yet implemented"));
             }
         };
         
@@ -47,14 +63,21 @@ impl MLPipeline {
     }
     
     pub fn dummy(config: &Config) -> Self {
-        // For testing - create tract backend without models
-        let models_dir = PathBuf::from("/nonexistent");
-        let backend = tract_backend::TractBackend::new(&models_dir)
-            .unwrap_or_else(|_| panic!("Failed to create dummy backend"));
-        
-        Self {
-            backend: Arc::new(backend),
-            config: config.clone(),
+        // For testing - create dummy backend
+        #[cfg(feature = "backend-tract")]
+        {
+            let models_dir = PathBuf::from("/nonexistent");
+            let backend = tract_backend::TractBackend::new(&models_dir)
+                .unwrap_or_else(|_| panic!("Failed to create dummy backend"));
+            
+            Self {
+                backend: Arc::new(backend),
+                config: config.clone(),
+            }
+        }
+        #[cfg(not(feature = "backend-tract"))]
+        {
+            panic!("No backend available for dummy. Compile with --features backend-tract");
         }
     }
     
