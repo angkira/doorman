@@ -18,6 +18,8 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from .models import ModelManager
+
 app = typer.Typer(
     name="doorman",
     help="Secure face unlock system for Linux",
@@ -492,6 +494,244 @@ def uninstall(
     console.print(f"\n[green]✓ Uninstall complete[/green]")
     console.print(f"\n[yellow]Note:[/yellow] User data preserved at {DATA_DIR}")
     console.print("To remove completely: [cyan]sudo rm -rf /var/lib/doorman[/cyan]\n")
+
+
+# ============================================================================
+# Model Management Commands
+# ============================================================================
+
+models_app = typer.Typer(
+    name="models",
+    help="Manage ONNX models for face recognition",
+)
+app.add_typer(models_app)
+
+
+@models_app.command("list")
+def models_list():
+    """List all available models and their status"""
+    manager = ModelManager(MODELS_DIR)
+    
+    console.print("\n[bold cyan]Doorman ONNX Models[/bold cyan]")
+    console.print(f"Location: [yellow]{MODELS_DIR}[/yellow]\n")
+    
+    models = manager.list_models()
+    
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Model", style="cyan")
+    table.add_column("File", style="white")
+    table.add_column("Size", justify="right")
+    table.add_column("Status", style="green")
+    table.add_column("Description", style="dim")
+    
+    for model in models:
+        status_style = "green" if model["installed"] else "red"
+        status_icon = "✅" if model["installed"] else "❌"
+        table.add_row(
+            model["name"],
+            model["filename"],
+            f"{model['size_mb']:.1f} MB",
+            f"[{status_style}]{status_icon}[/{status_style}]",
+            model["description"]
+        )
+    
+    console.print(table)
+    
+    installed = manager.get_installed_models()
+    missing = manager.get_missing_models()
+    
+    console.print(f"\n[bold]Summary:[/bold] {len(installed)}/{len(manager.MODELS)} installed")
+    
+    if missing:
+        console.print(f"\n[yellow]Missing models:[/yellow] {', '.join(missing)}")
+        console.print("[dim]Run[/dim] [cyan]doorman models download[/cyan] [dim]to install them[/dim]\n")
+    else:
+        console.print("[green]✓ All models installed![/green]\n")
+
+
+@models_app.command("download")
+def models_download(
+    model: Optional[str] = typer.Argument(None, help="Specific model to download (or 'all')"),
+    force: bool = typer.Option(False, "--force", "-f", help="Re-download even if already installed")
+):
+    """Download ONNX models for face recognition"""
+    
+    manager = ModelManager(MODELS_DIR)
+    
+    # Check if we need root for creating models dir
+    try:
+        manager.ensure_models_dir()
+    except PermissionError:
+        console.print("[red]✗ Permission denied[/red]")
+        console.print("Run with sudo: [cyan]sudo doorman models download[/cyan]\n")
+        raise typer.Exit(1)
+    
+    # Determine what to download
+    if model is None or model == "all":
+        to_download = manager.get_missing_models() if not force else list(manager.MODELS.keys())
+        if not to_download:
+            console.print("[green]✓ All models already installed[/green]")
+            console.print("Use [cyan]--force[/cyan] to re-download\n")
+            return
+    else:
+        if model not in manager.MODELS:
+            console.print(f"[red]✗ Unknown model:[/red] {model}")
+            console.print(f"Available: {', '.join(manager.MODELS.keys())}\n")
+            raise typer.Exit(1)
+        to_download = [model]
+        if manager.is_model_installed(model) and not force:
+            console.print(f"[yellow]Model '{model}' already installed[/yellow]")
+            console.print("Use [cyan]--force[/cyan] to re-download\n")
+            return
+    
+    console.print(f"\n[bold cyan]Downloading {len(to_download)} model(s)...[/bold cyan]\n")
+    
+    success_count = 0
+    for model_key in to_download:
+        model_info = manager.MODELS[model_key]
+        
+        console.print(f"[bold]{model_info.name}[/bold]")
+        console.print(f"  File: {model_info.filename}")
+        console.print(f"  Size: ~{model_info.size_mb:.1f} MB")
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            task = progress.add_task("Downloading...", total=None)
+            
+            def progress_callback(msg):
+                progress.update(task, description=msg)
+            
+            try:
+                manager.download_model(model_key, progress_callback)
+                console.print(f"[green]✓ {model_info.name} installed[/green]\n")
+                success_count += 1
+            except Exception as e:
+                console.print(f"[red]✗ Failed:[/red] {e}\n")
+    
+    console.print(f"[bold]Downloaded {success_count}/{len(to_download)} models[/bold]\n")
+
+
+@models_app.command("verify")
+def models_verify(
+    model: Optional[str] = typer.Argument(None, help="Specific model to verify (or 'all')")
+):
+    """Verify installed models are valid"""
+    
+    manager = ModelManager(MODELS_DIR)
+    
+    if model is None or model == "all":
+        to_verify = manager.get_installed_models()
+        if not to_verify:
+            console.print("[yellow]No models installed[/yellow]\n")
+            return
+    else:
+        if model not in manager.MODELS:
+            console.print(f"[red]✗ Unknown model:[/red] {model}\n")
+            raise typer.Exit(1)
+        if not manager.is_model_installed(model):
+            console.print(f"[red]✗ Model not installed:[/red] {model}\n")
+            raise typer.Exit(1)
+        to_verify = [model]
+    
+    console.print(f"\n[bold cyan]Verifying {len(to_verify)} model(s)...[/bold cyan]\n")
+    
+    all_valid = True
+    for model_key in to_verify:
+        model_info = manager.MODELS[model_key]
+        is_valid, message = manager.verify_model(model_key)
+        
+        status = "[green]✓[/green]" if is_valid else "[red]✗[/red]"
+        console.print(f"{status} {model_info.name}: {message}")
+        
+        if not is_valid:
+            all_valid = False
+    
+    console.print()
+    if all_valid:
+        console.print("[green]✓ All models verified successfully[/green]\n")
+    else:
+        console.print("[red]✗ Some models failed verification[/red]")
+        console.print("Run [cyan]doorman models download --force[/cyan] to re-download\n")
+        raise typer.Exit(1)
+
+
+@models_app.command("remove")
+def models_remove(
+    model: str = typer.Argument(..., help="Model to remove"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation")
+):
+    """Remove an installed model"""
+    
+    manager = ModelManager(MODELS_DIR)
+    
+    if model not in manager.MODELS:
+        console.print(f"[red]✗ Unknown model:[/red] {model}")
+        console.print(f"Available: {', '.join(manager.MODELS.keys())}\n")
+        raise typer.Exit(1)
+    
+    if not manager.is_model_installed(model):
+        console.print(f"[yellow]Model '{model}' not installed[/yellow]\n")
+        return
+    
+    model_info = manager.MODELS[model]
+    
+    if not yes:
+        confirm = typer.confirm(f"Remove {model_info.name} ({model_info.filename})?")
+        if not confirm:
+            console.print("Cancelled\n")
+            return
+    
+    try:
+        manager.remove_model(model)
+        console.print(f"[green]✓ Removed {model_info.name}[/green]\n")
+    except Exception as e:
+        console.print(f"[red]✗ Failed to remove:[/red] {e}\n")
+        raise typer.Exit(1)
+
+
+@models_app.command("info")
+def models_info():
+    """Show detailed information about model requirements"""
+    
+    info_text = """
+[bold cyan]Doorman Model Requirements[/bold cyan]
+
+Doorman requires 3 ONNX models for face authentication:
+
+[bold]1. Face Detection (blazeface.onnx)[/bold]
+   • Detects faces in camera frames
+   • Based on BlazeFace/UltraFace architecture
+   • Input: RGB image (any size)
+   • Output: Face bounding boxes and confidence scores
+
+[bold]2. Liveness Detection (liveness.onnx)[/bold]
+   • Anti-spoofing: detects if face is real or fake (photo/video)
+   • Prevents authentication with printed photos or screens
+   • Input: Cropped face region (80x80 or 224x224)
+   • Output: Real vs Fake classification score
+
+[bold]3. Face Recognition (mobilefacenet.onnx)[/bold]
+   • Extracts unique face embeddings (512-dimensional vectors)
+   • Used to compare and identify faces
+   • Based on MobileFaceNet or ArcFace architecture
+   • Input: Normalized face region (112x112 or 224x224)
+   • Output: Feature embedding vector
+
+[bold yellow]Model Sources:[/bold yellow]
+• ONNX Model Zoo: https://github.com/onnx/models
+• Silent Face Anti-Spoofing: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
+• ArcFace/InsightFace: https://github.com/deepinsight/insightface
+
+[bold green]Quick Start:[/bold green]
+[cyan]doorman models download[/cyan]  # Download all models
+[cyan]doorman models list[/cyan]      # Check installation status
+[cyan]doorman models verify[/cyan]    # Verify model integrity
+"""
+    
+    console.print(Panel(info_text, expand=False))
 
 
 if __name__ == "__main__":
