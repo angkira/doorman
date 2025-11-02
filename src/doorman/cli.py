@@ -418,6 +418,41 @@ def test(
 
 
 @app.command()
+def preview():
+    """
+    Live camera preview with face detection visualization
+    """
+    console.print("\n[bold cyan]Starting camera preview...[/bold cyan]")
+    console.print("[yellow]Shows:[/yellow]")
+    console.print("  • Live camera feed")
+    console.print("  • Face detection status (green = detected, red = not detected)")
+    console.print("  • Frame processing time")
+    console.print("  • FPS counter")
+    console.print("\n[dim]Press 'q' or ESC to quit[/dim]\n")
+    
+    # Find doorman-preview binary
+    preview_bin = shutil.which("doorman-preview")
+    if not preview_bin:
+        # Try in project directory
+        project_root = Path(__file__).parent.parent.parent
+        preview_bin = project_root / "target/release/doorman-preview"
+        if not preview_bin.exists():
+            console.print("[red]Error:[/red] doorman-preview binary not found")
+            console.print("[yellow]Build it with:[/yellow] cargo build --release --features backend-tract,video")
+            raise typer.Exit(1)
+    
+    try:
+        result = subprocess.run([str(preview_bin)], check=True)
+        if result.returncode != 0:
+            raise typer.Exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Preview interrupted[/yellow]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"\n[red]Preview failed:[/red] {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
 def remove(
     username: str = typer.Argument(..., help="Username to remove"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),

@@ -65,6 +65,15 @@ cp "$SCRIPT_DIR/target/release/doormand" /usr/local/bin/
 chmod 755 /usr/local/bin/doormand
 echo "✅ Daemon installed to /usr/local/bin/doormand"
 
+# Copy preview tool (optional)
+if [ -f "$SCRIPT_DIR/target/release/doorman-preview" ]; then
+    cp "$SCRIPT_DIR/target/release/doorman-preview" /usr/local/bin/
+    chmod 755 /usr/local/bin/doorman-preview
+    echo "✅ Preview tool installed to /usr/local/bin/doorman-preview"
+else
+    echo "⚠️  Preview tool not built (optional)"
+fi
+
 # Install systemd service
 echo "📋 Installing systemd service..."
 cp doormand.service "$SYSTEMD_DIR/"

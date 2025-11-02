@@ -8,7 +8,9 @@ sudo apt install -y \
     clang \
     libclang-dev \
     libpam0g-dev \
-    pkg-config
+    pkg-config \
+    libopencv-dev \
+    opencv-data
 
 echo ""
 echo "✅ Dependencies installed!"
