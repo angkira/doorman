@@ -260,13 +260,10 @@ WantedBy=multi-user.target
     console.print(Panel.fit(
         "[bold green]Setup Complete! 🎉[/bold green]\n\n"
         "Next steps:\n"
-        "1. Download ONNX models to: [cyan]/var/lib/doorman/models/[/cyan]\n"
-        "   • blazeface.onnx\n"
-        "   • liveness.onnx\n"
-        "   • mobilefacenet.onnx\n\n"
-        "2. Enroll your face: [cyan]sudo doorman enroll[/cyan]\n\n"
+        "1. Download models: [cyan]doorman models download[/cyan]\n\n"
+        "2. Enroll your face: [cyan]doorman enroll[/cyan]\n\n"
         "3. Test: Lock your screen and use your face to unlock!\n\n"
-        "[yellow]Note:[/yellow] See README.md for model download links.",
+        "[yellow]Tip:[/yellow] Run [cyan]doorman status[/cyan] to check daemon health",
         title="✅ Success",
         border_style="green"
     ))
@@ -279,13 +276,16 @@ def enroll(
     """
     Enroll a user's face for authentication
     """
-    if not is_root():
-        console.print("[red]Error:[/red] Enrollment must be run as root (use sudo)")
-        raise typer.Exit(1)
-    
     # Get username
     if username is None:
-        username = os.getenv("SUDO_USER") or os.getenv("USER") or "unknown"
+        username = os.getenv("USER") or "unknown"
+    
+    # Security: users can only enroll themselves (unless root)
+    current_user = os.getenv("USER")
+    if not is_root() and username != current_user:
+        console.print(f"[red]Error:[/red] You can only enroll yourself ({current_user})")
+        console.print("To enroll other users, use: [cyan]sudo doorman enroll <username>[/cyan]")
+        raise typer.Exit(1)
     
     console.print(f"\n[bold]Enrolling user:[/bold] [cyan]{username}[/cyan]")
     console.print("[yellow]Look at the camera and remain still...[/yellow]\n")
@@ -389,11 +389,77 @@ def remove(
 
 
 @app.command()
+def start():
+    """
+    Start the doorman daemon
+    """
+    if not is_root():
+        console.print("[red]Error:[/red] Starting daemon requires root (use sudo)")
+        raise typer.Exit(1)
+    
+    result = subprocess.run(
+        ["systemctl", "start", "doormand.service"],
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode == 0:
+        console.print("[green]✓ Daemon started[/green]")
+    else:
+        console.print(f"[red]✗ Failed to start daemon[/red]\n{result.stderr}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def stop():
+    """
+    Stop the doorman daemon
+    """
+    if not is_root():
+        console.print("[red]Error:[/red] Stopping daemon requires root (use sudo)")
+        raise typer.Exit(1)
+    
+    result = subprocess.run(
+        ["systemctl", "stop", "doormand.service"],
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode == 0:
+        console.print("[green]✓ Daemon stopped[/green]")
+    else:
+        console.print(f"[red]✗ Failed to stop daemon[/red]\n{result.stderr}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def restart():
+    """
+    Restart the doorman daemon
+    """
+    if not is_root():
+        console.print("[red]Error:[/red] Restarting daemon requires root (use sudo)")
+        raise typer.Exit(1)
+    
+    result = subprocess.run(
+        ["systemctl", "restart", "doormand.service"],
+        capture_output=True,
+        text=True,
+    )
+    
+    if result.returncode == 0:
+        console.print("[green]✓ Daemon restarted[/green]")
+    else:
+        console.print(f"[red]✗ Failed to restart daemon[/red]\n{result.stderr}")
+        raise typer.Exit(1)
+
+
+@app.command()
 def status():
     """
     Show daemon status
     """
-    # Check systemd status
+    # Check systemd status (doesn't require root)
     result = subprocess.run(
         ["systemctl", "is-active", "doormand.service"],
         capture_output=True,
@@ -407,7 +473,7 @@ def status():
     
     if not systemd_active:
         console.print("\n[yellow]Daemon is not running.[/yellow]")
-        console.print("Start it with: [cyan]sudo systemctl start doormand[/cyan]\n")
+        console.print("Start it with: [cyan]sudo doorman start[/cyan]\n")
         return
     
     # Get daemon info

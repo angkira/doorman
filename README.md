@@ -35,10 +35,22 @@ Download from:
 ## Usage
 
 ```bash
-sudo doorman enroll              # Add your face
-sudo doorman list                # Show enrolled users
-sudo doorman remove username     # Remove user
-sudo doorman status              # Check daemon
+# Daemon management (requires sudo)
+sudo doorman start               # Start daemon
+sudo doorman stop                # Stop daemon
+sudo doorman restart             # Restart daemon
+doorman status                   # Check status (no sudo needed)
+
+# User management
+doorman enroll                   # Enroll yourself
+doorman list                     # Show enrolled users
+sudo doorman enroll <username>   # Enroll another user
+sudo doorman remove <username>   # Remove user
+
+# Model management
+doorman models list              # Show model status
+doorman models download          # Download missing models
+doorman models verify            # Verify models
 ```
 
 Lock screen (Meta+L) to test face unlock.
