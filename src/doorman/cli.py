@@ -508,12 +508,14 @@ app.add_typer(models_app)
 
 
 @models_app.command("list")
-def models_list():
+def models_list(
+    models_dir: Optional[str] = typer.Option(None, "--models-dir", help="Custom models directory")
+):
     """List all available models and their status"""
-    manager = ModelManager(MODELS_DIR)
+    manager = ModelManager(models_dir)
     
     console.print("\n[bold cyan]Doorman ONNX Models[/bold cyan]")
-    console.print(f"Location: [yellow]{MODELS_DIR}[/yellow]\n")
+    console.print(f"Location: [yellow]{manager.models_dir}[/yellow]\n")
     
     models = manager.list_models()
     
@@ -552,18 +554,19 @@ def models_list():
 @models_app.command("download")
 def models_download(
     model: Optional[str] = typer.Argument(None, help="Specific model to download (or 'all')"),
-    force: bool = typer.Option(False, "--force", "-f", help="Re-download even if already installed")
+    force: bool = typer.Option(False, "--force", "-f", help="Re-download even if already installed"),
+    models_dir: Optional[str] = typer.Option(None, "--models-dir", help="Custom models directory")
 ):
     """Download ONNX models for face recognition"""
     
-    manager = ModelManager(MODELS_DIR)
+    manager = ModelManager(models_dir)
     
     # Check if we need root for creating models dir
     try:
         manager.ensure_models_dir()
     except PermissionError:
-        console.print("[red]✗ Permission denied[/red]")
-        console.print("Run with sudo: [cyan]sudo doorman models download[/cyan]\n")
+        console.print(f"[red]✗ Permission denied:[/red] {manager.models_dir}")
+        console.print("Either run with sudo or use [cyan]--models-dir[/cyan] to specify a writable directory\n")
         raise typer.Exit(1)
     
     # Determine what to download
@@ -616,11 +619,12 @@ def models_download(
 
 @models_app.command("verify")
 def models_verify(
-    model: Optional[str] = typer.Argument(None, help="Specific model to verify (or 'all')")
+    model: Optional[str] = typer.Argument(None, help="Specific model to verify (or 'all')"),
+    models_dir: Optional[str] = typer.Option(None, "--models-dir", help="Custom models directory")
 ):
     """Verify installed models are valid"""
     
-    manager = ModelManager(MODELS_DIR)
+    manager = ModelManager(models_dir)
     
     if model is None or model == "all":
         to_verify = manager.get_installed_models()
@@ -661,11 +665,12 @@ def models_verify(
 @models_app.command("remove")
 def models_remove(
     model: str = typer.Argument(..., help="Model to remove"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation")
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    models_dir: Optional[str] = typer.Option(None, "--models-dir", help="Custom models directory")
 ):
     """Remove an installed model"""
     
-    manager = ModelManager(MODELS_DIR)
+    manager = ModelManager(models_dir)
     
     if model not in manager.MODELS:
         console.print(f"[red]✗ Unknown model:[/red] {model}")

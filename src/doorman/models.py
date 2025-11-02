@@ -24,6 +24,34 @@ class ModelInfo:
 class ModelManager:
     """Manages ONNX model downloads, installation, and verification."""
     
+    @staticmethod
+    def get_default_models_dir() -> Path:
+        """Get the default models directory based on context.
+        
+        Returns:
+            Path to models directory (local for dev, system for production)
+        """
+        import os
+        
+        system_dir = Path("/var/lib/doorman/models")
+        
+        # If running as root, always use system directory
+        if os.geteuid() == 0:
+            return system_dir
+        
+        # If system directory exists and we can write to it, use it
+        if system_dir.exists() and os.access(system_dir, os.W_OK):
+            return system_dir
+        
+        # For development, use local directory
+        # Try to find project root (where doorman.toml is)
+        project_root = Path(__file__).parent.parent.parent
+        if (project_root / "doorman.toml").exists():
+            return project_root / "data" / "models"
+        
+        # Fallback to current directory
+        return Path.cwd() / "data" / "models"
+    
     # Model registry - sources for downloading models
     MODELS = {
         "blazeface": ModelInfo(
@@ -37,10 +65,10 @@ class ModelManager:
         "liveness": ModelInfo(
             name="Liveness Detection",
             filename="liveness.onnx",
-            url="https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/releases/download/v2.0.0/2.7_80x80_MiniFASNetV2.onnx",
+            url="",  # TODO: Find reliable source or train custom model
             sha256="",
             size_mb=0.5,
-            description="Anti-spoofing liveness detection"
+            description="Anti-spoofing liveness detection (manual installation required)"
         ),
         "mobilefacenet": ModelInfo(
             name="MobileFaceNet",
@@ -52,13 +80,16 @@ class ModelManager:
         ),
     }
     
-    def __init__(self, models_dir: str = "/var/lib/doorman/models"):
+    def __init__(self, models_dir: Optional[str] = None):
         """Initialize model manager.
         
         Args:
-            models_dir: Directory to store models
+            models_dir: Directory to store models (defaults to auto-detected location)
         """
-        self.models_dir = Path(models_dir)
+        if models_dir is None:
+            self.models_dir = self.get_default_models_dir()
+        else:
+            self.models_dir = Path(models_dir)
         
     def ensure_models_dir(self) -> None:
         """Create models directory if it doesn't exist."""
@@ -113,6 +144,14 @@ class ModelManager:
             raise KeyError(f"Unknown model: {model_key}")
         
         model_info = self.MODELS[model_key]
+        
+        # Check if URL is available
+        if not model_info.url:
+            raise Exception(
+                f"{model_info.name} requires manual installation. "
+                f"Place the ONNX file at: {self.models_dir / model_info.filename}"
+            )
+        
         self.ensure_models_dir()
         
         # Download to temporary file first
