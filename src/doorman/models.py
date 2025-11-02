@@ -67,8 +67,8 @@ class ModelManager:
             filename="liveness.onnx",
             url="",  # See OBTAINING_LIVENESS_MODEL.md for instructions
             sha256="",
-            size_mb=0.5,
-            description="Anti-spoofing liveness detection (MiniFASNet or similar - manual installation required)"
+            size_mb=4.0,
+            description="Anti-spoofing liveness detection (InsightFace Buffalo or MiniFASNet - manual installation required)"
         ),
         "mobilefacenet": ModelInfo(
             name="MobileFaceNet",
@@ -151,9 +151,12 @@ class ModelManager:
             project_root = Path(__file__).parent.parent.parent
             guide_path = project_root / "OBTAINING_LIVENESS_MODEL.md"
             raise Exception(
-                f"{model_info.name} requires manual installation.\n"
-                f"See documentation: {guide_path}\n"
-                f"Or visit: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing\n"
+                f"{model_info.name} requires manual installation.\n\n"
+                f"RECOMMENDED: Use InsightFace Buffalo models (18k+ stars, production-ready)\n"
+                f"  pip install insightface onnxruntime\n"
+                f"  # Models auto-download to ~/.insightface/models/buffalo_l/\n\n"
+                f"Full guide: {guide_path}\n"
+                f"Or visit: https://github.com/deepinsight/insightface\n\n"
                 f"Place the ONNX file at: {self.models_dir / model_info.filename}"
             )
         

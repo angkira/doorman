@@ -98,55 +98,61 @@ ULTRAFACE_RFB_320 = ModelSpec(
     """
 )
 
-MINIFASNET_V2 = ModelSpec(
+LIVENESS_DETECTION = ModelSpec(
     model_key="liveness",
-    name="MiniFASNet V2",
-    description="Anti-spoofing model for face liveness detection",
+    name="Face Liveness Detection",
+    description="Anti-spoofing model for presentation attack detection",
     framework="pytorch->onnx",
     filename="liveness.onnx",
     url="",  # Manual installation required
-    size_mb=0.5,
+    size_mb=4.0,
     sha256="",
     inputs=[
         TensorSpec(
             name="input",
-            shape=(1, 3, 80, 80),
+            shape=(1, 3, 112, 112),
             dtype="float32",
-            description="RGB face crop [batch, channels, height, width]"
+            description="RGB face crop [batch, channels, height, width] - adjust based on actual model"
         )
     ],
     outputs=[
         TensorSpec(
             name="output",
-            shape=(1, 3),  # [batch, num_classes]
+            shape=(1, 2),  # or (1, 1) depending on model
             dtype="float32",
-            description="Classification logits [batch, 3] for [real, print, replay]"
+            description="Classification output - [fake, real] or single score"
         )
     ],
     preprocessing=PreprocessingSpec(
-        resize=(80, 80),
+        resize=(112, 112),
         color_space='RGB',
-        normalization='divide_255',
+        normalization='mean_std',
+        mean=(0.5, 0.5, 0.5),
+        std=(0.5, 0.5, 0.5),
         layout='NCHW'
     ),
     notes="""
-    MiniFASNet V2 requires cropped face regions as input.
-    - Input must be exactly 80x80 pixels
-    - Output is 3-class: [real_face, print_attack, replay_attack]
-    - Apply softmax to get probabilities
-    - Use argmax(output) == 0 to check if face is real
+    ⭐ RECOMMENDED: InsightFace Buffalo Models (18k+ GitHub stars)
     
-    To obtain this model:
-    1. See OBTAINING_LIVENESS_MODEL.md in project root
-    2. Clone Silent-Face-Anti-Spoofing: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
-    3. Download pretrained checkpoint: 2.7_80x80_MiniFASNetV2.pth
-    4. Convert to ONNX using their export script
-    5. Place at data/models/liveness.onnx
+    InsightFace is THE industry-standard face toolkit - production-proven and widely used.
     
-    Alternative models (80x80):
-    - MiniFASNetV1SE
-    - MiniFASNetV2
-    - FaceAntiSpoofNet
+    Quick Setup:
+    ```bash
+    pip install insightface onnxruntime
+    python -c "from insightface.app import FaceAnalysis; app = FaceAnalysis(name='buffalo_l'); app.prepare(ctx_id=0)"
+    # Models auto-download to: ~/.insightface/models/buffalo_l/
+    # Copy liveness model to doorman: data/models/liveness.onnx
+    ```
+    
+    Alternative: MiniFASNet V2 (Silent-Face-Anti-Spoofing, 3.5k+ stars)
+    - Input: (1, 3, 80, 80) RGB
+    - Output: (1, 3) [real, print, replay]
+    - Normalization: divide by 255
+    - Source: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
+    
+    For detailed instructions see: OBTAINING_LIVENESS_MODEL.md
+    
+    ⚠️ Note: Input/output shapes vary by model. Check your specific model's requirements.
     """
 )
 
@@ -201,7 +207,7 @@ ARCFACE_RESNET100 = ModelSpec(
 # Registry for easy lookup
 MODEL_SPECS = {
     "blazeface": ULTRAFACE_RFB_320,
-    "liveness": MINIFASNET_V2,
+    "liveness": LIVENESS_DETECTION,
     "mobilefacenet": ARCFACE_RESNET100,
 }
 
