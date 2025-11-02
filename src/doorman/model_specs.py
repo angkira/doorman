@@ -104,7 +104,7 @@ MINIFASNET_V2 = ModelSpec(
     description="Anti-spoofing model for face liveness detection",
     framework="pytorch->onnx",
     filename="liveness.onnx",
-    url="",  # No reliable public source currently
+    url="",  # Manual installation required
     size_mb=0.5,
     sha256="",
     inputs=[
@@ -120,7 +120,7 @@ MINIFASNET_V2 = ModelSpec(
             name="output",
             shape=(1, 3),  # [batch, num_classes]
             dtype="float32",
-            description="Classification logits [batch, 3] for [real, fake_print, fake_replay]"
+            description="Classification logits [batch, 3] for [real, print, replay]"
         )
     ],
     preprocessing=PreprocessingSpec(
@@ -136,14 +136,17 @@ MINIFASNET_V2 = ModelSpec(
     - Apply softmax to get probabilities
     - Use argmax(output) == 0 to check if face is real
     
+    To obtain this model:
+    1. See OBTAINING_LIVENESS_MODEL.md in project root
+    2. Clone Silent-Face-Anti-Spoofing: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
+    3. Download pretrained checkpoint: 2.7_80x80_MiniFASNetV2.pth
+    4. Convert to ONNX using their export script
+    5. Place at data/models/liveness.onnx
+    
     Alternative models (80x80):
     - MiniFASNetV1SE
     - MiniFASNetV2
-    
-    To obtain model:
-    1. Clone: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing
-    2. Convert checkpoint to ONNX using provided scripts
-    3. Or download from releases if available
+    - FaceAntiSpoofNet
     """
 )
 

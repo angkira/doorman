@@ -65,10 +65,10 @@ class ModelManager:
         "liveness": ModelInfo(
             name="Liveness Detection",
             filename="liveness.onnx",
-            url="",  # TODO: Find reliable source or train custom model
+            url="",  # See OBTAINING_LIVENESS_MODEL.md for instructions
             sha256="",
             size_mb=0.5,
-            description="Anti-spoofing liveness detection (manual installation required)"
+            description="Anti-spoofing liveness detection (MiniFASNet or similar - manual installation required)"
         ),
         "mobilefacenet": ModelInfo(
             name="MobileFaceNet",
@@ -147,8 +147,13 @@ class ModelManager:
         
         # Check if URL is available
         if not model_info.url:
+            from pathlib import Path
+            project_root = Path(__file__).parent.parent.parent
+            guide_path = project_root / "OBTAINING_LIVENESS_MODEL.md"
             raise Exception(
-                f"{model_info.name} requires manual installation. "
+                f"{model_info.name} requires manual installation.\n"
+                f"See documentation: {guide_path}\n"
+                f"Or visit: https://github.com/minivision-ai/Silent-Face-Anti-Spoofing\n"
                 f"Place the ONNX file at: {self.models_dir / model_info.filename}"
             )
         

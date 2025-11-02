@@ -737,7 +737,6 @@ Doorman requires 3 ONNX models for face authentication:
 [cyan]doorman models list[/cyan]             # Check installation status
 [cyan]doorman models verify[/cyan]           # Verify model integrity
 [cyan]doorman models spec <model>[/cyan]     # Show detailed specifications
-[cyan]doorman models create-dummy[/cyan]     # Create dummy liveness model for testing
 """
     
     console.print(Panel(info_text, expand=False))
@@ -758,68 +757,6 @@ def models_spec(
     console.print(f"\n[bold cyan]Model Specification: {model}[/bold cyan]\n")
     console.print(spec_text)
     console.print()
-
-
-@models_app.command("create-dummy")
-def models_create_dummy(
-    models_dir: Optional[str] = typer.Option(None, "--models-dir", help="Custom models directory")
-):
-    """Create a dummy liveness model for testing (requires PyTorch)"""
-    
-    manager = ModelManager(models_dir)
-    output_path = manager.models_dir / "liveness.onnx"
-    
-    # Check if already exists
-    if output_path.exists():
-        console.print(f"[yellow]⚠ Liveness model already exists:[/yellow] {output_path}")
-        if not typer.confirm("Overwrite?"):
-            console.print("Cancelled\n")
-            return
-    
-    # Check for PyTorch
-    try:
-        import torch
-    except ImportError:
-        console.print("[red]✗ PyTorch is required to create dummy model[/red]")
-        console.print("\nInstall it with:")
-        console.print("[cyan]  pip install torch[/cyan]")
-        console.print("\nOr use conda:")
-        console.print("[cyan]  conda install pytorch -c pytorch[/cyan]\n")
-        raise typer.Exit(1)
-    
-    console.print(f"\n[bold cyan]Creating Dummy Liveness Model[/bold cyan]\n")
-    console.print(f"Output: {output_path}\n")
-    
-    try:
-        # Run the creation script
-        import subprocess
-        script_path = Path(__file__).parent.parent.parent / "tools" / "create_dummy_liveness.py"
-        
-        if not script_path.exists():
-            console.print(f"[red]✗ Creation script not found:[/red] {script_path}\n")
-            raise typer.Exit(1)
-        
-        result = subprocess.run(
-            [sys.executable, str(script_path), str(output_path)],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            console.print(result.stdout)
-            console.print("[green]✓ Dummy model created successfully![/green]\n")
-            console.print("[bold yellow]⚠  WARNING:[/bold yellow] This is a DUMMY model!")
-            console.print("   - Always classifies faces as 'real'")
-            console.print("   - For testing only, NOT for production")
-            console.print("   - No actual anti-spoofing protection\n")
-        else:
-            console.print(f"[red]✗ Failed to create model:[/red]")
-            console.print(result.stderr)
-            raise typer.Exit(1)
-            
-    except Exception as e:
-        console.print(f"[red]✗ Error:[/red] {e}\n")
-        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
