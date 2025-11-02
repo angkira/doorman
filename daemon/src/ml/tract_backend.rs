@@ -9,14 +9,16 @@ use image::{DynamicImage, GenericImageView};
 #[cfg(feature = "backend-tract")]
 use std::path::Path;
 #[cfg(feature = "backend-tract")]
+use tract_onnx::prelude::*;
+#[cfg(feature = "backend-tract")]
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "backend-tract")]
 /// Tract-based ML backend (pure Rust, no external deps)
 pub struct TractBackend {
-    detector: Option<tract_onnx::prelude::TypedModel>,
-    liveness: Option<tract_onnx::prelude::TypedModel>,
-    recognizer: Option<tract_onnx::prelude::TypedModel>,
+    detector: Option<tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>>,
+    liveness: Option<tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>>,
+    recognizer: Option<tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>>,
 }
 
 #[cfg(feature = "backend-tract")]
@@ -42,9 +44,7 @@ impl TractBackend {
         })
     }
     
-    fn load_model(path: &Path) -> Result<tract_onnx::prelude::TypedModel> {
-        use tract_onnx::prelude::*;
-        
+    fn load_model(path: &Path) -> Result<tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>> {
         debug!("Loading model with Tract: {:?}", path);
         
         let model = tract_onnx::onnx()
@@ -102,13 +102,11 @@ impl MLBackend for TractBackend {
         let result = detector.run(tvec![tensor.into()])?;
         
         // Parse outputs (boxes, scores)
-        let boxes = result[0]
-            .to_array_view::<f32>()?
-            .as_slice()
+        let boxes_view = result[0].to_array_view::<f32>()?;
+        let boxes = boxes_view.as_slice()
             .ok_or_else(|| anyhow!("Failed to get boxes"))?;
-        let scores = result[1]
-            .to_array_view::<f32>()?
-            .as_slice()
+        let scores_view = result[1].to_array_view::<f32>()?;
+        let scores = scores_view.as_slice()
             .ok_or_else(|| anyhow!("Failed to get scores"))?;
         
         // Find best detection
@@ -159,9 +157,8 @@ impl MLBackend for TractBackend {
         let tensor = self.image_to_tensor(&face_crop, 224, 224, true);
         let result = liveness.run(tvec![tensor.into()])?;
         
-        let scores = result[0]
-            .to_array_view::<f32>()?
-            .as_slice()
+        let scores_view = result[0].to_array_view::<f32>()?;
+        let scores = scores_view.as_slice()
             .ok_or_else(|| anyhow!("Failed to get liveness scores"))?;
         
         let real_score = scores[1];

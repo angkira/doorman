@@ -4,12 +4,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+// PAM return codes (standard values)
+const PAM_SUCCESS: libc::c_int = 0;
+const PAM_AUTH_ERR: libc::c_int = 9;
+const PAM_USER_UNKNOWN: libc::c_int = 10;
+
 /// Connect to daemon and send authentication request
 fn authenticate_user(username: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let socket = UnixStream::connect_timeout(
-        &std::os::unix::net::SocketAddr::from_pathname(SOCKET_PATH)?,
-        Duration::from_secs(AUTH_TIMEOUT_SECS),
-    )?;
+    let socket = UnixStream::connect(SOCKET_PATH)?;
     
     socket.set_read_timeout(Some(Duration::from_secs(AUTH_TIMEOUT_SECS)))?;
     socket.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -38,47 +40,47 @@ fn authenticate_user(username: &str) -> Result<bool, Box<dyn std::error::Error>>
 
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
-    pamh: *mut pam_sys::pam_handle_t,
-    _flags: i32,
-    _argc: i32,
-    _argv: *const *const i8,
-) -> i32 {
+    pamh: *mut pam_sys::PamHandle,
+    _flags: libc::c_int,
+    _argc: libc::c_int,
+    _argv: *const *const libc::c_char,
+) -> libc::c_int {
     unsafe {
-        let mut user: *const i8 = std::ptr::null();
-        let ret = pam_sys::pam_get_user(pamh, &mut user, std::ptr::null());
+        let mut user: *const libc::c_char = std::ptr::null();
+        let ret = pam_sys::raw::pam_get_user(pamh, &mut user, std::ptr::null());
         
-        if ret != pam_sys::PAM_SUCCESS as i32 {
-            return pam_sys::PAM_AUTH_ERR as i32;
+        if ret != PAM_SUCCESS {
+            return PAM_AUTH_ERR;
         }
         
         if user.is_null() {
-            return pam_sys::PAM_USER_UNKNOWN as i32;
+            return PAM_USER_UNKNOWN;
         }
         
         let username = match CStr::from_ptr(user).to_str() {
             Ok(s) => s,
-            Err(_) => return pam_sys::PAM_AUTH_ERR as i32,
+            Err(_) => return PAM_AUTH_ERR,
         };
         
         // Skip root
         if username == "root" {
-            return pam_sys::PAM_AUTH_ERR as i32;
+            return PAM_AUTH_ERR;
         }
         
         match authenticate_user(username) {
-            Ok(true) => pam_sys::PAM_SUCCESS as i32,
-            Ok(false) => pam_sys::PAM_AUTH_ERR as i32,
-            Err(_) => pam_sys::PAM_AUTH_ERR as i32,
+            Ok(true) => PAM_SUCCESS,
+            Ok(false) => PAM_AUTH_ERR,
+            Err(_) => PAM_AUTH_ERR,
         }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn pam_sm_setcred(
-    _pamh: *mut pam_sys::pam_handle_t,
-    _flags: i32,
-    _argc: i32,
-    _argv: *const *const i8,
-) -> i32 {
-    pam_sys::PAM_SUCCESS as i32
+    _pamh: *mut pam_sys::PamHandle,
+    _flags: libc::c_int,
+    _argc: libc::c_int,
+    _argv: *const *const libc::c_char,
+) -> libc::c_int {
+    PAM_SUCCESS
 }

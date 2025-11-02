@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 doorman-shared = { path = "../shared" }
-pam-sys = "1.0.0-alpha5"
+pam-sys = "0.5"
 serde_json = { workspace = true }
 libc = "0.2"
 

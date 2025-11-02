@@ -19,14 +19,15 @@ impl Camera {
         
         // Request specific resolution from config
         let requested = RequestedFormat::new::<RgbFormat>(
-            RequestedFormatType::Closest(Resolution::new(
-                config.camera.width,
-                config.camera.height,
-            ))
+            RequestedFormatType::AbsoluteHighestResolution
         );
 
-        let camera = NokhwaCamera::new(index, requested)
+        let mut camera = NokhwaCamera::new(index, requested)
             .context("Failed to open camera")?;
+            
+        // Try to set the requested resolution
+        let resolution = Resolution::new(config.camera.width, config.camera.height);
+        let _ = camera.set_resolution(resolution);
 
         info!(
             "Camera opened: {}x{} @ {}fps",
@@ -38,7 +39,7 @@ impl Camera {
     
     /// Initialize with defaults
     pub async fn new() -> Result<Self> {
-        Self::new_with_config(&Config::default())
+        Self::new_with_config(&Config::default()).await
     }
 
     /// Capture a frame from the camera

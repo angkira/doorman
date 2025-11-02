@@ -5,6 +5,7 @@
 ```bash
 sudo apt install -y \
     build-essential \
+    clang \
     libclang-dev \
     libpam0g-dev \
     pkg-config

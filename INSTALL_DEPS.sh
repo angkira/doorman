@@ -5,6 +5,7 @@ echo "Installing build dependencies..."
 sudo apt update
 sudo apt install -y \
     build-essential \
+    clang \
     libclang-dev \
     libpam0g-dev \
     pkg-config

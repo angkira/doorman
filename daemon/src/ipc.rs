@@ -30,12 +30,9 @@ pub async fn run_server(state: DaemonState) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state).await {
-                        error!("Connection error: {}", e);
-                    }
-                });
+                if let Err(e) = handle_connection(stream, state.clone()).await {
+                    error!("Connection error: {}", e);
+                }
             }
             Err(e) => {
                 error!("Accept error: {}", e);
@@ -97,21 +94,22 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     };
     drop(storage);
 
-    // Get camera
-    let mut camera_lock = state.camera.write().await;
-    let camera = match camera_lock.as_mut() {
-        Some(cam) => cam,
-        None => {
-            error!("Camera not available");
-            return Response::Failure {
-                reason: "Camera not available".to_string(),
-            };
-        }
-    };
+    // Get camera and capture frames
+    let frames = {
+        let mut camera_lock = state.camera.write().await;
+        let camera = match camera_lock.as_mut() {
+            Some(cam) => cam,
+            None => {
+                error!("Camera not available");
+                return Response::Failure {
+                    reason: "Camera not available".to_string(),
+                };
+            }
+        };
 
-    // Capture and process frames
-    let frames = camera.capture_frames(AUTH_FRAMES);
-    drop(camera_lock);
+        // Capture frames before dropping the lock
+        camera.capture_frames(AUTH_FRAMES)
+    }; // Lock is dropped here
 
     if frames.is_empty() {
         error!("Failed to capture any frames");
@@ -164,22 +162,23 @@ async fn handle_enroll(
 ) -> Response {
     info!("Enrollment request for user: {}", username);
 
-    // Get camera
-    let mut camera_lock = state.camera.write().await;
-    let camera = match camera_lock.as_mut() {
-        Some(cam) => cam,
-        None => {
-            error!("Camera not available");
-            return Response::Failure {
-                reason: "Camera not available".to_string(),
-            };
-        }
-    };
-
-    // Capture frames
+    // Get camera and capture frames
     info!("Capturing {} frames for enrollment...", ENROLL_FRAMES);
-    let frames = camera.capture_frames(ENROLL_FRAMES);
-    drop(camera_lock);
+    let frames = {
+        let mut camera_lock = state.camera.write().await;
+        let camera = match camera_lock.as_mut() {
+            Some(cam) => cam,
+            None => {
+                error!("Camera not available");
+                return Response::Failure {
+                    reason: "Camera not available".to_string(),
+                };
+            }
+        };
+
+        // Capture frames before dropping the lock
+        camera.capture_frames(ENROLL_FRAMES)
+    }; // Lock is dropped here
 
     if frames.is_empty() {
         error!("Failed to capture any frames");

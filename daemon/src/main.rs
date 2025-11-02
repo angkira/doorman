@@ -6,6 +6,7 @@ mod video;
 
 use anyhow::Result;
 use doorman_shared::Config;
+use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, error, warn};
@@ -19,6 +20,10 @@ pub struct DaemonState {
     pub start_time: std::time::Instant,
     pub config: Arc<Config>,
 }
+
+// Safety: All fields are wrapped in Arc/RwLock making them thread-safe
+unsafe impl Send for DaemonState {}
+unsafe impl Sync for DaemonState {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -91,17 +96,14 @@ async fn main() -> Result<()> {
 
     // Start IPC server
     info!("Starting IPC server...");
-    let server_task = tokio::spawn(ipc::run_server(state.clone()));
-
     info!("doorman daemon running");
 
-    // Wait for either server to finish or signal
+    // Run server (handles shutdown gracefully on error)
     tokio::select! {
-        result = server_task => {
+        result = ipc::run_server(state.clone()) => {
             match result {
-                Ok(Ok(())) => info!("IPC server shut down normally"),
-                Ok(Err(e)) => error!("IPC server error: {}", e),
-                Err(e) => error!("IPC server task panicked: {}", e),
+                Ok(()) => info!("IPC server shut down normally"),
+                Err(e) => error!("IPC server error: {}", e),
             }
         }
         _ = signal_task => {
