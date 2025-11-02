@@ -5,8 +5,15 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PAM_LIB_DIR="/usr/lib/security"
 SYSTEMD_DIR="/etc/systemd/system"
+
+# Detect PAM module directory
+PAM_LIB_DIR=$(find /lib /usr/lib -name "pam_unix.so" 2>/dev/null | head -1 | xargs dirname)
+if [ -z "$PAM_LIB_DIR" ]; then
+    echo "❌ Could not find PAM modules directory"
+    exit 1
+fi
+echo "Detected PAM directory: $PAM_LIB_DIR"
 
 echo "🔧 Installing Doorman Face Unlock System..."
 echo
