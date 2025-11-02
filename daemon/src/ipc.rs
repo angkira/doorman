@@ -1,4 +1,5 @@
 use crate::DaemonState;
+use crate::camera::Camera;
 use anyhow::{Context, Result};
 use doorman_shared::{
     Request, Response, ResponseData, DaemonInfo, SOCKET_PATH, 
@@ -78,6 +79,41 @@ async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()>
     Ok(())
 }
 
+/// Attempt to ensure camera is available, reinitializing if needed
+async fn ensure_camera_available(state: &DaemonState) -> Result<(), String> {
+    const MAX_RETRIES: usize = 3;
+    const RETRY_DELAY_MS: u64 = 500;
+    
+    for attempt in 1..=MAX_RETRIES {
+        let mut camera_lock = state.camera.write().await;
+        
+        // Check if camera is already available
+        if camera_lock.is_some() {
+            return Ok(());
+        }
+        
+        // Try to initialize camera
+        info!("Camera not available, attempting to initialize (attempt {}/{})", attempt, MAX_RETRIES);
+        match Camera::new_with_config(&state.config).await {
+            Ok(camera) => {
+                info!("Successfully initialized camera on attempt {}", attempt);
+                *camera_lock = Some(camera);
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Failed to initialize camera (attempt {}): {}", attempt, e);
+                drop(camera_lock); // Release lock before sleeping
+                
+                if attempt < MAX_RETRIES {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                }
+            }
+        }
+    }
+    
+    Err(format!("Camera not available after {} attempts. Please connect camera and try again.", MAX_RETRIES))
+}
+
 async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     info!("Authentication request for user: {}", username);
 
@@ -94,18 +130,18 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     };
     drop(storage);
 
+    // Ensure camera is available (with retry logic)
+    if let Err(err_msg) = ensure_camera_available(state).await {
+        error!("{}", err_msg);
+        return Response::Failure {
+            reason: err_msg,
+        };
+    }
+
     // Get camera and capture frames
     let frames = {
         let mut camera_lock = state.camera.write().await;
-        let camera = match camera_lock.as_mut() {
-            Some(cam) => cam,
-            None => {
-                error!("Camera not available");
-                return Response::Failure {
-                    reason: "Camera not available".to_string(),
-                };
-            }
-        };
+        let camera = camera_lock.as_mut().expect("Camera should be available after ensure_camera_available");
 
         // Capture frames before dropping the lock
         camera.capture_frames(AUTH_FRAMES)
@@ -162,19 +198,19 @@ async fn handle_enroll(
 ) -> Response {
     info!("Enrollment request for user: {}", username);
 
+    // Ensure camera is available (with retry logic)
+    if let Err(err_msg) = ensure_camera_available(state).await {
+        error!("{}", err_msg);
+        return Response::Failure {
+            reason: err_msg,
+        };
+    }
+
     // Get camera and capture frames
     info!("Capturing {} frames for enrollment...", ENROLL_FRAMES);
     let frames = {
         let mut camera_lock = state.camera.write().await;
-        let camera = match camera_lock.as_mut() {
-            Some(cam) => cam,
-            None => {
-                error!("Camera not available");
-                return Response::Failure {
-                    reason: "Camera not available".to_string(),
-                };
-            }
-        };
+        let camera = camera_lock.as_mut().expect("Camera should be available after ensure_camera_available");
 
         // Capture frames before dropping the lock
         camera.capture_frames(ENROLL_FRAMES)
