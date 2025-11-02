@@ -2,7 +2,6 @@ mod camera;
 mod ipc;
 mod ml;
 mod storage;
-mod video;
 
 use anyhow::Result;
 use doorman_shared::Config;

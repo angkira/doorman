@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 /// Face detection result
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Face {
     pub bbox: (f32, f32, f32, f32), // x, y, w, h
     pub confidence: f32,

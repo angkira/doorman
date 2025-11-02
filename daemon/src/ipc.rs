@@ -158,7 +158,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
 async fn handle_enroll(
     state: &DaemonState,
     username: &str,
-    reader: &mut BufReader<UnixStream>,
+    _reader: &mut BufReader<UnixStream>,
 ) -> Response {
     info!("Enrollment request for user: {}", username);
 

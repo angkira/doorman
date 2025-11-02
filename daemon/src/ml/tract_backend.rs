@@ -1,7 +1,7 @@
 #[cfg(feature = "backend-tract")]
 use super::backend::{Face, MLBackend};
 #[cfg(feature = "backend-tract")]
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 #[cfg(feature = "backend-tract")]
 use async_trait::async_trait;
 #[cfg(feature = "backend-tract")]

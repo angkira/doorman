@@ -4,7 +4,9 @@ mod tract_backend;
 #[cfg(feature = "backend-ort")]
 mod ort_backend;
 
-pub use backend::{Face, MLBackend, BackendType};
+pub use backend::{MLBackend, BackendType};
+#[allow(dead_code)]
+pub use backend::Face;
 use anyhow::Result;
 use doorman_shared::Config;
 use image::DynamicImage;

@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Context, Result};
-use image::{DynamicImage, ImageBuffer, Rgb};
+use anyhow::{anyhow, Result};
+use image::DynamicImage;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use opencv::{prelude::*, videoio, core};
 
 /// Video file reader for testing
+#[allow(dead_code)]
 pub struct VideoReader {
     #[cfg(feature = "video")]
     capture: videoio::VideoCapture,
