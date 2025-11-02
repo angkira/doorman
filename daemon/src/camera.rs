@@ -29,6 +29,10 @@ impl Camera {
         let resolution = Resolution::new(config.camera.width, config.camera.height);
         let _ = camera.set_resolution(resolution);
 
+        // Start the camera stream
+        camera.open_stream()
+            .context("Failed to start camera stream")?;
+
         info!(
             "Camera opened: {}x{} @ {}fps",
             config.camera.width, config.camera.height, config.camera.fps

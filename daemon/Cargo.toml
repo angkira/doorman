@@ -7,6 +7,10 @@ edition.workspace = true
 name = "doormand"
 path = "src/main.rs"
 
+[lib]
+name = "doormand"
+path = "src/lib.rs"
+
 [dependencies]
 doorman-shared = { path = "../shared" }
 tokio = { workspace = true }
