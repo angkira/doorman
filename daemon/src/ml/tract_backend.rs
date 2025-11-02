@@ -55,29 +55,32 @@ impl TractBackend {
         Ok(model)
     }
     
-    fn image_to_tensor(&self, image: &DynamicImage, width: u32, height: u32, normalize: bool) -> tract_ndarray::Array4<f32> {
-        use tract_ndarray::Array4;
+    fn image_to_tensor(&self, image: &DynamicImage, width: u32, height: u32, normalize: bool) -> tract_onnx::prelude::Tensor {
+        use tract_onnx::prelude::*;
         
         let resized = image.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
         let rgb = resized.to_rgb8();
         
-        let mut tensor = Array4::zeros((1, 3, height as usize, width as usize));
+        let mut data = Vec::with_capacity((3 * width * height) as usize);
         
-        for y in 0..height {
-            for x in 0..width {
-                let pixel = rgb.get_pixel(x, y);
-                for c in 0..3 {
+        for c in 0..3 {
+            for y in 0..height {
+                for x in 0..width {
+                    let pixel = rgb.get_pixel(x, y);
                     let val = pixel[c] as f32;
-                    tensor[[0, c, y as usize, x as usize]] = if normalize {
+                    data.push(if normalize {
                         val / 255.0
                     } else {
-                        (val / 127.5) - 1.0 // [-1, 1] normalization
-                    };
+                        (val / 127.5) - 1.0
+                    });
                 }
             }
         }
         
-        tensor
+        tract_ndarray::Array4::from_shape_vec(
+            (1, 3, height as usize, width as usize),
+            data
+        ).unwrap().into()
     }
 }
 

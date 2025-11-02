@@ -8,14 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 doorman-shared = { path = "../shared" }
-pam = "0.7"
+pam-sys = "1.0.0-alpha5"
 serde_json = { workspace = true }
 libc = "0.2"
-
-[profile.release]
-opt-level = "z"  # Optimize for size
-lto = true       # Link-time optimization
-codegen-units = 1
-strip = true     # Strip symbols
-panic = "abort"  # Smaller binary
 

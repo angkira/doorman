@@ -242,7 +242,7 @@ impl Config {
     /// Save config to path
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         let content = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::Parse(toml::de::Error::custom(e.to_string())))?;
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         fs::write(path, content)?;
         Ok(())
     }
