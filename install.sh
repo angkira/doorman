@@ -18,6 +18,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PAM_LIB_DIR="/usr/lib/security"
 SYSTEMD_DIR="/etc/systemd/system"
 
+# Find cargo - check user's home first
+if [ -n "$SUDO_USER" ]; then
+    USER_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    export PATH="$USER_HOME/.cargo/bin:$PATH"
+fi
+
+# Verify cargo is available
+if ! command -v cargo &> /dev/null; then
+    echo "❌ cargo not found. Please install Rust first:"
+    echo "   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    exit 1
+fi
+
 # Build the PAM module
 echo "📦 Building PAM module..."
 cd "$SCRIPT_DIR"
