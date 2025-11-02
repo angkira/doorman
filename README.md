@@ -43,6 +43,7 @@ doorman status                   # Check status (no sudo needed)
 
 # User management
 doorman enroll                   # Enroll yourself
+doorman test                     # Test authentication BEFORE enabling in PAM!
 doorman list                     # Show enrolled users
 sudo doorman enroll <username>   # Enroll another user
 sudo doorman remove <username>   # Remove user
@@ -53,7 +54,9 @@ doorman models download          # Download missing models
 doorman models verify            # Verify models
 ```
 
-Lock screen (Meta+L) to test face unlock.
+**⚠️ IMPORTANT:** Run `doorman test` to verify face recognition works BEFORE using it in PAM!
+
+Lock screen (Meta+L) to test face unlock in production.
 
 ## GPU Acceleration (Radeon 780M)
 

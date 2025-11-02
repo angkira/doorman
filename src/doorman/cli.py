@@ -262,8 +262,9 @@ WantedBy=multi-user.target
         "Next steps:\n"
         "1. Download models: [cyan]doorman models download[/cyan]\n\n"
         "2. Enroll your face: [cyan]doorman enroll[/cyan]\n\n"
-        "3. Test: Lock your screen and use your face to unlock!\n\n"
-        "[yellow]Tip:[/yellow] Run [cyan]doorman status[/cyan] to check daemon health",
+        "3. [bold yellow]Test it works:[/bold yellow] [cyan]doorman test[/cyan]\n\n"
+        "4. Lock screen (Meta+L) to test face unlock!\n\n"
+        "[yellow]⚠️  Always run[/yellow] [cyan]doorman test[/cyan] [yellow]before relying on PAM![/yellow]",
         title="✅ Success",
         border_style="green"
     ))
@@ -336,7 +337,7 @@ def list():
     
     if not users:
         console.print("\n[yellow]No users enrolled yet[/yellow]")
-        console.print("Run: [cyan]sudo doorman enroll[/cyan]\n")
+        console.print("Run: [cyan]doorman enroll[/cyan]\n")
         return
     
     table = Table(title="Enrolled Users", show_header=True, header_style="bold magenta")
@@ -354,6 +355,66 @@ def list():
     console.print()
     console.print(table)
     console.print()
+
+
+@app.command()
+def test(
+    username: Optional[str] = typer.Argument(None, help="Username to test (default: current user)"),
+):
+    """
+    Test face authentication before enabling in PAM
+    """
+    # Get username
+    if username is None:
+        username = os.getenv("USER") or "unknown"
+    
+    console.print(f"\n[bold]Testing authentication for:[/bold] [cyan]{username}[/cyan]")
+    console.print("[yellow]Look at the camera...[/yellow]\n")
+    
+    # Send authenticate request
+    request = {"type": "authenticate", "username": username}
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Capturing and analyzing frames...", total=None)
+        
+        response = send_daemon_request(request, timeout=30)
+        
+        progress.update(task, completed=True)
+    
+    if response is None:
+        raise typer.Exit(1)
+    
+    console.print()
+    
+    if response.get("status") == "success":
+        msg = response.get("message", "Authentication successful")
+        console.print(Panel.fit(
+            f"[bold green]✓ {msg}[/bold green]\n\n"
+            "Face recognition is working correctly!\n"
+            "Your face authentication is ready to use.",
+            title="✅ Test Passed",
+            border_style="green"
+        ))
+        console.print()
+    else:
+        reason = response.get("reason", "Unknown error")
+        console.print(Panel.fit(
+            f"[bold red]✗ Authentication failed[/bold red]\n\n"
+            f"Reason: {reason}\n\n"
+            "[yellow]Troubleshooting:[/yellow]\n"
+            "• Ensure you're enrolled: [cyan]doorman list[/cyan]\n"
+            "• Try re-enrolling: [cyan]doorman enroll[/cyan]\n"
+            "• Check lighting conditions\n"
+            "• Verify camera works: [cyan]doorman status[/cyan]",
+            title="❌ Test Failed",
+            border_style="red"
+        ))
+        console.print()
+        raise typer.Exit(1)
 
 
 @app.command()
