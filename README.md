@@ -44,7 +44,7 @@ doorman status                   # Check status (no sudo needed)
 # User management
 doorman enroll                   # Enroll yourself
 doorman test                     # Test authentication BEFORE enabling in PAM!
-doorman preview                  # Live camera preview with face detection (GUI)
+doorman preview                  # Live camera preview (OPTIONAL - see PREVIEW_BUILD.md)
 doorman list                     # Show enrolled users
 sudo doorman enroll <username>   # Enroll another user
 sudo doorman remove <username>   # Remove user
