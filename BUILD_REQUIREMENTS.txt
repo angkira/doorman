@@ -1,0 +1,47 @@
+# Build Requirements for doorman
+
+## System Dependencies
+
+```bash
+sudo apt install -y \
+    build-essential \
+    libclang-dev \
+    libpam0g-dev \
+    pkg-config
+```
+
+## Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+## Python
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+## Build
+
+```bash
+# Default build (Tract backend - pure Rust)
+cargo build --release
+
+# With ONNX Runtime backend (GPU support)
+cargo build --release --features backend-ort
+
+# With both backends
+cargo build --release --features backend-tract,backend-ort
+
+# With video support (requires OpenCV)
+cargo build --release --features backend-tract,video
+```
+
+## Test
+
+```bash
+cargo test --features backend-tract
+```
+
