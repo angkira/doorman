@@ -96,7 +96,9 @@ impl MLBackend for TractBackend {
             }
         };
         
-        let (width, height) = image.dimensions();
+        // UltraFace RFB-320 expects 320x240 input
+        let (orig_width, orig_height) = image.dimensions();
+        let (width, height) = (320u32, 240u32);
         let tensor = self.image_to_tensor(image, width, height, true);
         
         let result = detector.run(tvec![tensor.into()])?;
@@ -122,12 +124,17 @@ impl MLBackend for TractBackend {
         
         if best_score > 0.5 {
             let box_offset = best_idx * 4;
+            // Boxes are in normalized coordinates relative to model input (320x240)
+            // Scale back to original image dimensions
+            let scale_x = orig_width as f32 / width as f32;
+            let scale_y = orig_height as f32 / height as f32;
+            
             Ok(Some(Face {
                 bbox: (
-                    boxes[box_offset] * width as f32,
-                    boxes[box_offset + 1] * height as f32,
-                    boxes[box_offset + 2] * width as f32,
-                    boxes[box_offset + 3] * height as f32,
+                    boxes[box_offset] * width as f32 * scale_x,
+                    boxes[box_offset + 1] * height as f32 * scale_y,
+                    boxes[box_offset + 2] * width as f32 * scale_x,
+                    boxes[box_offset + 3] * height as f32 * scale_y,
                 ),
                 confidence: best_score,
             }))

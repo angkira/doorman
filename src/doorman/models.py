@@ -40,8 +40,12 @@ class ModelManager:
             return system_dir
         
         # If system directory exists and we can write to it, use it
-        if system_dir.exists() and os.access(system_dir, os.W_OK):
-            return system_dir
+        try:
+            if system_dir.exists() and os.access(system_dir, os.W_OK):
+                return system_dir
+        except PermissionError:
+            # Can't access system directory, fall through to local
+            pass
         
         # For development, use local directory
         # Try to find project root (where doorman.toml is)
