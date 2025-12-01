@@ -6,8 +6,9 @@ use async_trait::async_trait;
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Face {
-    pub bbox: (f32, f32, f32, f32), // x, y, w, h
+    pub bbox: (f32, f32, f32, f32), // x, y, w, h in normalized [0,1] coordinates
     pub confidence: f32,
+    pub frame_dimensions: (u32, u32), // (width, height) of frame these coords are for
 }
 
 /// Abstract ML backend trait - implements driver pattern

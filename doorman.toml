@@ -7,7 +7,7 @@ log_level = "info"
 
 [camera]
 device_index = 0
-width = 1280   # Camera resolution
+width = 1024   # Camera native resolution (verified with FFmpeg test)
 height = 720
 fps = 30
 # video_file = "data/test.mp4"  # For testing with video files

@@ -5,16 +5,19 @@ use doorman_shared::{
     Request, Response, ResponseData, DaemonInfo, SOCKET_PATH, 
     AUTH_FRAMES, ENROLL_FRAMES, SIMILARITY_THRESHOLD,
 };
+use image::GenericImageView;
 use std::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 pub async fn run_server(state: DaemonState) -> Result<()> {
-    // Remove old socket if it exists
-    let _ = fs::remove_file(SOCKET_PATH);
+    let socket_path = &state.config.daemon.socket_path;
 
-    let listener = UnixListener::bind(SOCKET_PATH)
+    // Remove old socket if it exists
+    let _ = fs::remove_file(socket_path);
+
+    let listener = UnixListener::bind(socket_path)
         .context("Failed to bind UNIX socket")?;
 
     // Set socket permissions to allow all users (PAM runs in different contexts)
@@ -22,11 +25,11 @@ pub async fn run_server(state: DaemonState) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::Permissions::from_mode(0o666);
-        fs::set_permissions(SOCKET_PATH, perms)
+        fs::set_permissions(socket_path, perms)
             .context("Failed to set socket permissions")?;
     }
 
-    info!("IPC server listening on {}", SOCKET_PATH);
+    info!("IPC server listening on {}", socket_path);
 
     loop {
         match listener.accept().await {
@@ -59,6 +62,13 @@ async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()>
         Request::ListUsers => handle_list_users(&state).await,
         Request::RemoveUser { username } => handle_remove_user(&state, &username).await,
         Request::Status => handle_status(&state).await,
+        Request::DetectAndRecognize => handle_detect_and_recognize(&state).await,
+        Request::GetLatestDetection => {
+            // Not implemented yet - would return cached detection result
+            Response::Failure {
+                reason: "GetLatestDetection not implemented".to_string(),
+            }
+        }
         Request::Shutdown => {
             info!("Shutdown requested");
             Response::Success {
@@ -160,7 +170,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let mut best_similarity = 0.0f32;
     for (i, frame) in frames.iter().enumerate() {
         match state.ml_pipeline.process_frame(frame).await {
-            Ok(Some(embedding)) => {
+            Ok(Some((_face, embedding))) => {
                 let similarity = crate::ml::cosine_similarity(&embedding, &stored_embedding);
                 debug!("Frame {}: similarity = {:.4}", i, similarity);
                 
@@ -229,7 +239,7 @@ async fn handle_enroll(
     let mut valid_embeddings = Vec::new();
     for (i, frame) in frames.iter().enumerate() {
         match state.ml_pipeline.process_frame(frame).await {
-            Ok(Some(embedding)) => {
+            Ok(Some((_face, embedding))) => {
                 debug!("Frame {}: Valid embedding extracted", i);
                 valid_embeddings.push(embedding);
             }
@@ -337,6 +347,132 @@ async fn handle_status(state: &DaemonState) -> Response {
     Response::Success {
         message: None,
         data: Some(ResponseData::DaemonStatus { info }),
+    }
+}
+
+async fn handle_detect_and_recognize(state: &DaemonState) -> Response {
+    use doorman_shared::DetectionInfo;
+
+    // Capture a single frame
+    let mut camera = state.camera.write().await;
+    let camera = match camera.as_mut() {
+        Some(cam) => cam,
+        None => {
+            return Response::Failure {
+                reason: "Camera not available".to_string(),
+            }
+        }
+    };
+
+    let frame = match camera.capture_frame() {
+        Ok(f) => f,
+        Err(e) => {
+            return Response::Failure {
+                reason: format!("Failed to capture frame: {}", e),
+            }
+        }
+    };
+    drop(camera); // Release camera lock
+
+    // Detect face
+    let face = match state.ml_pipeline.detect_face(&frame).await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            // No face detected
+            let (width, height) = frame.dimensions();
+            let info = DetectionInfo {
+                bbox: None,
+                frame_size: Some((width, height)),
+                confidence: None,
+                recognized_user: None,
+                similarity: None,
+                frame_jpeg_base64: None,
+            };
+            return Response::Success {
+                message: None,
+                data: Some(ResponseData::DetectionResult { result: info }),
+            };
+        }
+        Err(e) => {
+            return Response::Failure {
+                reason: format!("Face detection failed: {}", e),
+            };
+        }
+    };
+
+    // Extract embedding and try to recognize
+    let embedding = match state.ml_pipeline.extract_embedding(&frame, &face).await {
+        Ok(emb) => emb,
+        Err(e) => {
+            // Return detection without recognition
+            let (width, height) = frame.dimensions();
+            let bbox_px = (
+                (face.bbox.0 * width as f32) as u32,
+                (face.bbox.1 * height as f32) as u32,
+                (face.bbox.2 * width as f32) as u32,
+                (face.bbox.3 * height as f32) as u32,
+            );
+            let info = DetectionInfo {
+                bbox: Some(bbox_px),
+                frame_size: Some((width, height)),
+                confidence: Some(face.confidence),
+                recognized_user: None,
+                similarity: None,
+                frame_jpeg_base64: None,
+            };
+            debug!("Failed to extract embedding: {}", e);
+            return Response::Success {
+                message: None,
+                data: Some(ResponseData::DetectionResult { result: info }),
+            };
+        }
+    };
+
+    // Try to recognize against enrolled users
+    let storage = state.storage.read().await;
+    let (recognized_user, similarity) = if storage.count() > 0 {
+        let mut best_match = None;
+        let mut best_similarity = 0.0f32;
+
+        for username in storage.list_users() {
+            if let Some(stored_embedding) = storage.get_embedding(&username.username) {
+                let similarity = crate::ml::cosine_similarity(&embedding, stored_embedding);
+                if similarity > best_similarity {
+                    best_similarity = similarity;
+                    best_match = Some(username.username.clone());
+                }
+            }
+        }
+
+        if best_similarity >= SIMILARITY_THRESHOLD {
+            (best_match, Some(best_similarity))
+        } else {
+            (None, Some(best_similarity))
+        }
+    } else {
+        (None, None)
+    };
+    drop(storage);
+
+    let (width, height) = frame.dimensions();
+    let bbox_px = (
+        (face.bbox.0 * width as f32) as u32,
+        (face.bbox.1 * height as f32) as u32,
+        (face.bbox.2 * width as f32) as u32,
+        (face.bbox.3 * height as f32) as u32,
+    );
+    let info = DetectionInfo {
+        bbox: Some(bbox_px),
+        frame_size: Some((width, height)),
+        confidence: Some(face.confidence),
+        recognized_user,
+        similarity,
+        frame_jpeg_base64: None,
+    };
+
+    Response::Success {
+        message: None,
+        data: Some(ResponseData::DetectionResult { result: info }),
     }
 }
 

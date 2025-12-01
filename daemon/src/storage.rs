@@ -16,25 +16,32 @@ pub struct UserEmbedding {
 pub struct Storage {
     embeddings: HashMap<String, UserEmbedding>,
     file_path: PathBuf,
+    data_dir: PathBuf,
 }
 
 impl Storage {
-    /// Initialize storage
-    pub async fn new() -> Result<Self> {
+    /// Initialize storage with custom data directory
+    pub async fn new_with_dir(data_dir: impl Into<PathBuf>) -> Result<Self> {
+        let data_dir: PathBuf = data_dir.into();
+
         // Ensure data directory exists
-        fs::create_dir_all(DATA_DIR)
+        fs::create_dir_all(&data_dir)
             .context("Failed to create data directory")?;
 
-        // Set proper permissions (0700 - only root)
+        // Set proper permissions (0700 for user, or current perms)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o700);
-            fs::set_permissions(DATA_DIR, perms)
-                .context("Failed to set data directory permissions")?;
+            // Don't change permissions in user mode - just use defaults
+            // Only set 0700 if running as root
+            if nix::unistd::getuid().is_root() {
+                let perms = fs::Permissions::from_mode(0o700);
+                fs::set_permissions(&data_dir, perms)
+                    .context("Failed to set data directory permissions")?;
+            }
         }
 
-        let file_path = embeddings_path();
+        let file_path = data_dir.join("embeddings.bin");
         
         // Load existing embeddings if file exists
         let embeddings = if file_path.exists() {
@@ -50,7 +57,13 @@ impl Storage {
         Ok(Self {
             embeddings,
             file_path,
+            data_dir,
         })
+    }
+
+    /// Initialize storage with default system directory (legacy)
+    pub async fn new() -> Result<Self> {
+        Self::new_with_dir(DATA_DIR).await
     }
 
     fn load_embeddings(path: &PathBuf) -> Result<HashMap<String, UserEmbedding>> {

@@ -40,12 +40,36 @@ pub struct Config {
 pub struct DaemonConfig {
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
-    
+
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
-    
+
     #[serde(default = "default_log_level")]
     pub log_level: String,
+
+    /// Debug stream socket for preview (sends detection data)
+    #[serde(default = "default_debug_socket")]
+    pub debug_socket: String,
+
+    /// Frame stream socket for preview (sends raw JPEG frames)
+    #[serde(default = "default_frame_socket")]
+    pub frame_socket: String,
+
+    /// Processing FPS for continuous face detection (independent of camera FPS)
+    #[serde(default = "default_processing_fps")]
+    pub processing_fps: u32,
+
+    /// Run as user service (not root) - enables PipeWire/GStreamer camera access
+    #[serde(default)]
+    pub user_mode: bool,
+
+    /// Debug mode: process frames even when system is unlocked (for preview/testing)
+    #[serde(default)]
+    pub debug_mode: bool,
+
+    /// Preview mode: stream frames to preview clients (enables frame_socket)
+    #[serde(default)]
+    pub preview_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +142,9 @@ pub struct PreprocessingConfig {
 
 // Default values
 fn default_socket_path() -> String { "/run/doorman.sock".to_string() }
+fn default_debug_socket() -> String { "/run/doorman-debug.sock".to_string() }
+fn default_frame_socket() -> String { "/run/doorman-frames.sock".to_string() }
+fn default_processing_fps() -> u32 { 10 }
 fn default_data_dir() -> String { "/var/lib/doorman".to_string() }
 fn default_log_level() -> String { "info".to_string() }
 fn default_models_dir() -> String { "/var/lib/doorman/models".to_string() }
@@ -140,6 +167,12 @@ impl Default for DaemonConfig {
             socket_path: default_socket_path(),
             data_dir: default_data_dir(),
             log_level: default_log_level(),
+            debug_socket: default_debug_socket(),
+            frame_socket: default_frame_socket(),
+            processing_fps: default_processing_fps(),
+            user_mode: false,
+            debug_mode: false,
+            preview_mode: false,
         }
     }
 }

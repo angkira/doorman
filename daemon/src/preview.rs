@@ -13,9 +13,9 @@
 use anyhow::{Context, Result};
 use doorman_shared::Config;
 use doormand::{camera::Camera, ml::MLPipeline};
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::DynamicImage;
 use opencv::{
-    core::{Mat, Point, Rect, Scalar, Size, Vector},
+    core::{Mat, Point, Rect, Scalar, Size},
     highgui,
     imgproc,
     prelude::*,
@@ -181,9 +181,10 @@ async fn main() -> Result<()> {
         };
         let fps_text = format!("FPS: {:.1}", fps);
         draw_text(&mut mat, &fps_text, Point::new(10, 60), WHITE)?;
-        
+
         // Draw instructions
-        draw_text(&mut mat, "Press 'q' to quit", Point::new(10, mat.rows() - 20), WHITE)?;
+        let mat_height = mat.rows();
+        draw_text(&mut mat, "Press 'q' to quit", Point::new(10, mat_height - 20), WHITE)?;
         
         // Display frame
         highgui::imshow(WINDOW_NAME, &mat)?;

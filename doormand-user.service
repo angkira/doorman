@@ -1,0 +1,29 @@
+[Unit]
+Description=Doorman Face Authentication User Daemon
+Documentation=https://github.com/yourusername/doorman
+After=graphical-session.target pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/doormand --user
+Restart=on-failure
+RestartSec=5s
+
+# Clean up stale socket on start
+ExecStartPre=/bin/sh -c 'rm -f /run/user/%U/doorman.sock /run/user/%U/doorman-debug.sock'
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=doormand-user
+
+[Install]
+WantedBy=default.target

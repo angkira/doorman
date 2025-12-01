@@ -1,15 +1,24 @@
+mod anchors;
 mod backend;
-#[cfg(feature = "backend-tract")]
-mod tract_backend;
+mod blazeface_decoder;
+mod model_config;
+
 #[cfg(feature = "backend-ort")]
 mod ort_backend;
+#[cfg(feature = "backend-tract")]
+pub mod tract_backend;
 
-pub use backend::{MLBackend, BackendType};
+#[cfg(test)]
+mod tests;
+
+pub use model_config::{DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig};
+
+use anyhow::Result;
 #[allow(dead_code)]
 pub use backend::Face;
-use anyhow::Result;
+pub use backend::{BackendType, MLBackend};
 use doorman_shared::Config;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -23,12 +32,12 @@ pub struct MLPipeline {
 impl MLPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let models_dir = PathBuf::from(&config.ml.models_dir);
-        
+
         // Select backend based on config
         let backend_type = BackendType::from_str(&config.ml.backend);
-        
+
         info!("Initializing ML backend: {:?}", backend_type);
-        
+
         let backend: Arc<dyn MLBackend> = match backend_type {
             BackendType::Tract => {
                 #[cfg(feature = "backend-tract")]
@@ -37,7 +46,9 @@ impl MLPipeline {
                 }
                 #[cfg(not(feature = "backend-tract"))]
                 {
-                    return Err(anyhow::anyhow!("Tract backend not compiled. Build with --features backend-tract"));
+                    return Err(anyhow::anyhow!(
+                        "Tract backend not compiled. Build with --features backend-tract"
+                    ));
                 }
             }
             BackendType::OnnxRuntime => {
@@ -47,7 +58,9 @@ impl MLPipeline {
                 }
                 #[cfg(not(feature = "backend-ort"))]
                 {
-                    return Err(anyhow::anyhow!("ORT backend not compiled. Build with --features backend-ort"));
+                    return Err(anyhow::anyhow!(
+                        "ORT backend not compiled. Build with --features backend-ort"
+                    ));
                 }
             }
             BackendType::Candle => {
@@ -55,15 +68,15 @@ impl MLPipeline {
                 return Err(anyhow::anyhow!("Candle backend not yet implemented"));
             }
         };
-        
+
         info!("Using ML backend: {}", backend.name());
-        
+
         Ok(Self {
             backend,
             config: config.clone(),
         })
     }
-    
+
     pub fn dummy(config: &Config) -> Self {
         // For testing - create dummy backend
         #[cfg(feature = "backend-tract")]
@@ -71,7 +84,7 @@ impl MLPipeline {
             let models_dir = PathBuf::from("/nonexistent");
             let backend = tract_backend::TractBackend::new(&models_dir)
                 .unwrap_or_else(|_| panic!("Failed to create dummy backend"));
-            
+
             Self {
                 backend: Arc::new(backend),
                 config: config.clone(),
@@ -82,45 +95,66 @@ impl MLPipeline {
             panic!("No backend available for dummy. Compile with --features backend-tract");
         }
     }
-    
-    pub async fn process_frame(&self, image: &DynamicImage) -> Result<Option<Vec<f32>>> {
-        let filter = match self.config.preprocessing.filter_type.as_str() {
-            "nearest" => image::imageops::FilterType::Nearest,
-            "triangle" => image::imageops::FilterType::Triangle,
-            "catmullrom" => image::imageops::FilterType::CatmullRom,
-            "gaussian" => image::imageops::FilterType::Gaussian,
-            _ => image::imageops::FilterType::Lanczos3,
-        };
-        
-        let small_img = image.resize_exact(
-            self.config.preprocessing.image_width,
-            self.config.preprocessing.image_height,
-            filter,
-        );
-        
-        // Stage 1: Detect
-        let face = match self.backend.detect_face(&small_img).await? {
+
+    pub async fn process_frame(&self, image: &DynamicImage) -> Result<Option<(backend::Face, Vec<f32>)>> {
+        // Stage 1: Detect (on full-size image, detector will resize internally)
+        let face = match self.backend.detect_face(image).await? {
             Some(f) => f,
             None => return Ok(None),
         };
-        
-        // Stage 2: Liveness
-        if !self.backend.check_liveness(&small_img, &face).await? {
+
+        // Stage 2: Liveness (on full-size image, liveness will crop and resize)
+        if !self.backend.check_liveness(image, &face).await? {
             return Ok(None);
         }
-        
-        // Stage 3: Embedding
-        let embedding = self.backend.extract_embedding(&small_img, &face).await?;
-        
-        Ok(Some(embedding))
+
+        // Stage 3: Embedding (on full-size image, recognizer will crop and resize)
+        let embedding = self.backend.extract_embedding(image, &face).await?;
+
+        Ok(Some((face, embedding)))
     }
-    
+
     pub fn models_loaded(&self) -> bool {
         self.backend.is_ready()
     }
-    
+
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
+    }
+
+    /// Detect face in image (for preview/debugging)
+    pub async fn detect_face(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
+        self.backend.detect_face(image).await
+    }
+
+    /// Extract embedding from detected face (for preview/debugging)
+    pub async fn extract_embedding(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<Vec<f32>> {
+        self.backend.extract_embedding(image, face).await
+    }
+
+    /// Synchronous face detection for use in spawn_blocking
+    pub fn detect_face_sync(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
+        // Since backend methods are async, we need to block on them
+        // This is safe because we're already in a spawn_blocking context
+        tokio::runtime::Handle::current().block_on(self.backend.detect_face(image))
+    }
+
+    /// Synchronous embedding extraction for use in spawn_blocking
+    pub fn extract_embedding_sync(
+        &self,
+        image: &DynamicImage,
+        bbox: &(f32, f32, f32, f32),
+    ) -> Result<Vec<f32>> {
+        let face = backend::Face {
+            bbox: *bbox,
+            confidence: 1.0, // Confidence not needed for embedding extraction
+            frame_dimensions: image.dimensions(),
+        };
+        tokio::runtime::Handle::current().block_on(self.backend.extract_embedding(image, &face))
     }
 }
 
@@ -137,4 +171,3 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     dot / (norm_a * norm_b)
 }
-

@@ -2,9 +2,23 @@
 
 Fast face unlock for Linux. Replaces howdy with proper architecture.
 
+**Status**: 🟡 **BBox fix applied, awaiting testing** → See [QUICK_TEST.md](QUICK_TEST.md)
+
 **3 components**: PAM module (Rust) → Auth daemon (Rust) → CLI (Python)
 
 **Key**: Daemon owns camera + models. PAM just sends IPC requests. No blocking, no crashes.
+
+**NEW**: 4-stage non-blocking pipeline for high-performance face recognition.
+
+## 🚀 Quick Start
+
+```bash
+# Test the latest bbox fix:
+./test_bbox.sh                # Terminal 1: Start daemon
+doorman preview --debug       # Terminal 2: View preview
+```
+
+See [MORNING_REPORT.md](MORNING_REPORT.md) for full status and [TODO.md](TODO.md) for priorities.
 
 ## Install
 
@@ -13,6 +27,9 @@ Fast face unlock for Linux. Replaces howdy with proper architecture.
 sudo apt install build-essential libpam0g-dev pkg-config
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Rust
 curl -LsSf https://astral.sh/uv/install.sh | sh  # uv
+
+# For high-performance camera (recommended)
+./install_gstreamer.sh
 
 # Build & install
 cd doorman
@@ -117,6 +134,41 @@ pytest src/doorman/test_cli.py  # Python tests
 ```
 
 See TESTING.md for details.
+
+## Camera Backends
+
+Doorman supports multiple camera backends with automatic fallback:
+
+| Backend | Speed | Integration | When to Use |
+|---------|-------|-------------|-------------|
+| **GStreamer** | ⚡ 20-30 fps | PipeWire | **Production (recommended)** |
+| FFmpeg | 🐌 1-10 fps | V4L2 | Fallback/compatibility |
+
+**Use GStreamer for production:**
+```bash
+./install_gstreamer.sh
+cargo build --release --features camera-gstreamer
+```
+
+See [GSTREAMER_BACKEND.md](GSTREAMER_BACKEND.md) for details.
+
+## Architecture
+
+The daemon uses a 4-stage non-blocking pipeline:
+
+```
+Camera Producer (20-30fps) → Frame Fanout → Detection (5fps) → Recognition
+                                 ↓
+                            Preview (15fps)
+```
+
+**Benefits**: No blocking, parallel processing, consistent frame rates, graceful degradation.
+
+**Documentation**:
+- [GSTREAMER_BACKEND.md](GSTREAMER_BACKEND.md) - High-performance camera setup
+- [PIPELINE_QUICK_START.md](PIPELINE_QUICK_START.md) - Quick reference
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Full design specification
+- [PIPELINE_IMPLEMENTATION.md](PIPELINE_IMPLEMENTATION.md) - Implementation details
 
 ## License
 
