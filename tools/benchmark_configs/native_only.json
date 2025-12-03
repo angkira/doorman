@@ -1,0 +1,10 @@
+{
+  "name": "PyTorch Native (PyO3) - Quick Test",
+  "mode": "detection",
+  "backend": "torch-native",
+  "iterations": 20,
+  "warmup_iterations": 5,
+  "image_width": 1024,
+  "image_height": 720,
+  "device": "cuda"
+}

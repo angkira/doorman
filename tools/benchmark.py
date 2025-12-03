@@ -203,7 +203,8 @@ class TorchNativeBackend:
 
     def __init__(self, models_dir: str, device: str = "cuda"):
         try:
-            from doorman_ml import DoormanML
+            import doorman_ml_native
+            DoormanML = doorman_ml_native.DoormanML
         except ImportError:
             raise RuntimeError(
                 "doorman_ml_native not installed. Build it first:\n"
