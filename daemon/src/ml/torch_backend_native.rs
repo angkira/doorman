@@ -1,12 +1,12 @@
 use super::backend::{Face, MLBackend};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::path::Path;
 use std::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Native PyO3-based PyTorch backend
 /// 
@@ -69,20 +69,22 @@ impl TorchBackendNative {
             
             // Create dummy 1024x720 image
             let dummy_data = vec![128u8; 1024 * 720 * 3];
-            let bytes = PyBytes::new_bound(py, &dummy_data);
             
             // Run detection warmup (3 iterations)
             for i in 1..=3 {
+                let bytes = PyBytes::new_bound(py, &dummy_data);
                 ml.call_method1("detect_faces", (bytes, 1024u32, 720u32))?;
                 info!("  Warmup iteration {}/3", i);
             }
             
             // Run liveness/embedding warmup on 112x112
             let dummy_crop = vec![128u8; 112 * 112 * 3];
-            let crop_bytes = PyBytes::new_bound(py, &dummy_crop);
             
             for i in 1..=2 {
+                let crop_bytes = PyBytes::new_bound(py, &dummy_crop);
                 ml.call_method1("check_liveness", (crop_bytes,))?;
+                
+                let crop_bytes = PyBytes::new_bound(py, &dummy_crop);
                 ml.call_method1("extract_embedding", (crop_bytes,))?;
                 info!("  Warmup liveness/embedding {}/2", i);
             }
@@ -100,64 +102,6 @@ impl TorchBackendNative {
         })
     }
 
-    fn detect_faces_internal(&self, image_data: &[u8], width: u32, height: u32) -> Result<Vec<(f32, f32, f32, f32, f32)>> {
-        Python::with_gil(|py| {
-            let ml = self.ml_instance.lock().unwrap();
-            let ml = ml.bind(py);
-            
-            let bytes = PyBytes::new_bound(py, image_data);
-            let result = ml.call_method1("detect_faces", (bytes, width, height))?;
-            
-            // Parse detections
-            let detections = result.getattr("detections")?;
-            let detections = detections.extract::<Vec<Py<PyAny>>>()?;
-            
-            let mut faces = Vec::new();
-            for det in detections {
-                let det = det.bind(py);
-                let bbox = det.getattr("bbox")?.extract::<(f32, f32, f32, f32)>()?;
-                let confidence = det.getattr("confidence")?.extract::<f32>()?;
-                faces.push((bbox.0, bbox.1, bbox.2, bbox.3, confidence));
-            }
-            
-            Ok(faces)
-        })
-    }
-
-    fn check_liveness_internal(&self, face_crop: &[u8]) -> Result<bool> {
-        Python::with_gil(|py| {
-            let ml = self.ml_instance.lock().unwrap();
-            let ml = ml.bind(py);
-            
-            let bytes = PyBytes::new_bound(py, face_crop);
-            let result = ml.call_method1("check_liveness", (bytes,))?;
-            
-            let is_live = result.getattr("is_live")?.extract::<bool>()?;
-            Ok(is_live)
-        })
-    }
-
-    fn extract_embedding_internal(&self, face_crop: &[u8]) -> Result<Vec<f32>> {
-        Python::with_gil(|py| {
-            let ml = self.ml_instance.lock().unwrap();
-            let ml = ml.bind(py);
-            
-            let bytes = PyBytes::new_bound(py, face_crop);
-            let result = ml.call_method1("extract_embedding", (bytes,))?;
-            
-            // Convert PyBytes to Vec<f32>
-            let embedding_bytes = result.downcast::<PyBytes>()?;
-            let embedding_slice = embedding_bytes.as_bytes();
-            
-            // Convert bytes to f32 slice
-            let embedding: Vec<f32> = embedding_slice
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-            
-            Ok(embedding)
-        })
-    }
 }
 
 #[async_trait]
@@ -166,13 +110,32 @@ impl MLBackend for TorchBackendNative {
         let (width, height) = image.dimensions();
         let rgb_data = image.to_rgb8().into_raw();
         
-        let faces = tokio::task::spawn_blocking({
-            let rgb_data = rgb_data.clone();
-            let self_ptr = self as *const Self;
-            move || {
-                let self_ref = unsafe { &*self_ptr };
-                self_ref.detect_faces_internal(&rgb_data, width, height)
-            }
+        // Get Py<PyAny> for thread-safe transfer
+        let ml_instance = Python::with_gil(|py| {
+            self.ml_instance.lock().unwrap().clone_ref(py)
+        });
+        
+        let faces = tokio::task::spawn_blocking(move || {
+            // Call detect_faces via Python GIL
+            Python::with_gil(|py| {
+                let ml = ml_instance.bind(py);
+                let bytes = PyBytes::new_bound(py, &rgb_data);
+                let result = ml.call_method1("detect_faces", (bytes, width, height))?;
+                
+                // Parse detections
+                let detections = result.getattr("detections")?;
+                let detections = detections.extract::<Vec<Py<PyAny>>>()?;
+                
+                let mut parsed_faces = Vec::new();
+                for det in detections {
+                    let det = det.bind(py);
+                    let bbox = det.getattr("bbox")?.extract::<(f32, f32, f32, f32)>()?;
+                    let confidence = det.getattr("confidence")?.extract::<f32>()?;
+                    parsed_faces.push((bbox.0, bbox.1, bbox.2, bbox.3, confidence));
+                }
+                
+                Ok::<Vec<(f32, f32, f32, f32, f32)>, anyhow::Error>(parsed_faces)
+            })
         })
         .await??;
 
@@ -212,12 +175,16 @@ impl MLBackend for TorchBackendNative {
         let face_crop = face_crop.resize_exact(112, 112, image::imageops::FilterType::Lanczos3);
         let face_data = face_crop.to_rgb8().into_raw();
 
-        tokio::task::spawn_blocking({
-            let self_ptr = self as *const Self;
-            move || {
-                let self_ref = unsafe { &*self_ptr };
-                self_ref.check_liveness_internal(&face_data)
-            }
+        let ml_instance = Python::with_gil(|py| self.ml_instance.lock().unwrap().clone_ref(py));
+        
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let ml = ml_instance.bind(py);
+                let bytes = PyBytes::new_bound(py, &face_data);
+                let result = ml.call_method1("check_liveness", (bytes,))?;
+                let is_live = result.getattr("is_live")?.extract::<bool>()?;
+                Ok::<bool, anyhow::Error>(is_live)
+            })
         })
         .await?
     }
@@ -236,12 +203,25 @@ impl MLBackend for TorchBackendNative {
         let face_crop = face_crop.resize_exact(112, 112, image::imageops::FilterType::Lanczos3);
         let face_data = face_crop.to_rgb8().into_raw();
 
-        tokio::task::spawn_blocking({
-            let self_ptr = self as *const Self;
-            move || {
-                let self_ref = unsafe { &*self_ptr };
-                self_ref.extract_embedding_internal(&face_data)
-            }
+        let ml_instance = Python::with_gil(|py| self.ml_instance.lock().unwrap().clone_ref(py));
+        
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let ml = ml_instance.bind(py);
+                let bytes = PyBytes::new_bound(py, &face_data);
+                let result = ml.call_method1("extract_embedding", (bytes,))?;
+                
+                let embedding_bytes = result.downcast::<PyBytes>()
+                    .map_err(|e| anyhow::anyhow!("Failed to downcast to PyBytes: {}", e))?;
+                let embedding_slice = embedding_bytes.as_bytes();
+                
+                let embedding: Vec<f32> = embedding_slice
+                    .chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                
+                Ok::<Vec<f32>, anyhow::Error>(embedding)
+            })
         })
         .await?
     }

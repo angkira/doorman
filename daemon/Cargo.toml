@@ -96,7 +96,3 @@ toml = "0.8"
 base64 = "0.21"
 approx = "0.5.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
-
-[[bench]]
-name = "full_pipeline"
-harness = false
