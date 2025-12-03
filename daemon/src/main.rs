@@ -121,7 +121,17 @@ async fn main() -> Result<()> {
 
     info!("Initializing ML pipeline...");
     let ml_pipeline = match ml::MLPipeline::new(&config).await {
-        Ok(pipeline) => Arc::new(pipeline),
+        Ok(pipeline) => {
+            info!("ML pipeline initialized, warming up models...");
+            // Warmup models by running dummy inference
+            // This ensures models are compiled/loaded before camera starts
+            if let Err(e) = pipeline.warmup().await {
+                warn!("Model warmup failed: {}. First inference may be slow.", e);
+            } else {
+                info!("✓ Models warmed up and ready");
+            }
+            Arc::new(pipeline)
+        },
         Err(e) => {
             error!("Failed to initialize ML pipeline: {}", e);
             warn!(

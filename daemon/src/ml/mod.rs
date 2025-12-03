@@ -189,6 +189,37 @@ impl MLPipeline {
         self.backend.extract_embedding(image, face).await
     }
 
+    /// Warmup models by running dummy inference
+    /// This preloads and compiles models before processing real frames
+    pub async fn warmup(&self) -> Result<()> {
+        info!("Warming up models (preloading/compiling)...");
+        
+        // Create a dummy 640x480 black image (typical camera resolution)
+        let dummy_img = DynamicImage::new_rgb8(640, 480);
+        
+        // Run detection warmup
+        info!("  Warming up detector...");
+        let _ = self.backend.detect_face(&dummy_img).await;
+        
+        // Create dummy face for subsequent stages
+        let dummy_face = backend::Face {
+            bbox: (0.2, 0.2, 0.4, 0.5), // Normalized coords (x, y, w, h)
+            confidence: 0.9,
+            frame_dimensions: (640, 480),
+        };
+        
+        // Run liveness warmup
+        info!("  Warming up liveness detector...");
+        let _ = self.backend.check_liveness(&dummy_img, &dummy_face).await;
+        
+        // Run embedding warmup
+        info!("  Warming up face recognizer...");
+        let _ = self.backend.extract_embedding(&dummy_img, &dummy_face).await;
+        
+        info!("✓ Model warmup complete");
+        Ok(())
+    }
+
     /// Synchronous face detection for use in spawn_blocking
     pub fn detect_face_sync(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
         // Since backend methods are async, we need to block on them
