@@ -1,220 +1,96 @@
-# Native Extension - Zero IPC Overhead ✨
+# Native Extension Build Issues
 
-## Проблема
+## Problem
 
-IPC коммуникация между Rust daemon и Python inference добавляет **50-80ms overhead** на каждый frame:
+Native backend requires linking against libpython, but:
 
-| Component | Overhead |
-|-----------|----------|
-| Base64 encode/decode | 2-3ms |
-| JSON serialize/parse | 1-2ms |
-| IPC communication | 3-5ms |
-| Python subprocess | 1-2ms |
-| **TOTAL** | **~7-12ms** |
+1. **System Python 3.13**: Has onnxruntime-rocm executable stack bug
+   ```
+   ImportError: cannot enable executable stack as shared object requires: Invalid argument
+   ```
 
-**Результат:** 60 FPS baseline → 7-10 FPS с IPC
+2. **Venv Python 3.12**: No shared library (libpython3.12.so)
+   ```
+   rust-lld: error: unable to find library -lpython3.12
+   ```
 
-## Решение: Native PyO3 Extension
+3. **System Python 3.12**: Not installed (only 3.13 available)
 
-Прямой вызов ONNX Runtime из Rust, скомпилированный как Python модуль.
+## Working Solutions
 
-### Архитектура
-
-```
-Python (benchmark.py, daemon)
-    ↓ (PyO3 FFI - <1ms overhead)
-Rust (doorman_ml_native.so)
-    ↓ (direct ONNX Runtime calls)
-ONNX Runtime
-    ↓ (MIGraphX/ROCm)
-AMD iGPU
+### Option 1: IPC Backend (Currently Working)
+```bash
+cargo build --release --features backend-torch,camera-gstreamer
+./target/release/doormand --config doorman-torch.toml
 ```
 
-**Никакого IPC, никакой сериализации, никаких subprocess!**
+**Performance**: 8 FPS (Base64 overhead)
+**Status**: ✅ Works reliably
 
-## Реализация
-
-### Компоненты
-
-```
-daemon/native_ml/
-├── Cargo.toml          # PyO3 extension config
-├── pyproject.toml      # maturin build config
-├── src/
-│   ├── lib.rs          # PyO3 bindings (DoormanML class)
-│   ├── detector.rs     # BlazeFace wrapper
-│   ├── liveness.rs     # Liveness checker
-│   └── embedder.rs     # MobileFaceNet wrapper
-└── python/
-    └── doorman_ml/
-        └── __init__.py # Python package
-```
-
-### API
-
-```python
-from doorman_ml import DoormanML
-
-# Initialize
-ml = DoormanML(models_dir="./models", device="cuda")
-
-# Detect faces (returns native Rust objects)
-detections = ml.detect_faces(image_rgb_bytes, width=1024, height=720)
-for det in detections:
-    print(f"Bbox: {det.bbox}, confidence: {det.confidence:.3f}")
-
-# Check liveness
-liveness = ml.check_liveness(face_crop_112x112_rgb)
-print(f"Is live: {liveness.is_live}, confidence: {liveness.confidence:.3f}")
-
-# Extract embedding
-embedding_bytes = ml.extract_embedding(face_crop_112x112_rgb)
-embedding = np.frombuffer(embedding_bytes, dtype=np.float32)  # 512-dim
-```
-
-## Build
-
-### Требования
+### Option 2: Install Python 3.12 System-Wide
 
 ```bash
-# Install maturin (PyO3 build tool)
-pip install maturin
+# Add deadsnakes PPA
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.12 python3.12-dev python3.12-venv
 
-# Install Rust (if not installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Then rebuild
+export PYO3_PYTHON=/usr/bin/python3.12
+cargo build --release --features backend-torch-native,camera-gstreamer
 ```
 
-### Сборка
+**Performance**: 36 FPS (native, no IPC)
+**Status**: ⚠️ Requires Python 3.12 installation
 
-```bash
-# Development build (fast iteration)
-cd daemon/native_ml
-./build.sh
+### Option 3: Use PyO3 ABI3 (Stable ABI)
 
-# Or manually:
-maturin develop --release
-
-# Build wheel for distribution
-maturin build --release
-pip install target/wheels/doorman_ml_native-*.whl
-```
-
-### Проверка
-
-```bash
-python3 -c "from doorman_ml import DoormanML; print(DoormanML)"
-# <class 'doorman_ml_native.DoormanML'>
-```
-
-## Benchmark
-
-### Запуск
-
-```bash
-# Native extension vs Direct Python vs IPC
-python3 tools/benchmark.py -c tools/benchmark_configs/native_comparison.json
-```
-
-### Ожидаемые результаты
-
-| Backend | Mean FPS | Overhead | Notes |
-|---------|----------|----------|-------|
-| **torch-native** | **~55-60** | **<1ms** | **PyO3 extension** ✨ |
-| torch-direct | ~60 | 0ms | Baseline (pure Python) |
-| torch-ipc | ~7-10 | 50-80ms | JSON-RPC subprocess |
-
-**Выигрыш:** ~6-8x FPS по сравнению с IPC!
-
-## Интеграция с Daemon
-
-### Замена TorchBackend
-
-```rust
-// daemon/src/ml/torch_backend_native.rs
-use pyo3::prelude::*;
-use pyo3::types::PyBytes;
-
-pub struct TorchBackendNative {
-    py_module: Py<PyModule>,
-    ml_instance: Py<PyAny>,
-}
-
-impl TorchBackendNative {
-    pub fn new(models_dir: &Path, device: &str) -> Result<Self> {
-        Python::with_gil(|py| {
-            // Import native module
-            let module = PyModule::import(py, "doorman_ml")?;
-            let ml_class = module.getattr("DoormanML")?;
-            
-            // Create instance
-            let ml_instance = ml_class.call1((
-                models_dir.to_str().unwrap(),
-                device
-            ))?;
-
-            Ok(Self {
-                py_module: module.into(),
-                ml_instance: ml_instance.into(),
-            })
-        })
-    }
-
-    pub fn detect_faces(&self, image_data: &[u8], w: u32, h: u32) -> Result<Vec<Face>> {
-        Python::with_gil(|py| {
-            let image_bytes = PyBytes::new(py, image_data);
-            let result = self.ml_instance.call_method1(
-                py,
-                "detect_faces",
-                (image_bytes, w, h)
-            )?;
-
-            // Parse detections...
-            Ok(faces)
-        })
-    }
-}
-```
-
-### Конфигурация
+Build with stable ABI to work with any Python 3.x:
 
 ```toml
-# doorman.toml
-[ml]
-backend = "torch-native"  # ← NEW
-device = "cuda"
-models_dir = "~/.local/share/doorman/models"
+# Cargo.toml
+[dependencies]
+pyo3 = { version = "0.22", features = ["abi3-py38"] }
 ```
 
-## Преимущества
+**Performance**: 36 FPS
+**Status**: �� Requires code changes
 
-1. **Производительность:** ~55-60 FPS (vs 7-10 FPS IPC)
-2. **Простота:** Те же ONNX модели, никаких изменений
-3. **Надёжность:** Нет subprocess, нет IPC ошибок
-4. **Отладка:** Stack traces проходят через Rust → Python
-5. **Deployment:** Один `.so` файл, никаких скриптов
+## Testing Native Extension
 
-## Недостатки
+Native extension works in isolation:
 
-1. Требует сборки (но это один раз)
-2. Зависимость от PyO3 (но стабильная)
-3. Python GIL может быть узким местом (но не в нашем случае - один inference за раз)
+```bash
+# Works with Python 3.12 venv
+source .venv/bin/activate
+python3 -c "import doorman_ml_native; ml = doorman_ml_native.DoormanML(...)"
+# ✓ SUCCESS - 36 FPS
+```
 
-## Следующие шаги
+But daemon can't link against venv Python!
 
-1. ✅ Создана структура PyO3 extension
-2. ✅ Реализованы detector, liveness, embedder
-3. ✅ Добавлен TorchNativeBackend в benchmark
-4. ⏳ **Собрать и протестировать**
-5. ⏳ Сравнить с Direct/IPC
-6. ⏳ Интегрировать в daemon (заменить TorchBackend)
-7. ⏳ Измерить финальную производительность
+## Recommended Path Forward
 
-## Альтернативы
+**For Development**: Use IPC backend (8 FPS but reliable)
 
-Если PyO3 extension не подходит:
+**For Production**: 
+1. Install Python 3.12 system-wide
+2. Or use containerized deployment (Docker)
+3. Or implement shared memory IPC (50-55 FPS)
 
-1. **Shared Memory IPC** - промежуточное решение (~40-50 FPS)
-2. **gRPC** - бинарный протокол вместо JSON (~30-40 FPS)
-3. **Pure Rust inference** - перенести всё в Rust, без Python
+## Current Status
 
-Но **Native Extension - самое простое и быстрое решение** для текущей архитектуры.
+- ✅ Native extension builds and works
+- ✅ iGPU performance excellent (36 FPS)
+- ✅ IPC backend functional (8 FPS)
+- ❌ Daemon + native backend linkage broken
+- ⏳ Need Python 3.12 system installation
+
+## Performance Summary
+
+| Backend          | FPS  | Status | Notes                        |
+|------------------|------|--------|------------------------------|
+| Tract (CPU)      | 7.9  | ✅     | Pure Rust, reliable          |
+| Torch IPC        | 8    | ✅     | Works, Base64 overhead       |
+| Torch Native     | 36   | ❌     | Build issue (libpython3.12)  |
+| Torch Shared Mem | 50+  | 📝     | TODO: eliminate Base64       |
