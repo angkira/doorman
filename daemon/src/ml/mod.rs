@@ -11,6 +11,8 @@ pub mod tract_backend;
 mod migraphx_backend;
 #[cfg(feature = "backend-torch")]
 mod torch_backend;
+#[cfg(feature = "backend-torch-native")]
+mod torch_backend_native;
 
 #[cfg(test)]
 mod tests;
@@ -92,6 +94,18 @@ impl MLPipeline {
                 {
                     return Err(anyhow::anyhow!(
                         "Torch backend not compiled. Build with --features backend-torch"
+                    ));
+                }
+            }
+            BackendType::TorchNative => {
+                #[cfg(feature = "backend-torch-native")]
+                {
+                    Arc::new(torch_backend_native::TorchBackendNative::new(&models_dir, &config.ml.device)?)
+                }
+                #[cfg(not(feature = "backend-torch-native"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Torch Native backend not compiled. Build with --features backend-torch-native"
                     ));
                 }
             }

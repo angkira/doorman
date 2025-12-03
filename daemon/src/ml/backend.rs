@@ -43,6 +43,8 @@ pub enum BackendType {
     MIGraphX,
     /// PyTorch (Python subprocess with ROCm)
     Torch,
+    /// PyTorch Native (PyO3 extension, no IPC)
+    TorchNative,
 }
 
 impl BackendType {
@@ -53,6 +55,7 @@ impl BackendType {
             "onnx" | "onnxruntime" | "ort" => Self::OnnxRuntime,
             "migraphx" => Self::MIGraphX,
             "torch" | "pytorch" => Self::Torch,
+            "torch-native" | "pytorch-native" | "native" => Self::TorchNative,
             _ => Self::Tract, // Default to tract
         }
     }

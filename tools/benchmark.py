@@ -11,6 +11,8 @@ import argparse
 import os
 import subprocess
 import base64
+import psutil
+import threading
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional
@@ -42,6 +44,15 @@ class BenchmarkConfig:
         return cls(**{k: v for k, v in data.items() if k in cls.__annotations__})
 
 @dataclass
+class ResourceStats:
+    """Resource usage statistics"""
+    cpu_percent: float
+    ram_mb: float
+    gpu_percent: float
+    gpu_mem_mb: float
+    gpu_temp_c: float
+
+@dataclass
 class BenchmarkResult:
     """Benchmark results"""
     config: BenchmarkConfig
@@ -59,6 +70,7 @@ class BenchmarkResult:
     degradation_percent: float
     stable: bool
     times: List[float]
+    resources: Optional[ResourceStats] = None
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict (handle numpy types)"""
@@ -87,6 +99,13 @@ class BenchmarkResult:
             'degradation_percent': float(self.degradation_percent),
             'stable': bool(self.stable),
             'sample_count': int(len(self.times)),
+            'resources': {
+                'cpu_percent': float(self.resources.cpu_percent),
+                'ram_mb': float(self.resources.ram_mb),
+                'gpu_percent': float(self.resources.gpu_percent),
+                'gpu_mem_mb': float(self.resources.gpu_mem_mb),
+                'gpu_temp_c': float(self.resources.gpu_temp_c),
+            } if self.resources else None,
         }
 
 class TorchDirectBackend:
@@ -264,12 +283,105 @@ class TorchNativeBackend:
             "embedding": embedding.tolist()
         }
 
+class ResourceMonitor:
+    """Monitor CPU, RAM, GPU usage during benchmark"""
+    
+    def __init__(self):
+        self.monitoring = False
+        self.samples = []
+        self.thread = None
+        self.process = psutil.Process()
+        
+    def start(self):
+        """Start monitoring in background thread"""
+        self.monitoring = True
+        self.samples = []
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+    
+    def stop(self) -> ResourceStats:
+        """Stop monitoring and return average stats"""
+        self.monitoring = False
+        if self.thread:
+            self.thread.join(timeout=2.0)
+        
+        if not self.samples:
+            return ResourceStats(0, 0, 0, 0, 0)
+        
+        # Calculate averages
+        cpu_avg = np.mean([s['cpu'] for s in self.samples])
+        ram_avg = np.mean([s['ram'] for s in self.samples])
+        gpu_avg = np.mean([s['gpu'] for s in self.samples])
+        gpu_mem_avg = np.mean([s['gpu_mem'] for s in self.samples])
+        gpu_temp_avg = np.mean([s['gpu_temp'] for s in self.samples])
+        
+        return ResourceStats(
+            cpu_percent=cpu_avg,
+            ram_mb=ram_avg,
+            gpu_percent=gpu_avg,
+            gpu_mem_mb=gpu_mem_avg,
+            gpu_temp_c=gpu_temp_avg
+        )
+    
+    def _monitor_loop(self):
+        """Background monitoring loop"""
+        while self.monitoring:
+            try:
+                # CPU and RAM
+                cpu_percent = self.process.cpu_percent(interval=0.1)
+                ram_mb = self.process.memory_info().rss / 1024 / 1024
+                
+                # GPU stats (AMD ROCm)
+                gpu_percent, gpu_mem_mb, gpu_temp = self._get_gpu_stats()
+                
+                self.samples.append({
+                    'cpu': cpu_percent,
+                    'ram': ram_mb,
+                    'gpu': gpu_percent,
+                    'gpu_mem': gpu_mem_mb,
+                    'gpu_temp': gpu_temp
+                })
+                
+                time.sleep(0.5)  # Sample every 500ms
+            except Exception:
+                pass
+    
+    def _get_gpu_stats(self):
+        """Get AMD GPU stats via rocm-smi"""
+        try:
+            # Try rocm-smi for AMD GPUs
+            result = subprocess.run(
+                ['rocm-smi', '--showuse', '--showmeminfo', 'vram', '--showtemp', '--json'],
+                capture_output=True,
+                text=True,
+                timeout=1.0
+            )
+            
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                gpu_data = data.get('card0', {})
+                
+                use = gpu_data.get('GPU use (%)', '0')
+                mem = gpu_data.get('VRAM Total Memory (B)', '0')
+                temp = gpu_data.get('Temperature (Sensor edge) (C)', '0')
+                
+                gpu_percent = float(use.replace('%', '')) if isinstance(use, str) else float(use)
+                gpu_mem_mb = float(mem) / 1024 / 1024 if isinstance(mem, (int, float, str)) else 0
+                gpu_temp = float(temp) if isinstance(temp, (int, float, str)) else 0
+                
+                return gpu_percent, gpu_mem_mb, gpu_temp
+        except:
+            pass
+        
+        return 0.0, 0.0, 0.0
+
 class BenchmarkRunner:
     """Main benchmark runner"""
 
     def __init__(self, config: BenchmarkConfig):
         self.config = config
         self.backend = None
+        self.resource_monitor = ResourceMonitor()
 
         # Determine models directory
         if config.models_dir:
@@ -347,6 +459,9 @@ class BenchmarkRunner:
         # Warmup
         self.warmup()
 
+        # Start resource monitoring
+        self.resource_monitor.start()
+
         # Benchmark
         print(f"Running {self.config.iterations} iterations...\n")
         times = []
@@ -360,6 +475,9 @@ class BenchmarkRunner:
                 current_fps = 1000 / current_avg
                 print(f"  Progress: {i+1}/{self.config.iterations} | "
                       f"Last 10 avg: {current_avg:.1f}ms ({current_fps:.1f} FPS)")
+        
+        # Stop resource monitoring
+        resource_stats = self.resource_monitor.stop()
 
         # Calculate statistics
         times_array = np.array(times)
@@ -396,7 +514,8 @@ class BenchmarkRunner:
             last_10_avg_ms=float(last_10),
             degradation_percent=float(degradation),
             stable=stable,
-            times=times
+            times=times,
+            resources=resource_stats
         )
 
 def print_results(result: BenchmarkResult):
@@ -434,6 +553,16 @@ def print_results(result: BenchmarkResult):
         print("✓ Performance improved over time (JIT warmup)")
     else:
         print("✓ Performance stable")
+
+    # Print resource usage
+    if result.resources:
+        print()
+        print(f"Resource Usage (average):")
+        print(f"  CPU:        {result.resources.cpu_percent:.1f}%")
+        print(f"  RAM:        {result.resources.ram_mb:.0f} MB")
+        print(f"  GPU:        {result.resources.gpu_percent:.1f}%")
+        print(f"  GPU Memory: {result.resources.gpu_mem_mb:.0f} MB")
+        print(f"  GPU Temp:   {result.resources.gpu_temp_c:.1f}°C")
 
     print()
     print("="*60)

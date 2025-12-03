@@ -35,6 +35,8 @@ tracing-subscriber = { workspace = true }
 ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["download-binaries"] }
 tract-onnx = { version = "0.22", optional = true }
 # torch backend uses Python subprocess, no Rust deps needed
+# torch-native backend uses PyO3 for direct calls
+pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 async-trait = "0.1"
 
 # MIGraphX backend (ROCm iGPU) - uses Python subprocess
@@ -79,6 +81,7 @@ backend-tract = ["tract-onnx"]
 backend-ort-cpu = ["ort", "ort/download-binaries"]
 backend-ort-rocm = ["ort", "ort/load-dynamic"]
 backend-torch = []
+backend-torch-native = ["pyo3"]
 backend-migraphx = []
 camera-gstreamer = ["gstreamer", "gstreamer-app", "glib"]
 camera-pipewire = ["pipewire", "libspa", "libspa-sys", "crossbeam"]
