@@ -27,7 +27,7 @@ impl TorchBackendNative {
         if std::env::var("ORT_DYLIB_PATH").is_err() {
             // Try to find libonnxruntime.so in common locations
             let possible_paths = [
-                ".venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so",
+                "/usr/lib/x86_64-linux-gnu/libonnxruntime.so",  // System package (preferred - no executable stack issues)
                 "/usr/lib/libonnxruntime.so",
                 "/usr/local/lib/libonnxruntime.so",
             ];
@@ -41,10 +41,30 @@ impl TorchBackendNative {
             }
         }
 
+        // Initialize Python with PYTHONPATH if set
+        if let Ok(python_path) = std::env::var("PYTHONPATH") {
+            info!("Using PYTHONPATH: {}", python_path);
+        }
+
         let ml_instance = Python::with_gil(|py| {
+            // Add PYTHONPATH to sys.path
+            if let Ok(python_path) = std::env::var("PYTHONPATH") {
+                let sys = py.import_bound("sys")?;
+                let path = sys.getattr("path")?;
+                for p in python_path.split(':') {
+                    if !p.is_empty() {
+                        path.call_method1("insert", (0, p))?;
+                    }
+                }
+            }
+            
             // Import native module
             let module = py.import_bound("doorman_ml_native")
-                .context("Failed to import doorman_ml_native. Run: cd daemon/native_ml && ./build.sh")?;
+                .map_err(|e| {
+                    // Log the actual Python error
+                    info!("Python import error: {}", e);
+                    anyhow::anyhow!("Failed to import doorman_ml_native: {}. Run: cd daemon/native_ml && ./build.sh", e)
+                })?;
             
             let ml_class = module.getattr("DoormanML")?;
             

@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "doorman-ml-native"
 version = "0.1.0"
 description = "Native PyO3 extension for doorman ML inference"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
