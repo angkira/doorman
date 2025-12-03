@@ -108,6 +108,10 @@ pub struct MLConfig {
     
     #[serde(default)]
     pub gpu_device_id: i32,
+    
+    /// Docker inference service endpoint (for backend = "docker")
+    #[serde(default)]
+    pub docker_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

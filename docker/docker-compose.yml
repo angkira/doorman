@@ -1,0 +1,21 @@
+version: '3.8'
+services:
+  onnx-inference:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.onnx-rocm
+    container_name: doorman-onnx-rocm
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+    volumes:
+      - ../models:/app/models:ro
+      - /opt/rocm:/opt/rocm:ro
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.1
+      - HIP_VISIBLE_DEVICES=0
+    ports:
+      - "5000:5000"
+    restart: unless-stopped

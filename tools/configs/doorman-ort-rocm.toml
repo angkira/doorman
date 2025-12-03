@@ -1,23 +1,28 @@
+[general]
+data_dir = "~/.local/share/doorman"
+models_dir = "~/.local/share/doorman/models"
+
 [ml]
-backend = "ort"
+backend = "ort-rocm"
 device = "rocm"
-gpu_device_id = 0
 cpu_threads = 4
-max_fps = 30
 
 [camera]
-device_id = 0
-width = 1024
-height = 720
-fps = 30
 backend = "gstreamer"
-source = "v4l2"
+width = 1280
+height = 720
 
-[face_recognition]
-threshold = 0.45
-liveness_threshold = 0.6
+[detection]
+confidence = 0.5
+liveness_threshold = 0.5
+enabled = true
+process_interval_ms = 100
 
-[debug]
-preview = false
-log_detections = true
-process_when_unlocked = true
+[recognition]
+enabled = true
+threshold = 0.6
+process_interval_ms = 500
+
+[ipc]
+user_socket = "/run/user/1000/doorman.sock"
+system_socket = "/run/doorman.sock"

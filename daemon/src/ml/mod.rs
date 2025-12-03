@@ -13,6 +13,8 @@ mod migraphx_backend;
 mod torch_backend;
 #[cfg(feature = "backend-torch-native")]
 mod torch_backend_native;
+#[cfg(feature = "backend-docker")]
+mod docker_backend;
 
 #[cfg(test)]
 mod tests;
@@ -106,6 +108,20 @@ impl MLPipeline {
                 {
                     return Err(anyhow::anyhow!(
                         "Torch Native backend not compiled. Build with --features backend-torch-native"
+                    ));
+                }
+            }
+            BackendType::Docker => {
+                #[cfg(feature = "backend-docker")]
+                {
+                    let endpoint = config.ml.docker_endpoint.as_deref()
+                        .unwrap_or("http://localhost:5000");
+                    Arc::new(docker_backend::DockerBackend::new(endpoint)?)
+                }
+                #[cfg(not(feature = "backend-docker"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Docker backend not compiled. Build with --features backend-docker"
                     ));
                 }
             }

@@ -1,39 +1,28 @@
-# doorman Configuration
-
-[daemon]
-socket_path = "/run/doorman.sock"
-data_dir = "/var/lib/doorman"
-log_level = "info"
-
-[camera]
-device_index = 0
-width = 1024   # Camera native resolution (verified with FFmpeg test)
-height = 720
-fps = 30
-# video_file = "data/test.mp4"  # For testing with video files
+[general]
+data_dir = "~/.local/share/doorman"
+models_dir = "~/.local/share/doorman/models"
 
 [ml]
-models_dir = "/var/lib/doorman/models"
-
-# Backend: "tract" (pure Rust, default) or "onnx" (supports GPU)
-backend = "ort"
-
-# Device: "cpu", "cuda", "rocm" (only for onnx backend)
+backend = "ort-cpu"
 device = "cpu"
+cpu_threads = 4
 
-cpu_threads = 0  # 0 = auto
-gpu_device_id = 0
+[camera]
+backend = "gstreamer"
+width = 1280
+height = 720
 
-[authentication]
-similarity_threshold = 0.65  # 0.55-0.75 (lower = more lenient)
-auth_frames = 10
-timeout_secs = 3
+[detection]
+confidence = 0.5
+liveness_threshold = 0.5
+enabled = true
+process_interval_ms = 100
 
-[enrollment]
-enroll_frames = 20
-min_valid_frames = 5
+[recognition]
+enabled = true
+threshold = 0.6
+process_interval_ms = 500
 
-[preprocessing]
-image_width = 256
-image_height = 256
-filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
+[ipc]
+user_socket = "/run/user/1000/doorman.sock"
+system_socket = "/run/doorman.sock"

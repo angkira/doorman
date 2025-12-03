@@ -45,6 +45,8 @@ pub enum BackendType {
     Torch,
     /// PyTorch Native (PyO3 extension, no IPC)
     TorchNative,
+    /// Docker (ONNX Runtime in container with ROCm)
+    Docker,
 }
 
 impl BackendType {
@@ -56,6 +58,7 @@ impl BackendType {
             "migraphx" => Self::MIGraphX,
             "torch" | "pytorch" => Self::Torch,
             "torch-native" | "pytorch-native" | "native" => Self::TorchNative,
+            "docker" => Self::Docker,
             _ => Self::Tract, // Default to tract
         }
     }

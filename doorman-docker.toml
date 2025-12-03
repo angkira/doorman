@@ -1,0 +1,44 @@
+# Doorman configuration for Docker-based ML backend
+# High-performance GPU inference in isolated container
+
+[daemon]
+socket_path = "/run/user/1000/doorman.sock"
+data_dir = "~/.local/share/doorman"
+log_level = "info"
+processing_fps = 10
+user_mode = true
+debug_mode = false
+preview_mode = false
+
+[ml]
+backend = "docker"
+docker_endpoint = "http://localhost:5000"
+models_dir = "~/.local/share/doorman/models"
+device = "rocm"  # Runs in container
+cpu_threads = 4
+
+[camera]
+backend = "gstreamer"
+width = 1280
+height = 720
+fps = 30
+device = ""  # Auto-detect (uses PipeWire)
+
+[authentication]
+similarity_threshold = 0.6
+auth_frames = 3
+timeout_secs = 30
+
+[enrollment]
+required_frames = 5
+quality_threshold = 0.7
+min_face_size = 80
+
+[preprocessing]
+target_size = 112
+normalization = "imagenet"
+
+[models]
+detector = "blazeface"
+liveness = "minifasnet"
+recognizer = "mobilefacenet"
