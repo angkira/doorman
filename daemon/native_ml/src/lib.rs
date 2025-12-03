@@ -58,7 +58,25 @@ pub struct DoormanML {
 impl DoormanML {
     #[new]
     #[pyo3(signature = (models_dir, device="cuda"))]
-    fn new(models_dir: &str, device: &str) -> PyResult<Self> {
+    fn new(py: Python, models_dir: &str, device: &str) -> PyResult<Self> {
+        // Find libonnxruntime.so from Python's onnxruntime package
+        py.run_bound(
+            r#"
+import os
+import sys
+try:
+    import onnxruntime
+    ort_lib = os.path.join(os.path.dirname(onnxruntime.__file__), 'capi', 'libonnxruntime.so')
+    if os.path.exists(ort_lib):
+        os.environ['ORT_DYLIB_PATH'] = ort_lib
+        print(f'Set ORT_DYLIB_PATH={ort_lib}', file=sys.stderr)
+except ImportError:
+    pass
+"#,
+            None,
+            None,
+        )?;
+        
         let detector = FaceDetector::new(models_dir, device)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to load detector: {}", e)))?;
         

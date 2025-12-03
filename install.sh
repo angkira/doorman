@@ -257,18 +257,27 @@ echo ""
 if [[ "$BACKEND" == "torch" || "$BACKEND" == "torch-native" ]]; then
     echo -e "${YELLOW}→${NC} Setting up Python environment..."
     
+    # Create venv in data directory (persistent location)
+    VENV_DIR="$DATA_DIR/venv"
+    echo "  Creating venv at: $VENV_DIR"
+    
     if command_exists uv; then
         echo "  Using uv for fast Python package management"
-        uv venv .venv
-        source .venv/bin/activate
+        uv venv "$VENV_DIR" --python python3.12 || uv venv "$VENV_DIR"
+    else
+        echo "  Using pip"
+        python3.12 -m venv "$VENV_DIR" || python3 -m venv "$VENV_DIR"
+    fi
+    
+    source "$VENV_DIR/bin/activate"
+    
+    # Install dependencies
+    if command_exists uv; then
         for dep in "${PYTHON_DEPS[@]}"; do
-            echo "  Installing $dep..."
+            echo "  Installing $dep with uv..."
             uv pip install "$dep"
         done
     else
-        echo "  Using pip"
-        python3 -m venv .venv
-        source .venv/bin/activate
         pip install --upgrade pip
         for dep in "${PYTHON_DEPS[@]}"; do
             echo "  Installing $dep..."
@@ -276,24 +285,54 @@ if [[ "$BACKEND" == "torch" || "$BACKEND" == "torch-native" ]]; then
         done
     fi
     
+    # Get absolute path to onnxruntime lib
+    ORT_LIB=$(python3 -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi', 'libonnxruntime.so'))" 2>/dev/null || echo "")
+    
     echo -e "${GREEN}✓${NC} Python environment ready"
+    echo "  Python: $(which python3)"
+    echo "  Venv: $VENV_DIR"
+    if [ -n "$ORT_LIB" ]; then
+        echo "  ONNX Runtime: $ORT_LIB"
+    fi
     echo ""
     
     # Build native extension if needed
     if [ "$BACKEND" = "torch-native" ]; then
-        echo -e "${YELLOW}→${NC} Building native extension..."
+        echo -e "${YELLOW}→${NC} Building native extension against venv..."
+        
+        # Force maturin to use our venv Python
+        export PYO3_PYTHON="$VENV_DIR/bin/python3"
+        
         cd daemon/native_ml
-        maturin build --release
-        pip install target/wheels/*.whl --force-reinstall
+        
+        # Clean previous builds
+        rm -rf target/wheels/*.whl 2>/dev/null || true
+        
+        echo "  Building with Python: $PYO3_PYTHON"
+        maturin build --release --interpreter "$PYO3_PYTHON"
+        
+        # Install into venv
+        "$VENV_DIR/bin/pip" install target/wheels/*.whl --force-reinstall
+        
         cd ../..
-        echo -e "${GREEN}✓${NC} Native extension built"
+        echo -e "${GREEN}✓${NC} Native extension built and installed"
         echo ""
     fi
+    
+    deactivate
 fi
 
 # Build daemon
 echo -e "${YELLOW}→${NC} Building daemon (this may take a few minutes)..."
 echo "  Features: $CARGO_FEATURES"
+
+# Set build env for native backend
+if [ "$BACKEND" = "torch-native" ]; then
+    export PYO3_PYTHON="$DATA_DIR/venv/bin/python3"
+    export VIRTUAL_ENV="$DATA_DIR/venv"
+    echo "  Building with Python: $PYO3_PYTHON"
+fi
+
 cargo build --release --features "$CARGO_FEATURES"
 echo -e "${GREEN}✓${NC} Daemon built"
 echo ""
@@ -365,8 +404,10 @@ After=graphical-session.target
 [Service]
 Type=simple
 ExecStart=$INSTALL_DIR/bin/doormand --user --config $CONFIG_DIR/doorman.toml
-Environment="VIRTUAL_ENV=$SCRIPT_DIR/.venv"
+Environment="VIRTUAL_ENV=$DATA_DIR/venv"
+Environment="PATH=$DATA_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
 $([ "$GPU_TYPE" = "amd" ] && echo 'Environment="HSA_OVERRIDE_GFX_VERSION=11.0.1"')
+$([ -n "$ORT_LIB" ] && echo "Environment=\"ORT_DYLIB_PATH=$ORT_LIB\"")
 Restart=on-failure
 RestartSec=5s
 
@@ -382,8 +423,10 @@ After=multi-user.target
 [Service]
 Type=simple
 ExecStart=$INSTALL_DIR/bin/doormand --config $CONFIG_DIR/doorman.toml
-Environment="VIRTUAL_ENV=$SCRIPT_DIR/.venv"
+Environment="VIRTUAL_ENV=$DATA_DIR/venv"
+Environment="PATH=$DATA_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
 $([ "$GPU_TYPE" = "amd" ] && echo 'Environment="HSA_OVERRIDE_GFX_VERSION=11.0.1"')
+$([ -n "$ORT_LIB" ] && echo "Environment=\"ORT_DYLIB_PATH=$ORT_LIB\"")
 Restart=on-failure
 RestartSec=5s
 
