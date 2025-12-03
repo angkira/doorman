@@ -1,0 +1,36 @@
+# Doorman with PyTorch backend (Python + MIGraphX iGPU)
+# Uses IPC but guaranteed to work with iGPU
+
+[ml]
+backend = "torch"
+device = "cuda"
+models_dir = "/home/angkira/.local/share/doorman/models"
+cpu_threads = 4
+confidence_threshold = 0.7
+liveness_threshold = 0.5
+similarity_threshold = 0.6
+
+[camera]
+backend = "gstreamer"
+device = "/dev/video0"
+width = 1280
+height = 720
+format = "RGB"
+fps = 30
+
+[recognition]
+enable_liveness = true
+enable_debug_stream = true
+debug_stream_port = 9876
+max_faces = 1
+
+[pam]
+service_name = "doorman"
+socket_path = "/tmp/doorman.sock"
+timeout_seconds = 30
+
+[storage]
+embeddings_path = "/home/angkira/.local/share/doorman/embeddings"
+
+[logging]
+level = "info"
