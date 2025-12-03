@@ -1,0 +1,17 @@
+# Test configuration for video file input
+[daemon]
+user_mode = true
+debug_mode = true
+preview_mode = true
+
+[camera]
+# Use video file instead of camera device
+video_file = "/home/angkira/Home/doorman/2025-11-26-115723.webm"
+# Output resolution
+width = 1024
+height = 720
+fps = 30
+
+[ml]
+backend = "tract"
+device = "cpu"

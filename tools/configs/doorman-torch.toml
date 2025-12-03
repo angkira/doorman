@@ -1,0 +1,55 @@
+# doorman Configuration
+
+[daemon]
+socket_path = "/run/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+backend = "torch"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cuda"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.65  # 0.55-0.75 (lower = more lenient)
+auth_frames = 10
+timeout_secs = 3
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications (single source of truth)
+[models]
+# Face detector (BlazeFace 240x320)
+detector_input_width = 320
+detector_input_height = 240
+detector_num_anchors = 896
+
+# Liveness detector
+liveness_input_width = 80
+liveness_input_height = 80
+
+# Face recognizer (MobileFaceNet)
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 128

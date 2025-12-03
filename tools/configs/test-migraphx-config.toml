@@ -1,0 +1,19 @@
+[camera]
+device = "/dev/video0"
+width = 1024
+height = 720
+fps = 30
+backend = "gstreamer"
+
+[ml]
+models_dir = "/home/angkira/.local/share/doorman/models"
+backend = "migraphx"
+device = "gpu"  
+max_fps = 30
+
+[storage]
+data_dir = "/home/angkira/.local/share/doorman"
+
+[daemon]
+socket_path = "/run/user/1000/doorman.sock"
+debug_mode = true

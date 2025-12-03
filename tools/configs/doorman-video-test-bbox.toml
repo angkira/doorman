@@ -1,0 +1,21 @@
+[camera]
+device = "/dev/video0"
+width = 1024
+height = 720
+fps = 30
+video_file = "2025-11-26-115723.webm"
+
+[ml]
+backend = "tract"
+detector_model = "models/blazeface.onnx"
+liveness_model = "models/liveness.onnx"
+recognizer_model = "models/mobilefacenet.onnx"
+device = "cpu"
+
+[ml.models.detector]
+input_size = [320, 240]
+confidence_threshold = 0.4
+
+[security]
+lock_on_unrecognized = false
+unlock_on_recognized = false

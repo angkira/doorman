@@ -1,0 +1,24 @@
+[ml]
+backend = "ort"
+device = "rocm"
+gpu_device_id = 0
+max_fps = 30
+
+[camera]
+backend = "gstreamer"
+device_path = "/dev/video0"
+width = 1024
+height = 720
+fps = 30
+
+[recognition]
+threshold = 0.45
+
+[enrollment]
+duration_secs = 10
+target_fps = 30
+min_embeddings = 20
+
+[video]
+preview = true
+bbox = true

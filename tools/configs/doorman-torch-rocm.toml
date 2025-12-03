@@ -1,0 +1,28 @@
+# Doorman configuration with PyTorch ROCm backend
+[ml]
+backend = "torch"
+device = "rocm"
+models_dir = "~/.local/share/doorman/models"
+
+[camera]
+device_index = 0
+width = 1024
+height = 720
+fps = 30
+
+[detection]
+confidence_threshold = 0.7
+max_fps = 30
+
+[liveness]
+enabled = true
+threshold = 0.5
+
+[recognition]
+similarity_threshold = 0.65
+max_fps = 30
+
+[debug]
+enabled = true
+show_bbox = true
+show_fps = true

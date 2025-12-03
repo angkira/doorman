@@ -1,0 +1,23 @@
+[ml]
+backend = "ort"
+device = "rocm"
+gpu_device_id = 0
+cpu_threads = 4
+max_fps = 30
+
+[camera]
+device_id = 0
+width = 1024
+height = 720
+fps = 30
+backend = "gstreamer"
+source = "v4l2"
+
+[face_recognition]
+threshold = 0.45
+liveness_threshold = 0.6
+
+[debug]
+preview = false
+log_detections = true
+process_when_unlocked = true

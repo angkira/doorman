@@ -1,0 +1,19 @@
+[ml]
+backend = "migraphx"
+device = "rocm"
+models_dir = "~/.local/share/doorman/models"
+recognition_threshold = 0.6
+max_pipeline_fps = 30
+
+[camera]
+backend = "gstreamer"
+device_index = 0
+width = 1024
+height = 720
+fps = 30
+enable_preview = false
+
+[system]
+socket_path = "/run/user/1000/doorman.sock"
+data_dir = "~/.local/share/doorman"
+debug_mode = true
