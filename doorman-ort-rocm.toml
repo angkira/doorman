@@ -1,0 +1,28 @@
+[general]
+data_dir = "~/.local/share/doorman"
+models_dir = "~/.local/share/doorman/models"
+
+[ml]
+backend = "ort-rocm"
+device = "rocm"
+cpu_threads = 4
+
+[camera]
+backend = "gstreamer"
+width = 1280
+height = 720
+
+[detection]
+confidence = 0.5
+liveness_threshold = 0.5
+enabled = true
+process_interval_ms = 100
+
+[recognition]
+enabled = true
+threshold = 0.6
+process_interval_ms = 500
+
+[ipc]
+user_socket = "/run/user/1000/doorman.sock"
+system_socket = "/run/doorman.sock"

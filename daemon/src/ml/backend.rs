@@ -52,7 +52,7 @@ impl BackendType {
         match s.to_lowercase().as_str() {
             "tract" => Self::Tract,
             "candle" => Self::Candle,
-            "onnx" | "onnxruntime" | "ort" => Self::OnnxRuntime,
+            "onnx" | "onnxruntime" | "ort" | "ort-cpu" | "ort-rocm" => Self::OnnxRuntime,
             "migraphx" => Self::MIGraphX,
             "torch" | "pytorch" => Self::Torch,
             "torch-native" | "pytorch-native" | "native" => Self::TorchNative,
