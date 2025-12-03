@@ -13,9 +13,12 @@ services:
     volumes:
       - ../models:/app/models:ro
       - /opt/rocm:/opt/rocm:ro
+      - /tmp:/tmp  # Unix socket communication
     environment:
       - HSA_OVERRIDE_GFX_VERSION=11.0.1
       - HIP_VISIBLE_DEVICES=0
-    ports:
-      - "5000:5000"
+      - DOORMAN_SOCKET=/tmp/doorman-ml.sock
+      - MODELS_DIR=/app/models
+      - DEVICE=cuda
+    # No ports needed for Unix socket!
     restart: unless-stopped

@@ -15,6 +15,8 @@ mod torch_backend;
 mod torch_backend_native;
 #[cfg(feature = "backend-docker")]
 mod docker_backend;
+#[cfg(feature = "backend-socket")]
+mod socket_backend;
 
 #[cfg(test)]
 mod tests;
@@ -122,6 +124,20 @@ impl MLPipeline {
                 {
                     return Err(anyhow::anyhow!(
                         "Docker backend not compiled. Build with --features backend-docker"
+                    ));
+                }
+            }
+            BackendType::Socket => {
+                #[cfg(feature = "backend-socket")]
+                {
+                    let socket_path = config.ml.socket_path.as_deref()
+                        .unwrap_or("/tmp/doorman-ml.sock");
+                    Arc::new(socket_backend::SocketBackend::new(socket_path)?)
+                }
+                #[cfg(not(feature = "backend-socket"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Socket backend not compiled. Build with --features backend-socket"
                     ));
                 }
             }

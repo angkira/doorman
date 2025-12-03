@@ -1,0 +1,40 @@
+# Doorman Configuration - Unix Socket Backend
+# Fast zero-copy communication with ONNX Runtime via Unix Domain Socket
+
+[daemon]
+socket_path = "/run/doorman.sock"
+data_dir = "~/.local/share/doorman"
+log_level = "info"
+debug_socket = "/tmp/doorman-debug.sock"
+frame_socket = "/tmp/doorman-frames.sock"
+
+[camera]
+backend = "gstreamer"
+width = 1280
+height = 720
+fps = 30
+device = "/dev/video0"
+
+[ml]
+models_dir = "~/.local/share/doorman/models"
+backend = "socket"
+device = "cuda"
+socket_path = "/tmp/doorman-ml.sock"
+
+[authentication]
+similarity_threshold = 0.4
+auth_frames = 3
+timeout_secs = 30
+
+[enrollment]
+enroll_frames = 10
+min_valid_frames = 5
+
+[preprocessing]
+image_width = 640
+image_height = 480
+filter_type = "lanczos3"
+
+[models]
+use_fp16 = false
+batch_size = 1

@@ -47,6 +47,8 @@ pub enum BackendType {
     TorchNative,
     /// Docker (ONNX Runtime in container with ROCm)
     Docker,
+    /// Socket (Unix Domain Socket, zero-copy)
+    Socket,
 }
 
 impl BackendType {
@@ -59,6 +61,7 @@ impl BackendType {
             "torch" | "pytorch" => Self::Torch,
             "torch-native" | "pytorch-native" | "native" => Self::TorchNative,
             "docker" => Self::Docker,
+            "socket" => Self::Socket,
             _ => Self::Tract, // Default to tract
         }
     }

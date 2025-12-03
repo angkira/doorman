@@ -13,9 +13,9 @@ RUN pip install --no-cache-dir \
 # Create app directory
 WORKDIR /app
 
-# Copy inference server
-COPY docker/inference_server.py /app/
-COPY models/ /app/models/
+# Copy inference servers (both HTTP and Socket)
+COPY inference_server.py /app/
+COPY inference_server_socket.py /app/
 
 # Expose port for HTTP API
 EXPOSE 5000
@@ -25,5 +25,5 @@ ENV HSA_OVERRIDE_GFX_VERSION=11.0.1
 ENV HIP_VISIBLE_DEVICES=0
 ENV ONNXRUNTIME_ROCM_VERSION=6.2
 
-# Run inference server
-CMD ["python3", "inference_server.py"]
+# Run inference server (socket by default)
+CMD ["python3", "inference_server_socket.py"]

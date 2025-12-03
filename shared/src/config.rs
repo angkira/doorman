@@ -112,6 +112,10 @@ pub struct MLConfig {
     /// Docker inference service endpoint (for backend = "docker")
     #[serde(default)]
     pub docker_endpoint: Option<String>,
+    
+    /// Unix socket path for ML inference (for backend = "socket")
+    #[serde(default)]
+    pub socket_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +248,8 @@ impl Default for MLConfig {
             device: default_device(),
             cpu_threads: 0,
             gpu_device_id: 0,
+            docker_endpoint: None,
+            socket_path: None,
         }
     }
 }
