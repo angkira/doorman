@@ -285,8 +285,24 @@ if [[ "$BACKEND" == "torch" || "$BACKEND" == "torch-native" ]]; then
         done
     fi
     
-    # Get absolute path to onnxruntime lib
-    ORT_LIB=$(python3 -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi', 'libonnxruntime.so'))" 2>/dev/null || echo "")
+    # Get absolute path to onnxruntime lib and create symlink if needed
+    ORT_CAPI_DIR=$(python3 -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))" 2>/dev/null || echo "")
+    
+    if [ -n "$ORT_CAPI_DIR" ] && [ -d "$ORT_CAPI_DIR" ]; then
+        # Create symlink libonnxruntime.so -> libonnxruntime.so.X.Y.Z
+        cd "$ORT_CAPI_DIR"
+        if [ ! -e "libonnxruntime.so" ]; then
+            VERSIONED_LIB=$(ls libonnxruntime.so.* 2>/dev/null | head -1)
+            if [ -n "$VERSIONED_LIB" ]; then
+                ln -sf "$VERSIONED_LIB" libonnxruntime.so
+                echo "  Created symlink: libonnxruntime.so -> $VERSIONED_LIB"
+            fi
+        fi
+        cd - > /dev/null
+        ORT_LIB="$ORT_CAPI_DIR/libonnxruntime.so"
+    else
+        ORT_LIB=""
+    fi
     
     echo -e "${GREEN}✓${NC} Python environment ready"
     echo "  Python: $(which python3)"
@@ -407,6 +423,7 @@ ExecStart=$INSTALL_DIR/bin/doormand --user --config $CONFIG_DIR/doorman.toml
 Environment="VIRTUAL_ENV=$DATA_DIR/venv"
 Environment="PATH=$DATA_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
 $([ "$GPU_TYPE" = "amd" ] && echo 'Environment="HSA_OVERRIDE_GFX_VERSION=11.0.1"')
+$([ -n "$ORT_CAPI_DIR" ] && echo "Environment=\"LD_LIBRARY_PATH=$ORT_CAPI_DIR:\$LD_LIBRARY_PATH\"")
 $([ -n "$ORT_LIB" ] && echo "Environment=\"ORT_DYLIB_PATH=$ORT_LIB\"")
 Restart=on-failure
 RestartSec=5s
@@ -426,6 +443,7 @@ ExecStart=$INSTALL_DIR/bin/doormand --config $CONFIG_DIR/doorman.toml
 Environment="VIRTUAL_ENV=$DATA_DIR/venv"
 Environment="PATH=$DATA_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
 $([ "$GPU_TYPE" = "amd" ] && echo 'Environment="HSA_OVERRIDE_GFX_VERSION=11.0.1"')
+$([ -n "$ORT_CAPI_DIR" ] && echo "Environment=\"LD_LIBRARY_PATH=$ORT_CAPI_DIR:\$LD_LIBRARY_PATH\"")
 $([ -n "$ORT_LIB" ] && echo "Environment=\"ORT_DYLIB_PATH=$ORT_LIB\"")
 Restart=on-failure
 RestartSec=5s
