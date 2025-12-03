@@ -102,24 +102,44 @@ pub const AUTH_TIMEOUT_SECS: u64 = 3;
 /// Number of frames to capture during authentication
 pub const AUTH_FRAMES: usize = 10;
 
-/// Number of frames to capture during enrollment
-pub const ENROLL_FRAMES: usize = 20;
+/// Duration to record video during enrollment (in seconds)
+pub const ENROLL_DURATION_SECS: u64 = 10;
 
 /// Cosine similarity threshold for face matching (0.0-1.0)
-pub const SIMILARITY_THRESHOLD: f32 = 0.65;
+/// Higher value = stricter matching, less false positives
+pub const SIMILARITY_THRESHOLD: f32 = 0.75;
 
-/// Debug stream message sent to preview clients
+/// Stream message types sent to preview/debug clients
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugStreamMessage {
-    /// Timestamp in milliseconds since daemon start
-    pub timestamp_ms: u64,
-    /// Detection info for current frame
-    pub detection: DetectionInfo,
-    /// System state
-    pub system_locked: bool,
-    /// Processing time in milliseconds
-    pub processing_time_ms: u32,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamMessage {
+    /// Detection/recognition result
+    Detection {
+        timestamp_ms: u64,
+        detection: DetectionInfo,
+        system_locked: bool,
+        processing_time_ms: u32,
+    },
+    /// Enrollment progress update
+    Enrollment {
+        timestamp_ms: u64,
+        phase: EnrollmentPhase,
+        current: usize,
+        total: usize,
+        username: String,
+    },
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EnrollmentPhase {
+    Recording,
+    Processing,
+    Selecting,
+    Complete,
+}
+
+/// Legacy type alias for backwards compatibility during refactoring
+pub type DebugStreamMessage = StreamMessage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

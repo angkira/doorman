@@ -39,6 +39,10 @@ pub enum BackendType {
     Tract,
     /// Candle (Hugging Face)
     Candle,
+    /// MIGraphX (AMD ROCm)
+    MIGraphX,
+    /// PyTorch (Python subprocess with ROCm)
+    Torch,
 }
 
 impl BackendType {
@@ -47,6 +51,8 @@ impl BackendType {
             "tract" => Self::Tract,
             "candle" => Self::Candle,
             "onnx" | "onnxruntime" | "ort" => Self::OnnxRuntime,
+            "migraphx" => Self::MIGraphX,
+            "torch" | "pytorch" => Self::Torch,
             _ => Self::Tract, // Default to tract
         }
     }

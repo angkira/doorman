@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyModule};
 use pyo3::exceptions::PyRuntimeError;
 
 mod detector;
@@ -86,14 +86,12 @@ impl DoormanML {
     ///     List of DetectionResult
     fn detect_faces(
         &mut self,
-        image_data: &PyBytes,
+        image_data: &[u8],
         width: u32,
         height: u32,
     ) -> PyResult<Vec<DetectionResult>> {
-        let data = image_data.as_bytes();
-        
         self.detector
-            .detect(data, width, height)
+            .detect(image_data, width, height)
             .map_err(|e| PyRuntimeError::new_err(format!("Detection failed: {}", e)))
     }
 
@@ -104,11 +102,9 @@ impl DoormanML {
     /// 
     /// Returns:
     ///     LivenessResult
-    fn check_liveness(&mut self, face_crop: &PyBytes) -> PyResult<LivenessResult> {
-        let data = face_crop.as_bytes();
-        
+    fn check_liveness(&mut self, face_crop: &[u8]) -> PyResult<LivenessResult> {
         self.liveness
-            .check(data)
+            .check(face_crop)
             .map_err(|e| PyRuntimeError::new_err(format!("Liveness check failed: {}", e)))
     }
 
@@ -119,8 +115,8 @@ impl DoormanML {
     /// 
     /// Returns:
     ///     Embedding as bytes (512 floats = 2048 bytes)
-    fn extract_embedding<'py>(&mut self, py: Python<'py>, face_crop: &PyBytes) -> PyResult<&'py PyBytes> {
-        let data = face_crop.as_bytes();
+    fn extract_embedding<'py>(&mut self, py: Python<'py>, face_crop: &[u8]) -> PyResult<Py<PyBytes>> {
+        let data = face_crop;
         
         let embedding = self.embedder
             .extract(data)
@@ -134,13 +130,13 @@ impl DoormanML {
             )
         };
 
-        Ok(PyBytes::new(py, bytes))
+        Ok(PyBytes::new_bound(py, bytes).unbind())
     }
 }
 
 /// Native ML module for doorman
 #[pymodule]
-fn doorman_ml_native(_py: Python, m: &PyModule) -> PyResult<()> {
+fn doorman_ml_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DoormanML>()?;
     m.add_class::<DetectionResult>()?;
     m.add_class::<LivenessResult>()?;

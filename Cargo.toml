@@ -5,6 +5,9 @@ members = [
     "daemon",
     "shared",
 ]
+exclude = [
+    "daemon/native_ml",
+]
 
 [workspace.package]
 version = "0.1.0"

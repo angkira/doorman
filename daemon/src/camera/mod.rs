@@ -255,6 +255,25 @@ impl Camera {
         }
     }
 
+    /// Capture frames for a specified duration (for enrollment)
+    pub fn capture_frames_for_duration(&mut self, duration_secs: u64) -> Vec<DynamicImage> {
+        use std::time::{Duration, Instant};
+        
+        let mut frames = Vec::new();
+        let duration = Duration::from_secs(duration_secs);
+        let start = Instant::now();
+        
+        while start.elapsed() < duration {
+            if let Ok(frame) = self.capture_frame() {
+                frames.push(frame);
+            }
+            // Small delay to avoid overwhelming the camera
+            std::thread::sleep(Duration::from_millis(33)); // ~30fps max
+        }
+        
+        frames
+    }
+
     pub fn is_open(&self) -> bool {
         match &self.inner {
             CameraBackendInner::FFmpeg(cam) => cam.is_open(),

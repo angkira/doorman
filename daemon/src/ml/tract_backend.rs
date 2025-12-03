@@ -383,13 +383,16 @@ impl MLBackend for TractBackend {
         let real_score = scores[live_index];
         let threshold = self.model_config.liveness.confidence_threshold;
 
-        info!("Liveness check: index={}, score={:.3}, threshold={}, passed={}",
-            live_index, real_score, threshold, real_score > threshold);
-
-        // TEMPORARY: Skip liveness for video frames during testing
-        // TODO: Re-enable liveness check for production
-        warn!("TEMPORARY: Liveness check bypassed for testing");
-        Ok(true)
+        let passed = real_score > threshold;
+        
+        if passed {
+            info!("✓ Liveness check passed: index={}, score={:.3}", live_index, real_score);
+            Ok(true)
+        } else {
+            warn!("✗ Liveness check failed: index={}, score={:.3} (threshold={})",
+                live_index, real_score, threshold);
+            Ok(false)
+        }
     }
 
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>> {

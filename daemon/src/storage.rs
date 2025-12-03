@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use doorman_shared::{embeddings_path, DATA_DIR};
+use doorman_shared::{StreamMessage, embeddings_path, DATA_DIR};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -9,7 +9,8 @@ use tracing::{debug, info};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserEmbedding {
     pub username: String,
-    pub embedding: Vec<f32>,
+    /// Multiple embeddings capturing different angles/variations of the face
+    pub embeddings: Vec<Vec<f32>>,
     pub enrolled_at: String,
 }
 
@@ -101,26 +102,27 @@ impl Storage {
         Ok(())
     }
 
-    /// Store a user's embedding
-    pub async fn store_embedding(&mut self, username: String, embedding: Vec<f32>) -> Result<()> {
+    /// Store a user's embeddings (multiple variations)
+    pub async fn store_embeddings(&mut self, username: String, embeddings: Vec<Vec<f32>>) -> Result<()> {
         let enrolled_at = chrono::Local::now().to_rfc3339();
         
         let user_embedding = UserEmbedding {
             username: username.clone(),
-            embedding,
+            embeddings,
             enrolled_at,
         };
 
+        let num_embeddings = user_embedding.embeddings.len();
         self.embeddings.insert(username.clone(), user_embedding);
         self.save_embeddings()?;
 
-        info!("Stored embedding for user: {}", username);
+        info!("Stored {} embeddings for user: {}", num_embeddings, username);
         Ok(())
     }
 
-    /// Get a user's embedding
-    pub fn get_embedding(&self, username: &str) -> Option<&Vec<f32>> {
-        self.embeddings.get(username).map(|e| &e.embedding)
+    /// Get a user's embeddings
+    pub fn get_embeddings(&self, username: &str) -> Option<&Vec<Vec<f32>>> {
+        self.embeddings.get(username).map(|e| &e.embeddings)
     }
 
     /// Remove a user's embedding

@@ -1,29 +1,34 @@
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use super::backend::{Face, MLBackend};
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use anyhow::{anyhow, Context, Result};
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use async_trait::async_trait;
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use doorman_shared::Config;
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use image::DynamicImage;
-#[cfg(feature = "backend-ort")]
-use ort::session::{Session, builder::GraphOptimizationLevel};
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+use ort::session::{builder::GraphOptimizationLevel, Session};
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use ort::value::Value;
-#[cfg(feature = "backend-ort")]
-use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider, ROCmExecutionProvider};
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use std::path::Path;
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use std::sync::Mutex;
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use tracing::{info, warn};
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 use image::GenericImageView;
 
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+macro_rules! ort_try {
+    ($expr:expr) => {
+        $expr.map_err(|e| anyhow!("ORT error: {}", e))?
+    };
+}
+
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 /// ONNX Runtime backend (supports GPU via ROCm/CUDA)
 pub struct OrtBackend {
     detector: Option<Mutex<Session>>,
@@ -31,48 +36,20 @@ pub struct OrtBackend {
     recognizer: Option<Mutex<Session>>,
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 impl OrtBackend {
     pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend...");
+        info!("Device: {}", config.ml.device);
 
-        // Initialize with device selection
-        let init = ort::init().with_name("doorman");
+        // Set environment variable for gfx1103 (Radeon 780M) if needed
+        if config.ml.device == "rocm" {
+            std::env::set_var("HSA_OVERRIDE_GFX_VERSION", "11.0.0");
+            info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.0 for gfx1103 support");
+        }
 
-        let init = match config.ml.device.as_str() {
-            "cuda" => {
-                info!("Using CUDA execution provider");
-                init.with_execution_providers([
-                    CUDAExecutionProvider::default()
-                        .with_device_id(config.ml.gpu_device_id)
-                        .build(),
-                    CPUExecutionProvider::default().build(),
-                ])
-            }
-            "rocm" => {
-                info!("Using ROCm execution provider");
-                init.with_execution_providers([
-                    ROCmExecutionProvider::default()
-                        .with_device_id(config.ml.gpu_device_id)
-                        .build(),
-                    CPUExecutionProvider::default().build(),
-                ])
-            }
-            "npu" | "vitisai" => {
-                info!("Using VitisAI execution provider (AMD Ryzen AI NPU)");
-                warn!("NPU support requires AMD Ryzen AI drivers installed");
-                warn!("See: https://ryzenai.docs.amd.com/en/latest/linux.html");
-                // VitisAI EP will be registered via dynamic library if available
-                // Otherwise falls back to CPU
-                init.with_execution_providers([CPUExecutionProvider::default().build()])
-            }
-            _ => {
-                info!("Using CPU execution provider");
-                init.with_execution_providers([CPUExecutionProvider::default().build()])
-            }
-        };
-
-        init.commit()?;
+        // Note: ort 2.0 with load-dynamic will use system ONNX Runtime library
+        // which should have MIGraphX/ROCm support if installed from AMD repos
 
         // Load detector
         let detector_path = models_dir.join("blazeface.onnx");
@@ -145,18 +122,46 @@ impl OrtBackend {
         let threads = if config.ml.cpu_threads > 0 {
             config.ml.cpu_threads as usize
         } else {
-            2
+            4
         };
 
-        Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(threads)?
-            .commit_from_file(path)
-            .with_context(|| format!("Failed to load model: {:?}", path))
+        let builder = Session::builder()
+            .map_err(|e| anyhow!("Failed to create session builder: {}", e))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow!("Failed to set optimization level: {}", e))?
+            .with_intra_threads(threads)
+            .map_err(|e| anyhow!("Failed to set threads: {}", e))?;
+
+        // Configure execution provider based on device
+        #[cfg(feature = "backend-ort-rocm")]
+        let builder = if config.ml.device == "rocm" || config.ml.device == "gpu" {
+            info!("Configuring ROCm execution provider for {:?}", path);
+            builder.with_execution_providers([
+                ort::execution_providers::ROCmExecutionProvider::default()
+                    .with_device_id(0)
+                    .build(),
+            ])
+            .map_err(|e| anyhow!("Failed to set ROCm EP: {}", e))?
+        } else {
+            builder
+        };
+
+        #[cfg(not(feature = "backend-ort-rocm"))]
+        let builder = builder;
+
+        // Load model file
+        let model_bytes = std::fs::read(path)
+            .with_context(|| format!("Failed to read model file: {:?}", path))?;
+        
+        let session = builder
+            .commit_from_memory(&model_bytes)
+            .map_err(|e| anyhow!("Failed to create session from model: {}", e))?;
+
+        Ok(session)
     }
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 impl OrtBackend {
     /// Preprocess image with letterboxing (preserve aspect ratio)
     fn image_to_tensor_letterbox(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> (Vec<f32>, u32, u32, f32, f32) {
@@ -168,8 +173,8 @@ impl OrtBackend {
         let resized_w = (orig_w as f32 * scale) as u32;
         let resized_h = (orig_h as f32 * scale) as u32;
 
-        // Resize image
-        let resized = image.resize(target_w, target_h, image::imageops::FilterType::Lanczos3);
+        // Resize image WITH aspect ratio preserved
+        let resized = image.resize(resized_w, resized_h, image::imageops::FilterType::Lanczos3);
         let resized_rgb = resized.to_rgb8();
 
         // Create black canvas
@@ -196,7 +201,7 @@ impl OrtBackend {
     }
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 #[async_trait]
 impl MLBackend for OrtBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {
@@ -212,12 +217,13 @@ impl MLBackend for OrtBackend {
             self.image_to_tensor_letterbox(image, 320, 240);
 
         let input_tensor =
-            Value::from_array(([1, 3, 240, 320], input_data))?;
+            ort_try!(Value::from_array(([1, 3, 240, 320], input_data)));
         let mut detector_lock = detector.lock().unwrap();
-        let outputs = detector_lock.run(ort::inputs![input_tensor])?;
+        let outputs = ort_try!(detector_lock.run(ort::inputs![input_tensor]));
 
-        let (_, boxes) = outputs[0].try_extract_tensor::<f32>()?;
-        let (_, scores) = outputs[1].try_extract_tensor::<f32>()?;
+        // BlazeFace model outputs: [scores, boxes]
+        let (_, scores) = ort_try!(outputs[0].try_extract_tensor::<f32>());
+        let (_, boxes) = ort_try!(outputs[1].try_extract_tensor::<f32>());
 
         // BlazeFace format: boxes may be fewer than scores
         // Only iterate through boxes that actually exist
@@ -230,6 +236,10 @@ impl MLBackend for OrtBackend {
 
         let max_check = num_boxes.min(num_score_anchors);
 
+        // Debug: check first few scores
+        tracing::debug!("Score array size: {}, first 10 values: {:?}", 
+            scores.len(), &scores[..scores.len().min(10)]);
+
         for box_idx in 0..max_check {
             let score_idx = box_idx * num_classes + 1; // face class
             let face_score = scores[score_idx];
@@ -239,6 +249,8 @@ impl MLBackend for OrtBackend {
                 best_idx = box_idx;
             }
         }
+
+        tracing::debug!("BlazeFace detection: checked {} boxes, best_score={:.3}", max_check, best_score);
 
         if best_score > 0.5 {
             let box_offset = best_idx * 4;
@@ -274,8 +286,10 @@ impl MLBackend for OrtBackend {
             Ok(Some(Face {
                 bbox: (x_orig, y_orig, w_orig, h_orig),
                 confidence: best_score,
+                frame_dimensions: (image.width(), image.height()),
             }))
         } else {
+            tracing::debug!("No face detected (best_score={:.3} < 0.5)", best_score);
             Ok(None)
         }
     }
@@ -294,21 +308,21 @@ impl MLBackend for OrtBackend {
         let (x, y, w, h) = face.bbox;
         let face_crop = image.crop_imm(x.max(0.0) as u32, y.max(0.0) as u32, w as u32, h as u32);
 
-        let face_resized = face_crop.resize_exact(224, 224, image::imageops::FilterType::Lanczos3);
+        let face_resized = face_crop.resize_exact(96, 96, image::imageops::FilterType::Lanczos3);
         let img = face_resized.to_rgb8();
 
-        let mut input = Vec::with_capacity(3 * 224 * 224);
+        let mut input = Vec::with_capacity(3 * 96 * 96);
         for pixel in img.pixels() {
             input.push(pixel[0] as f32 / 255.0);
             input.push(pixel[1] as f32 / 255.0);
             input.push(pixel[2] as f32 / 255.0);
         }
 
-        let input_tensor = Value::from_array(([1, 3, 224, 224], input))?;
+        let input_tensor = ort_try!(Value::from_array(([1, 3, 96, 96], input)));
         let mut liveness_lock = liveness.lock().unwrap();
-        let outputs = liveness_lock.run(ort::inputs![input_tensor])?;
+        let outputs = ort_try!(liveness_lock.run(ort::inputs![input_tensor]));
 
-        let (_, scores) = outputs[0].try_extract_tensor::<f32>()?;
+        let (_, scores) = ort_try!(outputs[0].try_extract_tensor::<f32>());
         Ok(scores[1] > 0.5)
     }
 
@@ -331,11 +345,11 @@ impl MLBackend for OrtBackend {
             input.push((pixel[2] as f32 / 127.5) - 1.0);
         }
 
-        let input_tensor = Value::from_array(([1, 3, 112, 112], input))?;
+        let input_tensor = ort_try!(Value::from_array(([1, 3, 112, 112], input)));
         let mut recognizer_lock = recognizer.lock().unwrap();
-        let outputs = recognizer_lock.run(ort::inputs![input_tensor])?;
+        let outputs = ort_try!(recognizer_lock.run(ort::inputs![input_tensor]));
 
-        let (_, embedding_data) = outputs[0].try_extract_tensor::<f32>()?;
+        let (_, embedding_data) = ort_try!(outputs[0].try_extract_tensor::<f32>());
         let embedding: Vec<f32> = embedding_data.iter().copied().collect();
 
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();

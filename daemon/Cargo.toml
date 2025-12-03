@@ -31,9 +31,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # ML Backends
-ort = { version = "2.0.0-rc.10", features = ["load-dynamic"], optional = true }
+# Using download feature to get compatible ONNX Runtime version
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["download-binaries"] }
 tract-onnx = { version = "0.22", optional = true }
+# torch backend uses Python subprocess, no Rust deps needed
 async-trait = "0.1"
+
+# MIGraphX backend (ROCm iGPU) - uses Python subprocess
+# No additional deps needed, uses system MIGraphX
 
 # Video decoding and GUI
 opencv = { version = "0.93", optional = true, default-features = false, features = ["videoio", "highgui", "imgproc"] }
@@ -51,6 +56,7 @@ crossbeam = { version = "0.8", optional = true }
 
 # Image processing
 image = "0.25"
+base64 = "0.22"
 
 # Embedding storage
 bincode = "1.3"
@@ -70,13 +76,15 @@ chrono = "0.4"
 [features]
 default = ["backend-tract", "camera-gstreamer"]
 backend-tract = ["tract-onnx"]
-backend-ort = ["ort"]
+backend-ort-cpu = ["ort", "ort/download-binaries"]
+backend-ort-rocm = ["ort", "ort/load-dynamic"]
+backend-torch = []
+backend-migraphx = []
 camera-gstreamer = ["gstreamer", "gstreamer-app", "glib"]
 camera-pipewire = ["pipewire", "libspa", "libspa-sys", "crossbeam"]
 camera-v4l2 = ["nokhwa"]
 camera-rscam = ["rscam"]
 video = ["opencv"]
-gpu = []
 
 [dev-dependencies]
 tempfile = "3.13"
@@ -84,3 +92,8 @@ tokio-test = "0.4"
 toml = "0.8"
 base64 = "0.21"
 approx = "0.5.1"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "full_pipeline"
+harness = false

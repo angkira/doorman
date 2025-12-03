@@ -34,6 +34,9 @@ pub struct Config {
     
     #[serde(default)]
     pub preprocessing: PreprocessingConfig,
+    
+    #[serde(default)]
+    pub models: ModelsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +143,36 @@ pub struct PreprocessingConfig {
     pub filter_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsConfig {
+    // Face detector (BlazeFace)
+    #[serde(default = "default_detector_input_width")]
+    pub detector_input_width: u32,
+    
+    #[serde(default = "default_detector_input_height")]
+    pub detector_input_height: u32,
+    
+    #[serde(default = "default_detector_num_anchors")]
+    pub detector_num_anchors: usize,
+    
+    // Liveness detector
+    #[serde(default = "default_liveness_input_width")]
+    pub liveness_input_width: u32,
+    
+    #[serde(default = "default_liveness_input_height")]
+    pub liveness_input_height: u32,
+    
+    // Face recognizer (MobileFaceNet)
+    #[serde(default = "default_recognizer_input_width")]
+    pub recognizer_input_width: u32,
+    
+    #[serde(default = "default_recognizer_input_height")]
+    pub recognizer_input_height: u32,
+    
+    #[serde(default = "default_recognizer_embedding_size")]
+    pub recognizer_embedding_size: usize,
+}
+
 // Default values
 fn default_socket_path() -> String { "/run/doorman.sock".to_string() }
 fn default_debug_socket() -> String { "/run/doorman-debug.sock".to_string() }
@@ -160,6 +193,16 @@ fn default_filter_type() -> String { "lanczos3".to_string() }
 fn default_camera_width() -> u32 { 1280 }
 fn default_camera_height() -> u32 { 720 }
 fn default_fps() -> u32 { 30 }
+
+// Model default values
+fn default_detector_input_width() -> u32 { 128 }
+fn default_detector_input_height() -> u32 { 128 }
+fn default_detector_num_anchors() -> usize { 896 }
+fn default_liveness_input_width() -> u32 { 80 }
+fn default_liveness_input_height() -> u32 { 80 }
+fn default_recognizer_input_width() -> u32 { 112 }
+fn default_recognizer_input_height() -> u32 { 112 }
+fn default_recognizer_embedding_size() -> usize { 128 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -230,6 +273,21 @@ impl Default for PreprocessingConfig {
     }
 }
 
+impl Default for ModelsConfig {
+    fn default() -> Self {
+        Self {
+            detector_input_width: default_detector_input_width(),
+            detector_input_height: default_detector_input_height(),
+            detector_num_anchors: default_detector_num_anchors(),
+            liveness_input_width: default_liveness_input_width(),
+            liveness_input_height: default_liveness_input_height(),
+            recognizer_input_width: default_recognizer_input_width(),
+            recognizer_input_height: default_recognizer_input_height(),
+            recognizer_embedding_size: default_recognizer_embedding_size(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -239,6 +297,7 @@ impl Default for Config {
             authentication: AuthConfig::default(),
             enrollment: EnrollmentConfig::default(),
             preprocessing: PreprocessingConfig::default(),
+            models: ModelsConfig::default(),
         }
     }
 }

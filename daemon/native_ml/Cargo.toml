@@ -7,6 +7,9 @@ edition = "2021"
 name = "doorman_ml_native"
 crate-type = ["cdylib"]
 
+# Not part of parent workspace
+[workspace]
+
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 ort = { version = "2.0.0-rc.7", default-features = false, features = ["half", "load-dynamic"] }

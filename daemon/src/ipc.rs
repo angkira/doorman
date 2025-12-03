@@ -2,14 +2,61 @@ use crate::DaemonState;
 use crate::camera::Camera;
 use anyhow::{Context, Result};
 use doorman_shared::{
-    Request, Response, ResponseData, DaemonInfo, SOCKET_PATH, 
-    AUTH_FRAMES, ENROLL_FRAMES, SIMILARITY_THRESHOLD,
+    Request, Response, ResponseData, DaemonInfo, SOCKET_PATH, StreamMessage, EnrollmentPhase,
+    AUTH_FRAMES, ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
 };
 use image::GenericImageView;
 use std::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
+
+/// Select diverse embeddings from a larger set using maximal distance approach
+/// This ensures we capture different angles/variations of the face
+fn select_diverse_embeddings(embeddings: Vec<Vec<f32>>, count: usize) -> Vec<Vec<f32>> {
+    if embeddings.len() <= count {
+        return embeddings;
+    }
+
+    let mut selected = Vec::with_capacity(count);
+    let mut remaining: Vec<_> = embeddings.into_iter().enumerate().collect();
+
+    // Start with first embedding
+    selected.push(remaining[0].1.clone());
+    remaining.remove(0);
+
+    // Greedily select embeddings that are furthest from already selected ones
+    while selected.len() < count && !remaining.is_empty() {
+        let mut max_min_dist = 0.0f32;
+        let mut best_idx = 0;
+
+        for (idx, (_orig_idx, candidate)) in remaining.iter().enumerate() {
+            // Find minimum distance to any selected embedding
+            let min_dist = selected
+                .iter()
+                .map(|selected_emb| {
+                    // Cosine distance = 1 - cosine_similarity
+                    let dot: f32 = candidate
+                        .iter()
+                        .zip(selected_emb.iter())
+                        .map(|(a, b)| a * b)
+                        .sum();
+                    1.0 - dot // Already normalized embeddings
+                })
+                .fold(f32::INFINITY, f32::min);
+
+            if min_dist > max_min_dist {
+                max_min_dist = min_dist;
+                best_idx = idx;
+            }
+        }
+
+        selected.push(remaining[best_idx].1.clone());
+        remaining.remove(best_idx);
+    }
+
+    selected
+}
 
 pub async fn run_server(state: DaemonState) -> Result<()> {
     let socket_path = &state.config.daemon.socket_path;
@@ -129,8 +176,8 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
 
     // Check if user is enrolled
     let storage = state.storage.read().await;
-    let stored_embedding = match storage.get_embedding(username) {
-        Some(emb) => emb.clone(),
+    let stored_embeddings = match storage.get_embeddings(username) {
+        Some(embs) => embs.clone(),
         None => {
             warn!("User not enrolled: {}", username);
             return Response::Failure {
@@ -171,17 +218,22 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     for (i, frame) in frames.iter().enumerate() {
         match state.ml_pipeline.process_frame(frame).await {
             Ok(Some((_face, embedding))) => {
-                let similarity = crate::ml::cosine_similarity(&embedding, &stored_embedding);
-                debug!("Frame {}: similarity = {:.4}", i, similarity);
+                // Compare with all stored embeddings and take best match
+                let max_similarity = stored_embeddings
+                    .iter()
+                    .map(|stored_emb| crate::ml::cosine_similarity(&embedding, stored_emb))
+                    .fold(0.0f32, f32::max);
                 
-                if similarity > best_similarity {
-                    best_similarity = similarity;
+                debug!("Frame {}: max similarity = {:.4}", i, max_similarity);
+                
+                if max_similarity > best_similarity {
+                    best_similarity = max_similarity;
                 }
 
-                if similarity >= SIMILARITY_THRESHOLD {
-                    info!("Authentication successful for {} (similarity: {:.4})", username, similarity);
+                if max_similarity >= SIMILARITY_THRESHOLD {
+                    info!("Authentication successful for {} (similarity: {:.4})", username, max_similarity);
                     return Response::Success {
-                        message: Some(format!("Authenticated (confidence: {:.2}%)", similarity * 100.0)),
+                        message: Some(format!("Authenticated (confidence: {:.2}%)", max_similarity * 100.0)),
                         data: None,
                     };
                 }
@@ -217,13 +269,23 @@ async fn handle_enroll(
     }
 
     // Get camera and capture frames
-    info!("Capturing {} frames for enrollment...", ENROLL_FRAMES);
+    info!("Recording video for {} seconds for enrollment...", ENROLL_DURATION_SECS);
+    
+    // Broadcast enrollment start
+    state.debug_broadcaster.broadcast(StreamMessage::Enrollment {
+        timestamp_ms: state.start_time.elapsed().as_millis() as u64,
+        phase: EnrollmentPhase::Recording,
+        current: 0,
+        total: (ENROLL_DURATION_SECS * 30) as usize, // Estimate ~30fps
+        username: username.to_string(),
+    });
+    
     let frames = {
         let mut camera_lock = state.camera.write().await;
         let camera = camera_lock.as_mut().expect("Camera should be available after ensure_camera_available");
 
-        // Capture frames before dropping the lock
-        camera.capture_frames(ENROLL_FRAMES)
+        // Capture frames for duration before dropping the lock
+        camera.capture_frames_for_duration(ENROLL_DURATION_SECS)
     }; // Lock is dropped here
 
     if frames.is_empty() {
@@ -235,9 +297,29 @@ async fn handle_enroll(
 
     info!("Captured {} frames, processing...", frames.len());
 
+    // Broadcast processing start
+    state.debug_broadcaster.broadcast(StreamMessage::Enrollment {
+        timestamp_ms: state.start_time.elapsed().as_millis() as u64,
+        phase: EnrollmentPhase::Processing,
+        current: 0,
+        total: frames.len(),
+        username: username.to_string(),
+    });
+
     // Process frames and collect valid embeddings
     let mut valid_embeddings = Vec::new();
     for (i, frame) in frames.iter().enumerate() {
+        // Broadcast progress every 5 frames
+        if i % 5 == 0 {
+            state.debug_broadcaster.broadcast(StreamMessage::Enrollment {
+                timestamp_ms: state.start_time.elapsed().as_millis() as u64,
+                phase: EnrollmentPhase::Processing,
+                current: i,
+                total: frames.len(),
+                username: username.to_string(),
+            });
+        }
+        
         match state.ml_pipeline.process_frame(frame).await {
             Ok(Some((_face, embedding))) => {
                 debug!("Frame {}: Valid embedding extracted", i);
@@ -251,6 +333,15 @@ async fn handle_enroll(
             }
         }
     }
+    
+    // Broadcast completion
+    state.debug_broadcaster.broadcast(StreamMessage::Enrollment {
+        timestamp_ms: state.start_time.elapsed().as_millis() as u64,
+        phase: EnrollmentPhase::Complete,
+        current: valid_embeddings.len(),
+        total: frames.len(),
+        username: username.to_string(),
+    });
 
     if valid_embeddings.is_empty() {
         error!("No valid face embeddings extracted");
@@ -259,40 +350,31 @@ async fn handle_enroll(
         };
     }
 
-    info!("Extracted {} valid embeddings", valid_embeddings.len());
+    let num_valid = valid_embeddings.len();
+    info!("Extracted {} valid embeddings", num_valid);
 
-    // Average the embeddings to create master embedding
-    let embedding_dim = valid_embeddings[0].len();
-    let mut master_embedding = vec![0.0f32; embedding_dim];
+    // Select diverse embeddings that cover different angles/variations
+    // Use k-means-like approach: pick embeddings that are furthest apart
+    const TARGET_EMBEDDINGS: usize = 10;
+    let selected_embeddings = if valid_embeddings.len() <= TARGET_EMBEDDINGS {
+        valid_embeddings
+    } else {
+        select_diverse_embeddings(valid_embeddings, TARGET_EMBEDDINGS)
+    };
 
-    for embedding in &valid_embeddings {
-        for (i, val) in embedding.iter().enumerate() {
-            master_embedding[i] += val;
-        }
-    }
+    info!("Selected {} diverse embeddings for storage", selected_embeddings.len());
 
-    for val in &mut master_embedding {
-        *val /= valid_embeddings.len() as f32;
-    }
-
-    // Normalize the embedding
-    let norm: f32 = master_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for val in &mut master_embedding {
-            *val /= norm;
-        }
-    }
-
-    // Store the embedding
+    // Store the embeddings
     let mut storage = state.storage.write().await;
-    match storage.store_embedding(username.to_string(), master_embedding).await {
+    match storage.store_embeddings(username.to_string(), selected_embeddings.clone()).await {
         Ok(()) => {
             info!("Successfully enrolled user: {}", username);
             Response::Success {
                 message: Some(format!(
-                    "Enrolled successfully ({}/{} frames used)",
-                    valid_embeddings.len(),
-                    frames.len()
+                    "Enrollment successful! Processed {}/{} frames, selected {} high-quality embeddings.",
+                    num_valid,
+                    frames.len(),
+                    selected_embeddings.len()
                 )),
                 data: None,
             }
@@ -435,10 +517,15 @@ async fn handle_detect_and_recognize(state: &DaemonState) -> Response {
         let mut best_similarity = 0.0f32;
 
         for username in storage.list_users() {
-            if let Some(stored_embedding) = storage.get_embedding(&username.username) {
-                let similarity = crate::ml::cosine_similarity(&embedding, stored_embedding);
-                if similarity > best_similarity {
-                    best_similarity = similarity;
+            if let Some(stored_embeddings) = storage.get_embeddings(&username.username) {
+                // Compare with all stored embeddings and take best match
+                let max_similarity = stored_embeddings
+                    .iter()
+                    .map(|stored_emb| crate::ml::cosine_similarity(&embedding, stored_emb))
+                    .fold(0.0f32, f32::max);
+                    
+                if max_similarity > best_similarity {
+                    best_similarity = max_similarity;
                     best_match = Some(username.username.clone());
                 }
             }

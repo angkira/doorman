@@ -3,10 +3,14 @@ mod backend;
 mod blazeface_decoder;
 mod model_config;
 
-#[cfg(feature = "backend-ort")]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
 mod ort_backend;
 #[cfg(feature = "backend-tract")]
 pub mod tract_backend;
+#[cfg(feature = "backend-migraphx")]
+mod migraphx_backend;
+#[cfg(feature = "backend-torch")]
+mod torch_backend;
 
 #[cfg(test)]
 mod tests;
@@ -52,20 +56,44 @@ impl MLPipeline {
                 }
             }
             BackendType::OnnxRuntime => {
-                #[cfg(feature = "backend-ort")]
+                #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
                 {
                     Arc::new(ort_backend::OrtBackend::new(&models_dir, config)?)
                 }
-                #[cfg(not(feature = "backend-ort"))]
+                #[cfg(not(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm")))]
                 {
                     return Err(anyhow::anyhow!(
-                        "ORT backend not compiled. Build with --features backend-ort"
+                        "ORT backend not compiled. Build with --features backend-ort-cpu or backend-ort-rocm"
                     ));
                 }
             }
             BackendType::Candle => {
                 warn!("Candle backend not yet implemented");
                 return Err(anyhow::anyhow!("Candle backend not yet implemented"));
+            }
+            BackendType::MIGraphX => {
+                #[cfg(feature = "backend-migraphx")]
+                {
+                    Arc::new(migraphx_backend::MIGraphXBackend::new(&models_dir.to_string_lossy())?)
+                }
+                #[cfg(not(feature = "backend-migraphx"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "MIGraphX backend not compiled. Build with --features backend-migraphx"
+                    ));
+                }
+            }
+            BackendType::Torch => {
+                #[cfg(feature = "backend-torch")]
+                {
+                    Arc::new(torch_backend::TorchBackend::new(&models_dir)?)
+                }
+                #[cfg(not(feature = "backend-torch"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Torch backend not compiled. Build with --features backend-torch"
+                    ));
+                }
             }
         };
 
@@ -78,21 +106,32 @@ impl MLPipeline {
     }
 
     pub fn dummy(config: &Config) -> Self {
-        // For testing - create dummy backend
-        #[cfg(feature = "backend-tract")]
+        // For testing - create dummy backend with whatever is available
+        #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
         {
-            let models_dir = PathBuf::from("/nonexistent");
-            let backend = tract_backend::TractBackend::new(&models_dir)
-                .unwrap_or_else(|_| panic!("Failed to create dummy backend"));
+            let models_dir = PathBuf::from(&config.ml.models_dir);
+            let backend = ort_backend::OrtBackend::new(&models_dir, config)
+                .unwrap_or_else(|e| panic!("Failed to create dummy ORT backend: {}", e));
 
             Self {
                 backend: Arc::new(backend),
                 config: config.clone(),
             }
         }
-        #[cfg(not(feature = "backend-tract"))]
+        #[cfg(all(feature = "backend-tract", not(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))))]
         {
-            panic!("No backend available for dummy. Compile with --features backend-tract");
+            let models_dir = PathBuf::from(&config.ml.models_dir);
+            let backend = tract_backend::TractBackend::new(&models_dir)
+                .unwrap_or_else(|e| panic!("Failed to create dummy Tract backend: {}", e));
+
+            Self {
+                backend: Arc::new(backend),
+                config: config.clone(),
+            }
+        }
+        #[cfg(not(any(feature = "backend-tract", feature = "backend-ort-cpu", feature = "backend-ort-rocm")))]
+        {
+            panic!("No backend available for dummy. Compile with --features backend-tract, backend-ort-cpu, or backend-ort-rocm");
         }
     }
 

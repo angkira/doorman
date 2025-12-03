@@ -1,5 +1,5 @@
 use anyhow::Result;
-use doorman_shared::DebugStreamMessage;
+use doorman_shared::StreamMessage;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 /// Broadcaster for debug stream messages to preview clients
 pub struct DebugStreamBroadcaster {
-    sender: broadcast::Sender<DebugStreamMessage>,
+    sender: broadcast::Sender<StreamMessage>,
 }
 
 impl DebugStreamBroadcaster {
@@ -19,13 +19,13 @@ impl DebugStreamBroadcaster {
     }
 
     /// Send a message to all connected preview clients
-    pub fn broadcast(&self, message: DebugStreamMessage) {
+    pub fn broadcast(&self, message: StreamMessage) {
         // Ignore error if no receivers (no preview connected)
         let _ = self.sender.send(message);
     }
 
     /// Subscribe to receive messages
-    pub fn subscribe(&self) -> broadcast::Receiver<DebugStreamMessage> {
+    pub fn subscribe(&self) -> broadcast::Receiver<StreamMessage> {
         self.sender.subscribe()
     }
 

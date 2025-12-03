@@ -37,17 +37,28 @@ unsafe impl Sync for DaemonState {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Check for --user, --preview, and --video-file flags
+    // Check for --user, --preview, --config and --video-file flags
     let user_mode = std::env::args().any(|arg| arg == "--user");
     let preview_mode = std::env::args().any(|arg| arg == "--preview");
+    let config_file = std::env::args()
+        .skip_while(|arg| arg != "--config")
+        .nth(1)
+        .map(std::path::PathBuf::from);
     let video_file = std::env::args()
         .skip_while(|arg| arg != "--video-file")
         .nth(1)
         .map(std::path::PathBuf::from);
 
-    // Load configuration from DOORMAN_CONFIG env var or standard locations
-    let mut config = if let Ok(config_path) = std::env::var("DOORMAN_CONFIG") {
-        info!("Loading config from: {}", config_path);
+    // Load configuration from --config, DOORMAN_CONFIG env var, or standard locations
+    let mut config = if let Some(config_path) = config_file {
+        info!("Loading config from --config: {:?}", config_path);
+        Config::load_from(&config_path)
+            .unwrap_or_else(|e| {
+                warn!("Failed to load config from --config: {}", e);
+                Config::default()
+            })
+    } else if let Ok(config_path) = std::env::var("DOORMAN_CONFIG") {
+        info!("Loading config from DOORMAN_CONFIG: {}", config_path);
         Config::load_from(&std::path::PathBuf::from(config_path))
             .unwrap_or_else(|e| {
                 warn!("Failed to load config from DOORMAN_CONFIG: {}", e);

@@ -3,3 +3,6 @@ LIBCLANG_PATH = "/usr/lib/x86_64-linux-gnu"
 LD_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu:/usr/lib/llvm-20/lib"
 CLANG_PATH = "/usr/bin/clang-20"
 
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C", "link-arg=-Wl,--allow-shlib-undefined"]
+

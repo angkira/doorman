@@ -1,6 +1,8 @@
-use anyhow::{anyhow, Result};
-use ndarray::{Array, Array4, Ix4};
-use ort::{execution_providers::CUDAExecutionProvider, GraphOptimizationLevel, Session};
+use anyhow::Result;
+use ndarray::{Array, Array4};
+use ort::execution_providers::CUDAExecutionProvider;
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Value;
 use std::path::Path;
 use crate::DetectionResult;
 
@@ -50,14 +52,15 @@ impl FaceDetector {
         let (input_tensor, scale, offset_x, offset_y) = 
             self.preprocess_image(image_data, width, height)?;
 
-        // Run inference
-        let outputs = self.session.run(ort::inputs![input_tensor]?)?;
+        // Run inference and extract data
+        let (scores_vec, boxes_vec) = {
+            let outputs = self.session.run(ort::inputs![input_tensor])?;
+            let (_, scores) = outputs[0].try_extract_tensor::<f32>()?;
+            let (_, boxes) = outputs[1].try_extract_tensor::<f32>()?;
+            (scores.to_vec(), boxes.to_vec())
+        };
 
-        // Parse BlazeFace outputs
-        let scores = outputs[0].try_extract_tensor::<f32>()?.view().to_owned();
-        let boxes = outputs[1].try_extract_tensor::<f32>()?.view().to_owned();
-
-        self.parse_detections(&scores, &boxes, scale, offset_x, offset_y, width, height)
+        self.parse_detections(&scores_vec, &boxes_vec, scale, offset_x, offset_y, width, height)
     }
 
     fn preprocess_image(
@@ -65,7 +68,7 @@ impl FaceDetector {
         rgb_data: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<(ort::Value, f32, f32, f32)> {
+    ) -> Result<(Value, f32, f32, f32)> {
         const TARGET_W: u32 = 320;
         const TARGET_H: u32 = 240;
 
@@ -93,15 +96,15 @@ impl FaceDetector {
         }
 
         let array: Array4<f32> = Array::from_shape_vec((1, 3, TARGET_H as usize, TARGET_W as usize), tensor_data)?;
-        let value = ort::Value::from_array(array)?;
+        let value = Value::from_array(array)?;
 
-        Ok((value, scale, offset_x, offset_y))
+        Ok((value.into(), scale, offset_x, offset_y))
     }
 
     fn parse_detections(
         &self,
-        scores: &ndarray::ArrayBase<ndarray::OwnedRepr<f32>, Ix4>,
-        boxes: &ndarray::ArrayBase<ndarray::OwnedRepr<f32>, Ix4>,
+        scores: &[f32],
+        boxes: &[f32],
         scale: f32,
         offset_x: f32,
         offset_y: f32,
@@ -110,34 +113,30 @@ impl FaceDetector {
     ) -> Result<Vec<DetectionResult>> {
         let mut detections = Vec::new();
 
-        // BlazeFace outputs: scores [1, num_anchors, 2], boxes [1, num_anchors, 4]
-        let scores_slice = scores.as_slice().ok_or_else(|| anyhow!("Invalid scores tensor"))?;
-        let boxes_slice = boxes.as_slice().ok_or_else(|| anyhow!("Invalid boxes tensor"))?;
-
-        let num_boxes = boxes_slice.len() / 4;
+        let num_boxes = boxes.len() / 4;
         let num_classes = 2;
 
         for i in 0..num_boxes {
             let score_idx = i * num_classes + 1; // face class
-            if score_idx >= scores_slice.len() {
+            if score_idx >= scores.len() {
                 break;
             }
 
-            let confidence = scores_slice[score_idx];
+            let confidence = scores[score_idx];
             if confidence < 0.5 {
                 continue;
             }
 
             let box_idx = i * 4;
-            if box_idx + 3 >= boxes_slice.len() {
+            if box_idx + 3 >= boxes.len() {
                 break;
             }
 
             // Get box coordinates (model outputs normalized coordinates)
-            let x1 = boxes_slice[box_idx];
-            let y1 = boxes_slice[box_idx + 1];
-            let x2 = boxes_slice[box_idx + 2];
-            let y2 = boxes_slice[box_idx + 3];
+            let x1 = boxes[box_idx];
+            let y1 = boxes[box_idx + 1];
+            let x2 = boxes[box_idx + 2];
+            let y2 = boxes[box_idx + 3];
 
             // Convert from letterboxed coordinates to original image coordinates
             let x1_orig = ((x1 * 320.0 - offset_x) / scale).max(0.0).min(orig_width as f32);

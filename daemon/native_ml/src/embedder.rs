@@ -1,6 +1,8 @@
 use anyhow::Result;
 use ndarray::{Array, Array4};
-use ort::{execution_providers::CUDAExecutionProvider, GraphOptimizationLevel, Session};
+use ort::execution_providers::CUDAExecutionProvider;
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Value;
 use std::path::Path;
 
 pub struct FaceEmbedder {
@@ -57,13 +59,13 @@ impl FaceEmbedder {
         }
 
         let array: Array4<f32> = Array::from_shape_vec((1, 3, SIZE, SIZE), tensor_data)?;
-        let input_tensor = ort::Value::from_array(array)?;
+        let input_tensor = Value::from_array(array)?;
 
         // Run inference
-        let outputs = self.session.run(ort::inputs![input_tensor]?)?;
-        let embedding = outputs[0].try_extract_tensor::<f32>()?.view();
+        let outputs = self.session.run(ort::inputs![input_tensor])?;
+        let (_, embedding) = outputs[0].try_extract_tensor::<f32>()?;
 
         // MobileFaceNet outputs 512-dim embedding
-        Ok(embedding.as_slice().unwrap().to_vec())
+        Ok(embedding.to_vec())
     }
 }

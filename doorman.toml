@@ -15,10 +15,10 @@ fps = 30
 [ml]
 models_dir = "/var/lib/doorman/models"
 
-# Backend: "tract" (pure Rust, default) or "onnx" (supports GPU)
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
 backend = "tract"
 
-# Device: "cpu", "cuda", "rocm" (only for onnx backend)
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
 device = "cpu"
 
 cpu_threads = 0  # 0 = auto
@@ -37,3 +37,19 @@ min_valid_frames = 5
 image_width = 256
 image_height = 256
 filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications (single source of truth)
+[models]
+# Face detector (BlazeFace)
+detector_input_width = 128
+detector_input_height = 128
+detector_num_anchors = 896
+
+# Liveness detector
+liveness_input_width = 80
+liveness_input_height = 80
+
+# Face recognizer (MobileFaceNet)
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 128

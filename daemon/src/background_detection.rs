@@ -1,5 +1,5 @@
 use crate::DaemonState;
-use doorman_shared::{DebugStreamMessage, DetectionInfo, SIMILARITY_THRESHOLD};
+use doorman_shared::{StreamMessage, DebugStreamMessage, DetectionInfo, SIMILARITY_THRESHOLD};
 use tokio::time::{interval, Duration};
 use tracing::{debug, info};
 
@@ -26,7 +26,7 @@ pub async fn run_background_detection(state: DaemonState) {
 
         if !is_locked && !debug_mode {
             // System unlocked and not in debug mode, skip processing
-            let message = DebugStreamMessage {
+            let message = StreamMessage::Detection {
                 timestamp_ms: state.start_time.elapsed().as_millis() as u64,
                 detection: DetectionInfo {
                     bbox: None,
@@ -81,7 +81,7 @@ pub async fn run_background_detection(state: DaemonState) {
             Ok(Some(f)) => f,
             Ok(None) => {
                 // No face detected - broadcast to debug stream
-                let message = DebugStreamMessage {
+                let message = StreamMessage::Detection {
                     timestamp_ms: state.start_time.elapsed().as_millis() as u64,
                     detection: DetectionInfo {
                         bbox: None,
@@ -111,7 +111,7 @@ pub async fn run_background_detection(state: DaemonState) {
         let storage = state.storage.read().await;
         if storage.count() == 0 {
             // No users enrolled, just broadcast detection
-            let message = DebugStreamMessage {
+            let message = StreamMessage::Detection {
                 timestamp_ms: state.start_time.elapsed().as_millis() as u64,
                 detection: DetectionInfo {
                     bbox: Some(bbox),
@@ -134,7 +134,7 @@ pub async fn run_background_detection(state: DaemonState) {
             Ok(emb) => emb,
             Err(e) => {
                 tracing::warn!("Embedding extraction failed: {}", e);
-                let message = DebugStreamMessage {
+                let message = StreamMessage::Detection {
                     timestamp_ms: state.start_time.elapsed().as_millis() as u64,
                     detection: DetectionInfo {
                         bbox: Some(bbox),
@@ -159,12 +159,17 @@ pub async fn run_background_detection(state: DaemonState) {
 
         let users = storage.list_users();
         for user_info in users {
-            if let Some(stored_embedding) = storage.get_embedding(&user_info.username) {
-                let similarity = crate::ml::cosine_similarity(&embedding, stored_embedding);
-                if similarity > best_similarity {
-                    best_similarity = similarity;
-                    if similarity >= SIMILARITY_THRESHOLD {
-                        best_match = Some((user_info.username.clone(), similarity));
+            if let Some(stored_embeddings) = storage.get_embeddings(&user_info.username) {
+                // Compare with all stored embeddings and take best match
+                let max_similarity = stored_embeddings
+                    .iter()
+                    .map(|stored_emb| crate::ml::cosine_similarity(&embedding, stored_emb))
+                    .fold(0.0f32, f32::max);
+                    
+                if max_similarity > best_similarity {
+                    best_similarity = max_similarity;
+                    if max_similarity >= SIMILARITY_THRESHOLD {
+                        best_match = Some((user_info.username.clone(), max_similarity));
                     }
                 }
             }
@@ -187,7 +192,7 @@ pub async fn run_background_detection(state: DaemonState) {
         };
 
         // Broadcast detection result to debug stream
-        let message = DebugStreamMessage {
+        let message = StreamMessage::Detection {
             timestamp_ms: state.start_time.elapsed().as_millis() as u64,
             detection: DetectionInfo {
                 bbox: Some(bbox),

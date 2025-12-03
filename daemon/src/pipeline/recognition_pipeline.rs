@@ -1,7 +1,7 @@
 use super::types::DetectionResult;
 use crate::debug_stream::DebugStreamBroadcaster;
 use crate::storage::Storage;
-use doorman_shared::{Config, DebugStreamMessage, DetectionInfo, SIMILARITY_THRESHOLD};
+use doorman_shared::{StreamMessage, Config, DebugStreamMessage, DetectionInfo, SIMILARITY_THRESHOLD};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -39,7 +39,7 @@ pub async fn run_recognition_pipeline(
             (Some(f), Some(e)) => (f, e),
             _ => {
                 // Broadcast "no face" to debug stream
-                let message = DebugStreamMessage {
+                let message = StreamMessage::Detection {
                     timestamp_ms,
                     detection: DetectionInfo {
                         bbox: None,
@@ -63,12 +63,17 @@ pub async fn run_recognition_pipeline(
         let mut best_similarity = 0.0f32;
 
         for user_info in storage_guard.list_users() {
-            if let Some(stored_emb) = storage_guard.get_embedding(&user_info.username) {
-                let similarity = cosine_similarity(&embedding, stored_emb);
-                if similarity > best_similarity {
-                    best_similarity = similarity;
-                    if similarity >= config.authentication.similarity_threshold {
-                        best_match = Some((user_info.username.clone(), similarity));
+            if let Some(stored_embeddings) = storage_guard.get_embeddings(&user_info.username) {
+                // Compare with all stored embeddings and take best match
+                let max_similarity = stored_embeddings
+                    .iter()
+                    .map(|stored_emb| cosine_similarity(&embedding, stored_emb))
+                    .fold(0.0f32, f32::max);
+                    
+                if max_similarity > best_similarity {
+                    best_similarity = max_similarity;
+                    if max_similarity >= config.authentication.similarity_threshold {
+                        best_match = Some((user_info.username.clone(), max_similarity));
                     }
                 }
             }
@@ -97,7 +102,7 @@ pub async fn run_recognition_pipeline(
                 (face.bbox.2 * result.frame_width as f32) as u32,
                 (face.bbox.3 * result.frame_height as f32) as u32,
             );
-            let message = DebugStreamMessage {
+            let message = StreamMessage::Detection {
                 timestamp_ms,
                 detection: DetectionInfo {
                     bbox: Some(bbox_px),
@@ -125,7 +130,7 @@ pub async fn run_recognition_pipeline(
                 (face.bbox.2 * result.frame_width as f32) as u32,
                 (face.bbox.3 * result.frame_height as f32) as u32,
             );
-            let message = DebugStreamMessage {
+            let message = StreamMessage::Detection {
                 timestamp_ms,
                 detection: DetectionInfo {
                     bbox: Some(bbox_px),

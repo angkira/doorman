@@ -1,6 +1,8 @@
 use anyhow::Result;
 use ndarray::{Array, Array4};
-use ort::{execution_providers::CUDAExecutionProvider, GraphOptimizationLevel, Session};
+use ort::execution_providers::CUDAExecutionProvider;
+use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::value::Value;
 use std::path::Path;
 use crate::LivenessResult;
 
@@ -58,14 +60,14 @@ impl LivenessChecker {
         }
 
         let array: Array4<f32> = Array::from_shape_vec((1, 3, SIZE, SIZE), tensor_data)?;
-        let input_tensor = ort::Value::from_array(array)?;
+        let input_tensor = Value::from_array(array)?;
 
         // Run inference
-        let outputs = self.session.run(ort::inputs![input_tensor]?)?;
-        let scores = outputs[0].try_extract_tensor::<f32>()?.view();
+        let outputs = self.session.run(ort::inputs![input_tensor])?;
+        let (_, scores) = outputs[0].try_extract_tensor::<f32>()?;
 
         // Liveness model outputs [fake_score, live_score]
-        let live_score = scores[[0, 1]];
+        let live_score = if scores.len() >= 2 { scores[1] } else { 0.0 };
         let is_live = live_score > 0.5;
 
         Ok(LivenessResult {

@@ -1,6 +1,6 @@
 use super::types::{DetectionResult, Face, RawFrame};
 use crate::{ml::MLPipeline, debug_stream::DebugStreamBroadcaster};
-use doorman_shared::DebugStreamMessage;
+use doorman_shared::StreamMessage;
 use image::GenericImageView;
 use std::sync::Arc;
 use std::time::Instant;
@@ -57,7 +57,7 @@ pub async fn run_detection_pipeline(
                 Ok(None) => {
                     // No face detected or liveness check failed
                     if let Some(ref bc) = broadcaster {
-                        bc.broadcast(DebugStreamMessage {
+                        bc.broadcast(StreamMessage::Detection {
                             timestamp_ms: timestamp.elapsed().as_millis() as u64,
                             detection: doorman_shared::DetectionInfo {
                                 bbox: None,
@@ -131,7 +131,7 @@ pub async fn run_detection_pipeline(
                 debug!("  Bottom-right corner: ({:.1}, {:.1})", x_px + w_px, y_px + h_px);
                 info!("Broadcasting detection: bbox=({}, {}, {}, {}) = top_left + size, confidence={:.3}", 
                     bbox_pixels.0, bbox_pixels.1, bbox_pixels.2, bbox_pixels.3, face.confidence);
-                bc.broadcast(DebugStreamMessage {
+                bc.broadcast(StreamMessage::Detection {
                     timestamp_ms: timestamp.elapsed().as_millis() as u64,
                     detection: doorman_shared::DetectionInfo {
                         bbox: Some(bbox_pixels),
