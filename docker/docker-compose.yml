@@ -2,8 +2,8 @@ version: '3.8'
 services:
   onnx-inference:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.onnx-rocm
+      context: .
+      dockerfile: Dockerfile.onnx-rocm
     container_name: doorman-onnx-rocm
     devices:
       - /dev/kfd:/dev/kfd

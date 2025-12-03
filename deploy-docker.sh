@@ -58,10 +58,10 @@ fi
 
 # Step 3: Build Rust daemon
 echo ""
-echo "[3/6] Building Rust daemon with Docker backend..."
+echo "[3/6] Building Rust daemon with Socket backend..."
 echo "----------------------------------------------"
 cd "$PROJECT_ROOT"
-cargo build --release --features backend-docker,camera-gstreamer
+cargo build --release --features backend-socket,camera-gstreamer
 echo "✓ Daemon built"
 
 # Step 4: Install binaries
@@ -69,7 +69,7 @@ echo ""
 echo "[4/6] Installing binaries..."
 echo "----------------------------------------------"
 cp target/release/doormand "$INSTALL_DIR/bin/"
-cp doorman-docker.toml "$INSTALL_DIR/config/doorman.toml"
+cp doorman-socket.toml "$INSTALL_DIR/config/doorman.toml"
 
 # Update paths in config
 sed -i "s|~/.local/share/doorman|$DATA_DIR|g" "$INSTALL_DIR/config/doorman.toml"
@@ -115,8 +115,8 @@ ExecStart=$INSTALL_DIR/bin/doormand --user --config $INSTALL_DIR/config/doorman.
 Restart=always
 RestartSec=5
 
-# Wait for container to be ready
-ExecStartPre=/bin/bash -c 'for i in {1..30}; do curl -sf http://localhost:5000/health && break || sleep 2; done'
+# Wait for container socket to be ready
+ExecStartPre=/bin/bash -c 'for i in {1..30}; do [ -S /tmp/doorman-ml.sock ] && break || sleep 2; done'
 
 Environment="PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="XDG_RUNTIME_DIR=/run/user/%U"
@@ -137,15 +137,15 @@ systemctl --user enable doorman-inference.service doormand.service
 systemctl --user start doorman-inference.service
 
 echo ""
-echo "Waiting for inference container to be ready..."
+echo "Waiting for inference container socket..."
 for i in {1..30}; do
-    if curl -sf http://localhost:5000/health > /dev/null 2>&1; then
-        echo "✓ Inference container ready!"
+    if [ -S /tmp/doorman-ml.sock ]; then
+        echo "✓ Inference container ready (socket created)!"
         break
     fi
     sleep 2
     if [ $i -eq 30 ]; then
-        echo "❌ Timeout waiting for container. Check: docker compose logs"
+        echo "❌ Timeout waiting for socket. Check: docker compose logs"
         exit 1
     fi
 done

@@ -177,22 +177,84 @@ impl SocketBackend {
 #[async_trait]
 impl MLBackend for SocketBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {
-        // TODO: Implement properly - for now return None
-        // Need to make self mutable or use interior mutability (Mutex)
-        warn!("Socket backend detect_face not yet implemented");
+        self.ensure_connected()?;
+        
+        let mut guard = self.stream.lock().unwrap();
+        let stream = guard.as_mut().unwrap();
+        
+        // Send detect request (type=1)
+        stream.write_all(&[1u8])?;
+        
+        // Send frame
+        Self::send_frame_to(stream, image)?;
+        
+        // Receive response
+        let response = Self::recv_json_response_from(stream)?;
+        
+        // Parse detections
+        if let Some(detections) = response.detections {
+            if let Some(det) = detections.first() {
+                let (width, height) = image.dimensions();
+                
+                // Convert normalized coordinates to pixels
+                let x = (det.bbox[0] * width as f32) as u32;
+                let y = (det.bbox[1] * height as f32) as u32;
+                let w = ((det.bbox[2] - det.bbox[0]) * width as f32) as u32;
+                let h = ((det.bbox[3] - det.bbox[1]) * height as f32) as u32;
+                
+                return Ok(Some(Face {
+                    bbox: (x, y, w, h),
+                    confidence: det.confidence,
+                    landmarks: vec![],
+                }));
+            }
+        }
+        
         Ok(None)
     }
     
-    async fn check_liveness(&self, _image: &DynamicImage, _face: &Face) -> Result<bool> {
-        // TODO: Implement properly
-        warn!("Socket backend check_liveness not yet implemented");
-        Ok(true)
+    async fn check_liveness(&self, image: &DynamicImage, face: &Face) -> Result<bool> {
+        self.ensure_connected()?;
+        
+        // Crop face
+        let (x, y, w, h) = face.bbox;
+        let face_img = image.crop_imm(x, y, w, h);
+        
+        let mut guard = self.stream.lock().unwrap();
+        let stream = guard.as_mut().unwrap();
+        
+        // Send liveness request (type=2)
+        stream.write_all(&[2u8])?;
+        
+        // Send face image
+        Self::send_frame_to(stream, &face_img)?;
+        
+        // Receive response
+        let response = Self::recv_json_response_from(stream)?;
+        
+        Ok(response.is_live.unwrap_or(false))
     }
     
-    async fn extract_embedding(&self, _image: &DynamicImage, _face: &Face) -> Result<Vec<f32>> {
-        // TODO: Implement properly
-        warn!("Socket backend extract_embedding not yet implemented");
-        Ok(vec![0.0; 128])
+    async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>> {
+        self.ensure_connected()?;
+        
+        // Crop face
+        let (x, y, w, h) = face.bbox;
+        let face_img = image.crop_imm(x, y, w, h);
+        
+        let mut guard = self.stream.lock().unwrap();
+        let stream = guard.as_mut().unwrap();
+        
+        // Send embedding request (type=3)
+        stream.write_all(&[3u8])?;
+        
+        // Send face image
+        Self::send_frame_to(stream, &face_img)?;
+        
+        // Receive response
+        let embedding = Self::recv_binary_response_from(stream)?;
+        
+        Ok(embedding)
     }
     
     fn is_ready(&self) -> bool {
