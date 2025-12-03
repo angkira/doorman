@@ -248,19 +248,24 @@ fn call_method(&self, method: &str, params: Value) -> Result<Value> {
 
 1. ✅ Создан TorchIPCBackend
 2. ✅ Создана конфигурация для сравнения
-3. ⏳ Запустить полный бенчмарк Direct vs IPC
-4. ⏳ Проанализировать результаты
-5. ⏳ Выбрать оптимизацию (вероятно: shared memory)
-6. ⏳ Реализовать оптимизацию
-7. ⏳ Измерить улучшение
+3. ✅ **Реализован Native Extension (PyO3)** - см. `NATIVE_EXTENSION.md`
+4. ⏳ Собрать Native Extension
+5. ⏳ Запустить полный бенчмарк Direct vs Native vs IPC
+6. ⏳ Проанализировать результаты
+7. ⏳ Интегрировать Native Extension в daemon
 
-## Выводы (предварительные)
+## Выводы
 
 **Проблема:** IPC overhead ~50-80ms per frame убивает производительность
 
-**Решение:**
-- Shared memory (лучший ROI)
-- ИЛИ: Native extension (самое быстрое, но сложнее)
-- ИЛИ: Batching (для high-throughput scenarios)
+**Решение (реализовано):**
+- ✅ **Native PyO3 Extension** - прямой вызов ONNX Runtime из Rust
+- См. `daemon/native_ml/` и `NATIVE_EXTENSION.md`
+- Ожидаемо: **~55-60 FPS** (<1ms overhead)
 
-**Ожидаемый результат после оптимизации:** 40-50 FPS (вместо текущих 7-8 FPS)
+**Альтернативы (если Native Extension не подойдёт):**
+- Shared memory (промежуточное): ~40-50 FPS
+- Batching (для throughput): 3x FPS
+- gRPC (бинарный протокол): ~30-40 FPS
+
+**Ожидаемый результат:** 55-60 FPS (вместо текущих 7-8 FPS) = **7-8x улучшение**

@@ -1,0 +1,32 @@
+[
+  {
+    "name": "PyTorch Direct (Baseline)",
+    "mode": "detection",
+    "backend": "torch-direct",
+    "iterations": 50,
+    "warmup_iterations": 10,
+    "image_width": 1024,
+    "image_height": 720,
+    "device": "cuda"
+  },
+  {
+    "name": "PyTorch Native (PyO3)",
+    "mode": "detection",
+    "backend": "torch-native",
+    "iterations": 50,
+    "warmup_iterations": 10,
+    "image_width": 1024,
+    "image_height": 720,
+    "device": "cuda"
+  },
+  {
+    "name": "PyTorch IPC (JSON+Base64)",
+    "mode": "detection",
+    "backend": "torch-ipc",
+    "iterations": 50,
+    "warmup_iterations": 10,
+    "image_width": 1024,
+    "image_height": 720,
+    "device": "cuda"
+  }
+]

@@ -198,6 +198,71 @@ class TorchIPCBackend:
             self.process.terminate()
             self.process.wait(timeout=5)
 
+class TorchNativeBackend:
+    """Native PyO3 extension (zero IPC overhead)"""
+
+    def __init__(self, models_dir: str, device: str = "cuda"):
+        try:
+            from doorman_ml import DoormanML
+        except ImportError:
+            raise RuntimeError(
+                "doorman_ml_native not installed. Build it first:\n"
+                "  cd daemon/native_ml && ./build.sh"
+            )
+
+        self.ml = DoormanML(models_dir, device)
+        print(f"[TorchNative] Initialized native extension on {device}")
+
+    def detect_faces(self, image_data: bytes, width: int, height: int) -> dict:
+        """Detect faces via native extension"""
+        # Convert JPEG to RGB bytes
+        img = Image.open(io.BytesIO(image_data))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        rgb_bytes = img.tobytes()
+
+        # Call native function
+        detections = self.ml.detect_faces(rgb_bytes, width, height)
+        
+        # Convert to dict format
+        return {
+            "detections": [
+                {
+                    "bbox": det.bbox,
+                    "confidence": det.confidence,
+                    "landmarks": det.landmarks
+                }
+                for det in detections
+            ]
+        }
+
+    def check_liveness(self, face_crop: bytes) -> dict:
+        """Check liveness via native extension"""
+        img = Image.open(io.BytesIO(face_crop))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        rgb_bytes = img.tobytes()
+
+        result = self.ml.check_liveness(rgb_bytes)
+        return {
+            "is_live": result.is_live,
+            "confidence": result.confidence
+        }
+
+    def extract_embedding(self, face_crop: bytes) -> dict:
+        """Extract embedding via native extension"""
+        img = Image.open(io.BytesIO(face_crop))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        rgb_bytes = img.tobytes()
+
+        embedding_bytes = self.ml.extract_embedding(rgb_bytes)
+        embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
+        
+        return {
+            "embedding": embedding.tolist()
+        }
+
 class BenchmarkRunner:
     """Main benchmark runner"""
 
@@ -223,6 +288,8 @@ class BenchmarkRunner:
             self.backend = TorchDirectBackend(str(self.models_dir), self.config.device)
         elif self.config.backend == "torch-ipc":
             self.backend = TorchIPCBackend(str(self.models_dir), self.config.device)
+        elif self.config.backend == "torch-native":
+            self.backend = TorchNativeBackend(str(self.models_dir), self.config.device)
         else:
             raise ValueError(f"Backend not implemented: {self.config.backend}")
 
