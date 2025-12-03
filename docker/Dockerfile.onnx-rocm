@@ -1,0 +1,29 @@
+# ONNX Runtime inference service with ROCm support
+# For AMD Radeon 780M iGPU (gfx1103)
+
+FROM rocm/pytorch:rocm6.2_ubuntu22.04_py3.10_pytorch_release_2.3.0
+
+# Install ONNX Runtime with ROCm
+RUN pip install --no-cache-dir \
+    onnxruntime-rocm==1.19.2 \
+    numpy \
+    pillow \
+    flask
+
+# Create app directory
+WORKDIR /app
+
+# Copy inference server
+COPY docker/inference_server.py /app/
+COPY models/ /app/models/
+
+# Expose port for HTTP API
+EXPOSE 5000
+
+# Set ROCm environment
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.1
+ENV HIP_VISIBLE_DEVICES=0
+ENV ONNXRUNTIME_ROCM_VERSION=6.2
+
+# Run inference server
+CMD ["python3", "inference_server.py"]
