@@ -74,27 +74,45 @@ impl TorchShmBackend {
             .map(|p| format!("{}:{}", tools_path.display(), p))
             .unwrap_or_else(|_| tools_path.display().to_string());
         
-        // Use venv python if available, else system python3
-        let python_bin = Path::new(env!("CARGO_MANIFEST_DIR"))
+        // Use venv python if available
+        let venv_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join(".venv/bin/python3");
-        let python_cmd = if python_bin.exists() {
-            python_bin
+            .join(".venv");
+        
+        let python_bin = if venv_path.exists() {
+            venv_path.join("bin/python3")
         } else {
             Path::new("python3").to_path_buf()
         };
         
-        debug!("Using Python: {}", python_cmd.display());
+        let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/ml/torch_inference_shm.py");
         
-        let process = Command::new(python_cmd)
-            .arg("-u") // Unbuffered
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ml/torch_inference_shm.py"))
+        debug!("Using Python: {}", python_bin.display());
+        debug!("Script: {}", script_path.display());
+        
+        let mut cmd = Command::new(&python_bin);
+        cmd.arg("-u")
+            .arg(script_path)
             .env("DOORMAN_MODELS_DIR", models_dir)
             .env("DOORMAN_DEVICE", device)
             .env("DOORMAN_SHM_NAME", &shm_name)
             .env("DOORMAN_SOCKET_PATH", SOCKET_PATH)
-            .env("PYTHONPATH", pythonpath)
+            .env("PYTHONPATH", pythonpath);
+        
+        // Activate venv if using it
+        if venv_path.exists() {
+            cmd.env("VIRTUAL_ENV", venv_path.display().to_string());
+            let venv_bin = venv_path.join("bin");
+            if let Ok(path) = std::env::var("PATH") {
+                cmd.env("PATH", format!("{}:{}", venv_bin.display(), path));
+            } else {
+                cmd.env("PATH", venv_bin.display().to_string());
+            }
+        }
+        
+        let process = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
