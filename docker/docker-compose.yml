@@ -1,24 +1,56 @@
 version: '3.8'
+
 services:
-  onnx-inference:
+  doorman-inference:
     build:
       context: .
-      dockerfile: Dockerfile.onnx-rocm
-    container_name: doorman-onnx-rocm
+      dockerfile: Dockerfile.minimal
+    image: doorman-inference:minimal
+    container_name: doorman-inference
+    
+    # Security - allow executable stack for ONNX Runtime
+    security_opt:
+      - seccomp:unconfined
+    
+    # GPU access
     devices:
-      - /dev/kfd:/dev/kfd
-      - /dev/dri:/dev/dri
+      - /dev/kfd
+      - /dev/dri
     group_add:
       - video
+    
+    # Volumes
     volumes:
-      - ../models:/app/models:ro
+      # Models (read-only)
+      - ${MODELS_DIR:-~/.local/share/doorman/models}:/models:ro
+      
+      # Socket for IPC
+      - /run/doorman-inference.sock:/run/doorman-inference.sock
+      
+      # Host ROCm libraries (read-only) - for GPU access
       - /opt/rocm:/opt/rocm:ro
-      - /tmp:/tmp  # Unix socket communication
+    
+    # Environment
     environment:
       - HSA_OVERRIDE_GFX_VERSION=11.0.1
       - HIP_VISIBLE_DEVICES=0
-      - DOORMAN_SOCKET=/tmp/doorman-ml.sock
-      - MODELS_DIR=/app/models
-      - DEVICE=cuda
-    # No ports needed for Unix socket!
+      - ONNXRUNTIME_ROCM_VERSION=6.2
+      - MODELS_DIR=/models
+      - SOCKET_PATH=/run/doorman-inference.sock
+      
+      # Library paths for host ROCm
+      - LD_LIBRARY_PATH=/opt/rocm/lib
+      - PATH=/opt/rocm/bin:${PATH}
+    
+    # Network
+    network_mode: host
+    
+    # Restart policy
     restart: unless-stopped
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

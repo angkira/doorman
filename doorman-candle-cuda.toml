@@ -1,0 +1,25 @@
+# Doorman Configuration - Candle Backend with CUDA
+# Pure Rust ML framework with CUDA acceleration
+
+[daemon]
+socket_path = "~/.local/share/doorman/doorman.sock"
+data_dir = "~/.local/share/doorman"
+debug_socket_path = "~/.local/share/doorman/doorman-debug.sock"
+
+[ml]
+backend = "candle"
+device = "cuda"  # Use CUDA for NVIDIA GPUs
+models_dir = "~/.local/share/doorman/models"
+confidence_threshold = 0.7
+recognition_threshold = 0.6
+
+[camera]
+backend = "gstreamer"  # PipeWire-integrated, fast
+width = 1280
+height = 720
+fps = 30
+
+[pipeline]
+detection_fps = 10
+preview_fps = 15
+buffer_size = 5

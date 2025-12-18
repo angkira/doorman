@@ -92,13 +92,13 @@ echo ""
 echo "  1) ${GREEN}tract${NC}       - Pure Rust, CPU-only, no external deps"
 echo "                    ${YELLOW}Performance: ~15-20 FPS (CPU)${NC}"
 echo ""
-echo "  2) ${GREEN}torch${NC}       - Python PyTorch + ONNX Runtime (recommended)"
+echo "  2) ${GREEN}candle-cuda${NC} - Pure Rust with CUDA (recommended for NVIDIA)"
+echo "                    ${YELLOW}Performance: 50-60 FPS (NVIDIA GPU)${NC}"
+echo "                    Requires: CUDA 12.x"
+echo ""
+echo "  3) ${GREEN}torch${NC}       - Python PyTorch + ONNX Runtime"
 echo "                    ${YELLOW}Performance: 50-60 FPS (GPU) / 8-10 FPS (CPU)${NC}"
 echo "                    Requires: onnxruntime-rocm (AMD) or onnxruntime-gpu (NVIDIA)"
-echo ""
-echo "  3) ${GREEN}torch-native${NC} - Native PyO3 extension (experimental)"
-echo "                    ${YELLOW}Performance: 169 FPS (theoretical)${NC}"
-echo "                    ${RED}Warning: Complex setup, library path issues${NC}"
 echo ""
 
 read -p "Choose backend [1-3] (default: 2): " BACKEND_CHOICE
@@ -109,21 +109,25 @@ case $BACKEND_CHOICE in
         BACKEND="tract"
         CARGO_FEATURES="backend-tract"
         PYTHON_DEPS=()
+        NEEDS_PYTHON=false
         ;;
     2)
-        BACKEND="torch"
-        CARGO_FEATURES="backend-torch"
-        if [ "$GPU_TYPE" = "amd" ]; then
-            PYTHON_DEPS=("onnxruntime-rocm")
-        elif [ "$GPU_TYPE" = "nvidia" ]; then
-            PYTHON_DEPS=("onnxruntime-gpu")
-        else
-            PYTHON_DEPS=("onnxruntime")
+        BACKEND="candle-cuda"
+        CARGO_FEATURES="backend-candle-cuda"
+        PYTHON_DEPS=()
+        NEEDS_PYTHON=false
+        if [ "$GPU_TYPE" != "nvidia" ]; then
+            echo -e "${YELLOW}Warning: candle-cuda requires NVIDIA GPU with CUDA${NC}"
+            read -p "Continue anyway? [y/N]: " CONTINUE
+            if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
         fi
         ;;
     3)
-        BACKEND="torch-native"
-        CARGO_FEATURES="backend-torch-native"
+        BACKEND="torch"
+        CARGO_FEATURES="backend-torch"
+        NEEDS_PYTHON=true
         if [ "$GPU_TYPE" = "amd" ]; then
             PYTHON_DEPS=("onnxruntime-rocm")
         elif [ "$GPU_TYPE" = "nvidia" ]; then
@@ -254,7 +258,7 @@ echo -e "${GREEN}✓${NC} Directories created"
 echo ""
 
 # Setup Python environment (for torch backends)
-if [[ "$BACKEND" == "torch" || "$BACKEND" == "torch-native" ]]; then
+if [ "$NEEDS_PYTHON" = true ]; then
     echo -e "${YELLOW}→${NC} Setting up Python environment..."
     
     # Create venv in data directory (persistent location)
@@ -342,11 +346,25 @@ fi
 echo -e "${YELLOW}→${NC} Building daemon (this may take a few minutes)..."
 echo "  Features: $CARGO_FEATURES"
 
-# Set build env for native backend
-if [ "$BACKEND" = "torch-native" ]; then
+# Set build env for Python-based backends
+if [ "$NEEDS_PYTHON" = true ]; then
     export PYO3_PYTHON="$DATA_DIR/venv/bin/python3"
     export VIRTUAL_ENV="$DATA_DIR/venv"
     echo "  Building with Python: $PYO3_PYTHON"
+fi
+
+# Set CUDA env for candle-cuda
+if [ "$BACKEND" = "candle-cuda" ]; then
+    # Try to detect CUDA location
+    if [ -d "/usr/local/cuda" ]; then
+        export CUDA_HOME="/usr/local/cuda"
+    elif [ -d "/opt/cuda" ]; then
+        export CUDA_HOME="/opt/cuda"
+    fi
+    if [ -n "$CUDA_HOME" ]; then
+        echo "  Using CUDA from: $CUDA_HOME"
+        export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
+    fi
 fi
 
 cargo build --release --features "$CARGO_FEATURES"

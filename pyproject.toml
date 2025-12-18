@@ -19,6 +19,7 @@ torch-rocm = [
     "torch",
     "torchvision",
     "facenet-pytorch>=2.6.0",
+    "posix-ipc>=1.1.0",  # Shared memory
 ]
 
 [project.scripts]

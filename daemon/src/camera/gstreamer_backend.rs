@@ -228,13 +228,13 @@ impl CameraBackend for GStreamerCamera {
 
         // Setup state tracking
         // Get bus for error checking (no watch needed, we'll poll synchronously)
-        let bus = pipeline
+        let _bus = pipeline
             .bus()
             .ok_or_else(|| anyhow!("Pipeline has no bus"))?;
 
         // Start pipeline
         info!("Setting pipeline state to PLAYING...");
-        let state_change = match pipeline.set_state(gst::State::Playing) {
+        let _state_change = match pipeline.set_state(gst::State::Playing) {
             Ok(change) => {
                 info!("Pipeline state change initiated: {:?}", change);
                 change

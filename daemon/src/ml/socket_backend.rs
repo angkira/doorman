@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use image::{DynamicImage, GenericImageView};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::os::unix::net::UnixStream;
 use std::io::{Read, Write};
@@ -76,7 +76,7 @@ impl SocketBackend {
     }
     
     fn ensure_connected(&self) -> Result<()> {
-        let mut guard = self.stream.lock().unwrap();
+        let guard = self.stream.lock().unwrap();
         if guard.is_none() {
             drop(guard);
             self.connect()?;
@@ -197,15 +197,15 @@ impl MLBackend for SocketBackend {
                 let (width, height) = image.dimensions();
                 
                 // Convert normalized coordinates to pixels
-                let x = (det.bbox[0] * width as f32) as u32;
-                let y = (det.bbox[1] * height as f32) as u32;
-                let w = ((det.bbox[2] - det.bbox[0]) * width as f32) as u32;
-                let h = ((det.bbox[3] - det.bbox[1]) * height as f32) as u32;
+                let x = det.bbox[0];
+                let y = det.bbox[1];
+                let w = det.bbox[2] - det.bbox[0];
+                let h = det.bbox[3] - det.bbox[1];
                 
                 return Ok(Some(Face {
                     bbox: (x, y, w, h),
                     confidence: det.confidence,
-                    landmarks: vec![],
+                    frame_dimensions: (width, height),
                 }));
             }
         }
@@ -216,8 +216,12 @@ impl MLBackend for SocketBackend {
     async fn check_liveness(&self, image: &DynamicImage, face: &Face) -> Result<bool> {
         self.ensure_connected()?;
         
-        // Crop face
-        let (x, y, w, h) = face.bbox;
+        // Crop face (convert normalized coords to pixels)
+        let (width, height) = face.frame_dimensions;
+        let x = (face.bbox.0 * width as f32) as u32;
+        let y = (face.bbox.1 * height as f32) as u32;
+        let w = (face.bbox.2 * width as f32) as u32;
+        let h = (face.bbox.3 * height as f32) as u32;
         let face_img = image.crop_imm(x, y, w, h);
         
         let mut guard = self.stream.lock().unwrap();
@@ -238,8 +242,12 @@ impl MLBackend for SocketBackend {
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>> {
         self.ensure_connected()?;
         
-        // Crop face
-        let (x, y, w, h) = face.bbox;
+        // Crop face (convert normalized coords to pixels)
+        let (width, height) = face.frame_dimensions;
+        let x = (face.bbox.0 * width as f32) as u32;
+        let y = (face.bbox.1 * height as f32) as u32;
+        let w = (face.bbox.2 * width as f32) as u32;
+        let h = (face.bbox.3 * height as f32) as u32;
         let face_img = image.crop_imm(x, y, w, h);
         
         let mut guard = self.stream.lock().unwrap();

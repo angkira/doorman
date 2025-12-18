@@ -283,6 +283,137 @@ class TorchNativeBackend:
             "embedding": embedding.tolist()
         }
 
+class TorchShmBackend:
+    """PyTorch with Shared Memory IPC (zero-copy frame transfer)"""
+
+    def __init__(self, models_dir: str, device: str = "cuda"):
+        import socket
+        import posix_ipc
+        import mmap
+        
+        self.device = device
+        self.models_dir = models_dir
+        
+        # Create shared memory
+        shm_name = f"/doorman_bench_shm_{os.getpid()}"
+        self.shm = posix_ipc.SharedMemory(shm_name, flags=posix_ipc.O_CREAT, size=1920*1080*3)
+        self.shm_mmap = mmap.mmap(self.shm.fd, 1920*1080*3)
+        
+        # Start inference subprocess
+        socket_path = f"/tmp/doorman-bench-{os.getpid()}.sock"
+        if os.path.exists(socket_path):
+            os.remove(socket_path)
+        
+        self.socket_path = socket_path
+        
+        # Start Python inference server
+        script_path = Path(__file__).parent.parent / "daemon" / "src" / "ml" / "torch_inference_shm.py"
+        self.process = subprocess.Popen(
+            ["python3", str(script_path)],
+            env={
+                **os.environ,
+                "DOORMAN_MODELS_DIR": models_dir,
+                "DOORMAN_DEVICE": device,
+                "DOORMAN_SHM_NAME": shm_name,
+                "DOORMAN_SOCKET_PATH": socket_path,
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Wait for server to be ready
+        print("[TorchShm] Waiting for inference server...")
+        for _ in range(50):
+            if os.path.exists(socket_path):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("Inference server failed to start")
+        
+        # Connect to server
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.connect(socket_path)
+        print(f"[TorchShm] Connected to inference server on {device}")
+
+    def _send_command(self, cmd: str, width: int, height: int) -> dict:
+        """Send command and receive JSON response"""
+        msg = f"{cmd} {width} {height}\n"
+        self.socket.sendall(msg.encode())
+        
+        # Read response (newline-terminated JSON)
+        response = b""
+        while True:
+            chunk = self.socket.recv(1)
+            if chunk == b'\n':
+                break
+            response += chunk
+        
+        return json.loads(response.decode())
+
+    def detect_faces(self, image_data: bytes, width: int, height: int) -> dict:
+        """Detect faces via shared memory"""
+        # Convert JPEG to RGB
+        img = Image.open(io.BytesIO(image_data))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        rgb_data = np.array(img)
+        
+        # Write to shared memory (zero-copy!)
+        rgb_bytes = rgb_data.tobytes()
+        self.shm_mmap.seek(0)
+        self.shm_mmap.write(rgb_bytes)
+        
+        # Send detect command (no image data over socket!)
+        response = self._send_command("detect", width, height)
+        return response
+
+    def check_liveness(self, face_crop: bytes) -> dict:
+        """Check liveness via shared memory"""
+        img = Image.open(io.BytesIO(face_crop))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        rgb_data = np.array(img)
+        
+        rgb_bytes = rgb_data.tobytes()
+        self.shm_mmap.seek(0)
+        self.shm_mmap.write(rgb_bytes)
+        
+        response = self._send_command("liveness", img.width, img.height)
+        return response
+
+    def extract_embedding(self, face_crop: bytes) -> dict:
+        """Extract embedding via shared memory"""
+        img = Image.open(io.BytesIO(face_crop))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        rgb_data = np.array(img)
+        
+        rgb_bytes = rgb_data.tobytes()
+        self.shm_mmap.seek(0)
+        self.shm_mmap.write(rgb_bytes)
+        
+        response = self._send_command("embedding", img.width, img.height)
+        return response
+
+    def __del__(self):
+        """Cleanup"""
+        try:
+            self._send_command("shutdown", 0, 0)
+        except:
+            pass
+        
+        if hasattr(self, 'socket'):
+            self.socket.close()
+        if hasattr(self, 'process'):
+            self.process.terminate()
+            self.process.wait(timeout=5)
+        if hasattr(self, 'shm_mmap'):
+            self.shm_mmap.close()
+        if hasattr(self, 'shm'):
+            posix_ipc.unlink_shared_memory(self.shm.name)
+        if hasattr(self, 'socket_path') and os.path.exists(self.socket_path):
+            os.remove(self.socket_path)
+
 class ResourceMonitor:
     """Monitor CPU, RAM, GPU usage during benchmark"""
     
@@ -403,6 +534,8 @@ class BenchmarkRunner:
             self.backend = TorchIPCBackend(str(self.models_dir), self.config.device)
         elif self.config.backend == "torch-native":
             self.backend = TorchNativeBackend(str(self.models_dir), self.config.device)
+        elif self.config.backend == "torch-shm":
+            self.backend = TorchShmBackend(str(self.models_dir), self.config.device)
         else:
             raise ValueError(f"Backend not implemented: {self.config.backend}")
 

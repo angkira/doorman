@@ -13,10 +13,14 @@ mod migraphx_backend;
 mod torch_backend;
 #[cfg(feature = "backend-torch-native")]
 mod torch_backend_native;
+#[cfg(feature = "backend-torch-shm")]
+mod torch_shm_backend;
 #[cfg(feature = "backend-docker")]
 mod docker_backend;
 #[cfg(feature = "backend-socket")]
 mod socket_backend;
+#[cfg(feature = "backend-candle")]
+mod candle_backend;
 
 #[cfg(test)]
 mod tests;
@@ -74,8 +78,16 @@ impl MLPipeline {
                 }
             }
             BackendType::Candle => {
-                warn!("Candle backend not yet implemented");
-                return Err(anyhow::anyhow!("Candle backend not yet implemented"));
+                #[cfg(feature = "backend-candle")]
+                {
+                    Arc::new(candle_backend::CandleBackend::new(&models_dir, &config.ml.device)?)
+                }
+                #[cfg(not(feature = "backend-candle"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Candle backend not compiled. Build with --features backend-candle or backend-candle-rocm"
+                    ));
+                }
             }
             BackendType::MIGraphX => {
                 #[cfg(feature = "backend-migraphx")]
@@ -110,6 +122,18 @@ impl MLPipeline {
                 {
                     return Err(anyhow::anyhow!(
                         "Torch Native backend not compiled. Build with --features backend-torch-native"
+                    ));
+                }
+            }
+            BackendType::TorchShm => {
+                #[cfg(feature = "backend-torch-shm")]
+                {
+                    Arc::new(torch_shm_backend::TorchShmBackend::new(&models_dir.to_string_lossy(), &config.ml.device)?)
+                }
+                #[cfg(not(feature = "backend-torch-shm"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "Torch Shared Memory backend not compiled. Build with --features backend-torch-shm"
                     ));
                 }
             }

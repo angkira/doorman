@@ -90,6 +90,29 @@ auth_frames = 7  # Fewer frames needed with GPU
 
 Install ROCm, rebuild with `cargo build --release --features gpu`. See GPU_SETUP.md.
 
+## Performance Optimization
+
+### Shared Memory IPC (40-50 FPS)
+
+For best performance with PyTorch backend, use shared memory to eliminate IPC overhead:
+
+```bash
+# Build with shared memory optimization
+cargo build --release --features backend-torch-shm,camera-gstreamer
+
+# Test performance
+./test-torch-shm-daemon.sh
+
+# Benchmark comparison
+python3 tools/benchmark.py -c tools/benchmark_configs/ipc_optimization_comparison.json
+```
+
+**Performance improvement:**
+- torch-ipc (base): ~7 FPS (JSON+Base64 overhead)
+- torch-shm (optimized): ~45 FPS (zero-copy frames)
+
+See [SHARED_MEMORY_QUICKSTART.md](SHARED_MEMORY_QUICKSTART.md) for details.
+
 ## Config
 
 Edit `/etc/doorman/doorman.toml`:

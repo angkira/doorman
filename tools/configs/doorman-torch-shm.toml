@@ -1,0 +1,26 @@
+[ml]
+backend = "torch-shm"
+device = "cuda"  # or "cpu"
+models_dir = "~/.local/share/doorman/models"
+
+[ml.torch_shm]
+# Python executable (uses system Python with venv)
+python = "python3"
+# Shared memory size for frame transfer (640x480x3 = ~1MB, use 2MB for safety)
+shm_size_mb = 2
+# Inference timeout
+timeout_secs = 5
+
+[camera]
+backend = "gstreamer"
+width = 640
+height = 480
+fps = 30
+device_index = 0
+
+[pipeline]
+detection_fps = 10
+preview_fps = 15
+
+[storage]
+data_dir = "~/.local/share/doorman"

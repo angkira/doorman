@@ -74,11 +74,55 @@ impl TorchBackend {
             request_id: 0,
         };
         
-        tracing::info!("✓ PyTorch backend initialized");
-        
-        Ok(Self {
+        let backend = Self {
             process: Mutex::new(process),
-        })
+        };
+        
+        // Warm up models
+        tracing::info!("Warming up PyTorch models...");
+        backend.warmup_models()?;
+        tracing::info!("✓ PyTorch models warmed up and ready");
+        
+        Ok(backend)
+    }
+    
+    fn warmup_models(&self) -> Result<()> {
+        // Create dummy image for warmup
+        let dummy_img = DynamicImage::new_rgb8(640, 480);
+        
+        // Warmup: detect_face
+        match self.call_method("detect_face", serde_json::json!({
+            "image_base64": Self::image_to_base64(&dummy_img)?
+        })) {
+            Ok(_) => tracing::info!("  ✓ Face detector warmed up"),
+            Err(e) => tracing::warn!("  ✗ Failed to warm up face detector: {}", e),
+        }
+        
+        // Warmup: check_liveness (with dummy face)
+        match self.call_method("check_liveness", serde_json::json!({
+            "image_base64": Self::image_to_base64(&dummy_img)?,
+            "bbox": [100, 100, 200, 200]
+        })) {
+            Ok(_) => tracing::info!("  ✓ Liveness detector warmed up"),
+            Err(e) => tracing::warn!("  ✗ Failed to warm up liveness detector: {}", e),
+        }
+        
+        // Warmup: extract_embedding (with dummy face)
+        match self.call_method("extract_embedding", serde_json::json!({
+            "image_base64": Self::image_to_base64(&dummy_img)?,
+            "bbox": [100, 100, 200, 200]
+        })) {
+            Ok(_) => tracing::info!("  ✓ Face recognizer warmed up"),
+            Err(e) => tracing::warn!("  ✗ Failed to warm up face recognizer: {}", e),
+        }
+        
+        Ok(())
+    }
+    
+    fn image_to_base64(image: &DynamicImage) -> Result<String> {
+        let mut buffer = Vec::new();
+        image.write_to(&mut std::io::Cursor::new(&mut buffer), image::ImageFormat::Png)?;
+        Ok(general_purpose::STANDARD.encode(&buffer))
     }
     
     fn call_method(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {

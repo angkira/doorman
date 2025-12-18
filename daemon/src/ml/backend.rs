@@ -45,6 +45,8 @@ pub enum BackendType {
     Torch,
     /// PyTorch Native (PyO3 extension, no IPC)
     TorchNative,
+    /// PyTorch Shared Memory (optimized IPC with zero-copy)
+    TorchShm,
     /// Docker (ONNX Runtime in container with ROCm)
     Docker,
     /// Socket (Unix Domain Socket, zero-copy)
@@ -60,6 +62,7 @@ impl BackendType {
             "migraphx" => Self::MIGraphX,
             "torch" | "pytorch" => Self::Torch,
             "torch-native" | "pytorch-native" | "native" => Self::TorchNative,
+            "torch-shm" | "pytorch-shm" | "shm" => Self::TorchShm,
             "docker" => Self::Docker,
             "socket" => Self::Socket,
             _ => Self::Tract, // Default to tract

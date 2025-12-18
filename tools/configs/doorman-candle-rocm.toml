@@ -1,0 +1,29 @@
+# Doorman configuration - Candle backend with ROCm
+# Pure Rust inference with AMD GPU support
+
+[daemon]
+socket_path = "/run/doorman.sock"
+debug_socket_path = "/run/doorman-debug.sock"
+data_dir = "/var/lib/doorman"
+
+[camera]
+backend = "gstreamer"
+device_id = 0
+width = 1280
+height = 720
+fps = 30
+
+[ml]
+backend = "candle"
+device = "hip"  # ROCm/HIP device
+models_dir = "~/.local/share/doorman/models"
+
+[detection]
+confidence_threshold = 0.5
+frame_skip = 3
+
+[recognition]
+similarity_threshold = 0.6
+min_detections_for_match = 3
+max_unrecognized_frames = 30
+min_liveness_score = 0.5

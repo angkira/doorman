@@ -36,6 +36,24 @@ mkdir -p "$HOME/.config/systemd/user"
 echo ""
 echo "[1/6] Building Docker inference container..."
 echo "----------------------------------------------"
+echo "Using minimal image with host ROCm/ONNX volumes (~200MB vs 10GB+)"
+echo ""
+
+# Detect ONNX Runtime path
+ONNXRUNTIME_PATH=""
+if command -v python3 &> /dev/null; then
+    ONNXRUNTIME_PATH=$(python3 -c "import onnxruntime; import os; print(os.path.dirname(onnxruntime.__file__))" 2>/dev/null || echo "")
+fi
+
+if [ -z "$ONNXRUNTIME_PATH" ]; then
+    echo "⚠ Warning: Could not detect onnxruntime path. Using default."
+    echo "   Install onnxruntime-rocm if not already: pip install onnxruntime-rocm"
+    ONNXRUNTIME_PATH="$HOME/.local/lib/python3.10/site-packages/onnxruntime"
+fi
+
+echo "✓ ONNX Runtime path: $ONNXRUNTIME_PATH"
+export ONNXRUNTIME_PATH
+
 cd "$PROJECT_ROOT/docker"
 docker compose build
 echo "✓ Container built"

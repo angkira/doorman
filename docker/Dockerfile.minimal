@@ -1,0 +1,35 @@
+# Minimal ONNX Runtime inference service
+# Installs onnxruntime-rocm inside container (~500MB total)
+
+FROM python:3.10-slim
+
+# Install minimal system dependencies + ROCm libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages including onnxruntime-rocm
+RUN pip install --no-cache-dir \
+    onnxruntime-rocm==1.22.2.post1 \
+    numpy \
+    pillow \
+    opencv-python-headless
+
+# Create app directory
+WORKDIR /app
+
+# Copy inference servers
+COPY inference_server_socket.py /app/
+
+# Socket path for IPC
+ENV SOCKET_PATH=/run/doorman-inference.sock
+
+# Models directory (mounted from host)
+ENV MODELS_DIR=/models
+
+# ROCm environment
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.1
+ENV HIP_VISIBLE_DEVICES=0
+
+CMD ["python3", "inference_server_socket.py"]

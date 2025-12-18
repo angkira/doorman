@@ -1,0 +1,31 @@
+{
+  "benchmarks": [
+    {
+      "name": "PyTorch Direct (Baseline)",
+      "mode": "detection",
+      "backend": "torch-direct",
+      "iterations": 100,
+      "warmup_iterations": 10,
+      "device": "cuda",
+      "models_dir": "models"
+    },
+    {
+      "name": "PyTorch IPC (JSON+Base64)",
+      "mode": "detection",
+      "backend": "torch-ipc",
+      "iterations": 100,
+      "warmup_iterations": 10,
+      "device": "cuda",
+      "models_dir": "models"
+    },
+    {
+      "name": "PyTorch Shared Memory (Zero-copy)",
+      "mode": "detection",
+      "backend": "torch-shm",
+      "iterations": 100,
+      "warmup_iterations": 10,
+      "device": "cuda",
+      "models_dir": "models"
+    }
+  ]
+}

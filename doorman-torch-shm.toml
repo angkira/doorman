@@ -1,0 +1,32 @@
+# Doorman Configuration - PyTorch Shared Memory Backend
+# Zero-copy IPC with ~40-50 FPS performance
+
+[ml]
+# ML backend selection
+backend = "torch-shm"  # PyTorch with shared memory (optimized IPC)
+device = "cuda"  # cuda or cpu
+models_dir = "~/.local/share/doorman/models"
+
+# Recognition thresholds
+face_confidence_threshold = 0.7
+liveness_threshold = 0.5
+recognition_threshold = 0.6
+
+[camera]
+device_id = 0  # Camera device ID
+width = 1280
+height = 720
+fps = 30
+
+[pipeline]
+# Pipeline FPS limits (reduce CPU usage)
+detection_fps = 10    # Face detection rate
+preview_fps = 15      # Preview stream rate
+
+[system]
+# System paths
+data_dir = "~/.local/share/doorman"
+socket_path = "/run/user/1000/doorman.sock"
+
+# User mode (false = system service)
+user_mode = true

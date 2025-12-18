@@ -1,0 +1,32 @@
+# Doorman Configuration - PyTorch CUDA (NVIDIA GPU)
+# For systems with NVIDIA discrete GPU
+
+# Authentication
+[auth]
+threshold = 0.6
+liveness_threshold = 0.5
+
+# Machine Learning Backend
+[ml]
+backend = "torch"  # PyTorch subprocess with IPC
+device = "cuda"    # NVIDIA GPU
+models_dir = "~/.local/share/doorman/models"
+
+# Camera Settings  
+[camera]
+backend = "gstreamer"  # PipeWire-integrated (desktop)
+device = 0
+width = 1280
+height = 720
+fps = 30
+
+# Pipeline Configuration
+[pipeline]
+detection_fps = 10    # Face detection rate
+preview_fps = 15      # Preview stream rate (for doorman preview)
+
+# Daemon Settings
+[daemon]
+socket_path = "/run/doorman.sock"
+data_dir = "/var/lib/doorman"
+debug_socket = "/run/doorman-debug.sock"
