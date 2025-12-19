@@ -99,13 +99,19 @@ class InferenceServer:
     
     def handle_detect(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle face detection request."""
+        import time
+        t_start = time.perf_counter()
+        
         frame = None
         try:
             # Read frame from shared memory (zero-copy!)
+            t0 = time.perf_counter()
             frame = self.read_frame_from_shm(width, height, buffer_index)
+            t1 = time.perf_counter()
             
             # Detect faces
             detections = detect_faces(self.models, frame, width, height)
+            t2 = time.perf_counter()
             
             result = {
                 "detections": [
@@ -116,6 +122,20 @@ class InferenceServer:
                     for det in detections
                 ]
             }
+            
+            # Profiling info
+            t_total = (t2 - t_start) * 1000
+            t_shm = (t1 - t0) * 1000
+            t_detect = (t2 - t1) * 1000
+            
+            if hasattr(self, '_detect_count'):
+                self._detect_count += 1
+            else:
+                self._detect_count = 1
+                
+            if self._detect_count % 30 == 0:  # Log every 30 frames
+                print(f"[PROFILE] Detection: total={t_total:.2f}ms, shm={t_shm:.2f}ms, detect={t_detect:.2f}ms", 
+                      file=sys.stderr, flush=True)
             
             # Explicitly release memory
             del frame
@@ -132,15 +152,35 @@ class InferenceServer:
     
     def handle_liveness(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle liveness check request."""
+        import time
+        t_start = time.perf_counter()
+        
         face = None
         try:
             # Read face from shared memory
+            t0 = time.perf_counter()
             face = self.read_frame_from_shm(width, height, buffer_index)
+            t1 = time.perf_counter()
             
             # Check liveness
             score = check_liveness(self.models, face)
+            t2 = time.perf_counter()
             
             result = {"score": float(score)}
+            
+            # Profiling info
+            t_total = (t2 - t_start) * 1000
+            t_shm = (t1 - t0) * 1000
+            t_liveness = (t2 - t1) * 1000
+            
+            if hasattr(self, '_liveness_count'):
+                self._liveness_count += 1
+            else:
+                self._liveness_count = 1
+                
+            if self._liveness_count % 30 == 0:  # Log every 30 frames
+                print(f"[PROFILE] Liveness: total={t_total:.2f}ms, shm={t_shm:.2f}ms, liveness={t_liveness:.2f}ms", 
+                      file=sys.stderr, flush=True)
             
             # Explicitly release memory
             del face
@@ -157,15 +197,35 @@ class InferenceServer:
     
     def handle_embedding(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle embedding extraction request."""
+        import time
+        t_start = time.perf_counter()
+        
         face = None
         try:
             # Read face from shared memory
+            t0 = time.perf_counter()
             face = self.read_frame_from_shm(width, height, buffer_index)
+            t1 = time.perf_counter()
             
             # Extract embedding
             embedding = extract_embedding(self.models, face)
+            t2 = time.perf_counter()
             
             result = {"embedding": embedding.tolist()}
+            
+            # Profiling info
+            t_total = (t2 - t_start) * 1000
+            t_shm = (t1 - t0) * 1000
+            t_embedding = (t2 - t1) * 1000
+            
+            if hasattr(self, '_embedding_count'):
+                self._embedding_count += 1
+            else:
+                self._embedding_count = 1
+                
+            if self._embedding_count % 30 == 0:  # Log every 30 frames
+                print(f"[PROFILE] Embedding: total={t_total:.2f}ms, shm={t_shm:.2f}ms, embedding={t_embedding:.2f}ms", 
+                      file=sys.stderr, flush=True)
             
             # Explicitly release memory
             del face, embedding

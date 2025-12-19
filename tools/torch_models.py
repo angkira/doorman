@@ -120,7 +120,7 @@ def detect_faces(models: DoormanModels, image_rgb: np.ndarray, width: int, heigh
     
     return detections
 
-def check_liveness(models: DoormanModels, face_crop_rgb: np.ndarray) -> Dict:
+def check_liveness(models: DoormanModels, face_crop_rgb: np.ndarray) -> float:
     """
     Check if face crop is live (not a photo/video).
     
@@ -129,7 +129,7 @@ def check_liveness(models: DoormanModels, face_crop_rgb: np.ndarray) -> Dict:
         face_crop_rgb: Face crop as RGB numpy array
     
     Returns:
-        Dict with is_live and confidence
+        Liveness score (float between 0 and 1)
     """
     # Resize to liveness model input (96x96)
     img = Image.fromarray(face_crop_rgb).resize((96, 96))
@@ -143,14 +143,9 @@ def check_liveness(models: DoormanModels, face_crop_rgb: np.ndarray) -> Dict:
     # Run inference
     outputs = models.liveness.run(None, {models.liveness.get_inputs()[0].name: img_array})
     
-    # Parse output (binary classification)
-    score = outputs[0][0][0] if len(outputs[0].shape) > 1 else outputs[0][0]
-    is_live = score > 0.5
-    
-    return {
-        "is_live": bool(is_live),
-        "confidence": float(score)
-    }
+    # Parse output (binary classification) - return just the score as float
+    score = float(outputs[0][0][0] if len(outputs[0].shape) > 1 else outputs[0][0])
+    return score
 
 def extract_embedding(models: DoormanModels, face_crop_rgb: np.ndarray) -> np.ndarray:
     """
