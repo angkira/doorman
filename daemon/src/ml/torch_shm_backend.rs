@@ -72,41 +72,33 @@ impl TorchShmBackend {
         // Remove old socket if exists
         let _ = std::fs::remove_file(SOCKET_PATH);
 
-        // Start inference subprocess
-        let tools_path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("tools");
-        let pythonpath = std::env::var("PYTHONPATH")
-            .map(|p| format!("{}:{}", tools_path.display(), p))
-            .unwrap_or_else(|_| tools_path.display().to_string());
-        
-        // Use venv python if available
-        let venv_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join(".venv");
-        
-        let python_bin = if venv_path.exists() {
-            venv_path.join("bin/python3")
-        } else {
-            Path::new("python3").to_path_buf()
-        };
-        
+        // Start inference subprocess with venv activated
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let venv_path = project_root.join(".venv");
+        let python_bin = venv_path.join("bin/python3");
         let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/ml/torch_inference_shm.py");
+        
+        if !python_bin.exists() {
+            anyhow::bail!("Python venv not found at {}. Run: uv sync", python_bin.display());
+        }
         
         debug!("Using Python: {}", python_bin.display());
         debug!("Script: {}", script_path.display());
         
+        // Set VIRTUAL_ENV to activate venv properly
         let mut cmd = Command::new(&python_bin);
         cmd.arg("-u")
             .arg(script_path)
+            .env("VIRTUAL_ENV", &venv_path)
+            .env("PATH", format!("{}:{}", venv_path.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
             .env("DOORMAN_MODELS_DIR", models_dir)
             .env("DOORMAN_DEVICE", device)
             .env("DOORMAN_SHM_NAME_0", &shm_name_0)
             .env("DOORMAN_SHM_NAME_1", &shm_name_1)
-            .env("DOORMAN_SOCKET_PATH", SOCKET_PATH)
-            .env("PYTHONPATH", pythonpath);
+            .env("DOORMAN_SOCKET_PATH", SOCKET_PATH);
         
-        // Activate venv if using it
+        // Activate venv if using it (DO NOT set PYTHONPATH - venv handles it!)
         if venv_path.exists() {
             cmd.env("VIRTUAL_ENV", venv_path.display().to_string());
             let venv_bin = venv_path.join("bin");
@@ -115,6 +107,8 @@ impl TorchShmBackend {
             } else {
                 cmd.env("PATH", venv_bin.display().to_string());
             }
+            // Clear PYTHONPATH to let venv work properly
+            cmd.env_remove("PYTHONPATH");
         }
         
         let process = cmd

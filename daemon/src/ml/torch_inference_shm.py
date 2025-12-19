@@ -10,15 +10,21 @@ import json
 import socket
 from pathlib import Path
 
-# Add project root to path
+# Import core dependencies BEFORE modifying sys.path
+try:
+    import numpy as np
+    from posix_ipc import SharedMemory
+except ImportError as e:
+    print(json.dumps({"error": f"Import failed: {e}. Python: {sys.version}, Path: {sys.path}"}), file=sys.stderr, flush=True)
+    sys.exit(1)
+
+# Add project root to path (for torch_models)
 project_root = Path(__file__).parent.parent.parent.parent
 tools_path = project_root / "tools"
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(tools_path))
 
 try:
-    import numpy as np
-    from posix_ipc import SharedMemory
     from torch_models import load_models, detect_faces, check_liveness, extract_embedding
 except ImportError as e:
     print(json.dumps({"error": f"Import failed: {e}. Python: {sys.version}, Path: {sys.path}"}), file=sys.stderr, flush=True)
@@ -82,12 +88,14 @@ class InferenceServer:
         shm = self.shm_buffers[buffer_index]
         mm = mmap.mmap(shm.fd, size)
         
-        # Read frame data and COPY to new array (don't hold reference to shm buffer)
-        data = np.frombuffer(mm, dtype=np.uint8, count=size)
-        frame = data.reshape((height, width, 3)).copy()  # COPY to release shm reference
-        
-        mm.close()
-        return frame
+        try:
+            # Read frame data and COPY to new array (don't hold reference to shm buffer)
+            data = np.frombuffer(mm, dtype=np.uint8, count=size)
+            frame = data.reshape((height, width, 3)).copy()  # COPY to release shm reference
+            return frame
+        finally:
+            # ALWAYS close mmap to release shared memory reference
+            mm.close()
     
     def handle_detect(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle face detection request."""

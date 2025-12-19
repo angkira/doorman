@@ -151,6 +151,7 @@ dependencies = [
     { name = "numpy", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "opencv-python", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "pillow", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
+    { name = "posix-ipc", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "rich", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "typer", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
 ]
@@ -166,9 +167,13 @@ dev = [
 ]
 torch = [
     { name = "onnxruntime", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
+    { name = "posix-ipc", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
+    { name = "torch", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
+    { name = "torchvision", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
 ]
 torch-cpu = [
     { name = "numpy", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
+    { name = "onnxruntime", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "opencv-python-headless", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "pillow", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
     { name = "posix-ipc", marker = "platform_machine == 'aarch64' or platform_system != 'Darwin' or sys_platform != 'linux'" },
@@ -188,6 +193,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "opencv-python", specifier = ">=4.10.0" },
     { name = "pillow", specifier = ">=10.0.0" },
+    { name = "posix-ipc", specifier = ">=1.3.2" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "typer", specifier = ">=0.15.0" },
 ]
@@ -201,9 +207,15 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.0.0" },
     { name = "ruff", specifier = ">=0.1.0" },
 ]
-torch = [{ name = "onnxruntime", specifier = ">=1.23.2" }]
+torch = [
+    { name = "onnxruntime", specifier = ">=1.23.2" },
+    { name = "posix-ipc", specifier = ">=1.3.2" },
+    { name = "torch", specifier = ">=2.2.2" },
+    { name = "torchvision", specifier = ">=0.17.2" },
+]
 torch-cpu = [
     { name = "numpy", specifier = ">=1.26.0" },
+    { name = "onnxruntime", specifier = ">=1.23.2" },
     { name = "opencv-python-headless", specifier = ">=4.10.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "posix-ipc", specifier = ">=1.3.2" },
