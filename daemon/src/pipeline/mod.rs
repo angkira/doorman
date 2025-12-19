@@ -26,10 +26,10 @@ use tracing::info;
 pub async fn start_pipeline(state: DaemonState) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
 
-    // Channel configuration from architecture spec
-    let (camera_tx, camera_rx) = mpsc::channel::<RawFrame>(5);
-    let (detection_tx, detection_rx) = mpsc::channel::<RawFrame>(2);
-    let (result_tx, result_rx) = mpsc::channel::<DetectionResult>(10);
+    // Channel configuration - increased buffers to prevent backpressure
+    let (camera_tx, camera_rx) = mpsc::channel::<RawFrame>(30);  // 1 second buffer at 30fps
+    let (detection_tx, detection_rx) = mpsc::channel::<RawFrame>(10);  // Allow more queued frames
+    let (result_tx, result_rx) = mpsc::channel::<DetectionResult>(30);
 
     info!("Starting pipeline stages...");
 

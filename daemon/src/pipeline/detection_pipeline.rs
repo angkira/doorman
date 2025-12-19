@@ -73,7 +73,7 @@ pub async fn run_detection_pipeline(
                     }
                     
                     let (camera_width, camera_height) = camera_dimensions;
-                    let _ = tx.blocking_send(DetectionResult {
+                    let _ = tx.try_send(DetectionResult {
                         sequence,
                         timestamp,
                         face: None,
@@ -87,7 +87,7 @@ pub async fn run_detection_pipeline(
                 Err(e) => {
                     warn!("ML processing error on frame {}: {}", sequence, e);
                     let (camera_width, camera_height) = camera_dimensions;
-                    let _ = tx.blocking_send(DetectionResult {
+                    let _ = tx.try_send(DetectionResult {
                         sequence,
                         timestamp,
                         face: None,
@@ -148,7 +148,7 @@ pub async fn run_detection_pipeline(
 
             // We have an embedding and face bbox from detection
             let (camera_width, camera_height) = camera_dimensions;
-            let _ = tx.blocking_send(DetectionResult {
+            let _ = tx.try_send(DetectionResult {
                 sequence,
                 timestamp,
                 face: Some(Face {
