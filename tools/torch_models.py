@@ -95,15 +95,27 @@ def detect_faces(models: DoormanModels, image_rgb: np.ndarray, width: int, heigh
     
     # Placeholder: return single face in center if confidence > threshold
     if len(outputs) >= 2:
-        scores = outputs[0][0]  # [N,]
-        boxes = outputs[1][0]   # [N, 4]
+        scores = outputs[0][0]  # [N,] or [1, N]
+        boxes = outputs[1][0]   # [N, 4] or [1, N, 4]
         
-        for i, score in enumerate(scores):
+        # Ensure proper shapes
+        if scores.ndim > 1:
+            scores = scores.flatten()
+        if boxes.ndim == 3:
+            boxes = boxes[0]  # [1, N, 4] -> [N, 4]
+        
+        # Ensure boxes is [N, 4]
+        if boxes.shape[1] != 4:
+            # Invalid format, return empty
+            return detections
+        
+        for i in range(min(len(scores), len(boxes))):
+            score = float(scores[i])
             if score > 0.5:  # Threshold
                 box = boxes[i]
                 detections.append({
                     "bbox": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
-                    "confidence": float(score)
+                    "confidence": score
                 })
     
     return detections

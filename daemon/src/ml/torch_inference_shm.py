@@ -57,14 +57,14 @@ class InferenceServer:
         dummy_image = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
         
         # Warmup detection
-        _ = detect_faces(self.models['detector'], dummy_image, self.device)
+        _ = detect_faces(self.models, dummy_image, 640, 480)
         
         # Warmup liveness (112x112 face)
         dummy_face = np.random.randint(0, 255, (112, 112, 3), dtype=np.uint8)
-        _ = check_liveness(self.models['liveness'], dummy_face, self.device)
+        _ = check_liveness(self.models, dummy_face)
         
         # Warmup recognition
-        _ = extract_embedding(self.models['recognizer'], dummy_face, self.device)
+        _ = extract_embedding(self.models, dummy_face)
     
     def read_frame_from_shm(self, width: int, height: int) -> np.ndarray:
         """Read frame from shared memory."""
@@ -88,7 +88,7 @@ class InferenceServer:
             frame = self.read_frame_from_shm(width, height)
             
             # Detect faces
-            detections = detect_faces(self.models['detector'], frame, self.device)
+            detections = detect_faces(self.models, frame, width, height)
             
             return {
                 "detections": [
@@ -109,7 +109,7 @@ class InferenceServer:
             face = self.read_frame_from_shm(width, height)
             
             # Check liveness
-            score = check_liveness(self.models['liveness'], face, self.device)
+            score = check_liveness(self.models, face)
             
             return {"score": float(score)}
         except Exception as e:
@@ -122,7 +122,7 @@ class InferenceServer:
             face = self.read_frame_from_shm(width, height)
             
             # Extract embedding
-            embedding = extract_embedding(self.models['recognizer'], face, self.device)
+            embedding = extract_embedding(self.models, face)
             
             return {"embedding": embedding.tolist()}
         except Exception as e:
