@@ -258,6 +258,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "opencv-python" },
     { name = "pillow" },
     { name = "posix-ipc" },
@@ -283,6 +284,7 @@ requires-dist = [
     { name = "facenet-pytorch", marker = "extra == 'torch-rocm'", specifier = ">=2.6.0" },
     { name = "insightface", marker = "extra == 'onnx'", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=1.26.0" },
+    { name = "onnxruntime", specifier = ">=1.19.2" },
     { name = "onnxruntime", marker = "extra == 'onnx'", specifier = ">=1.23.0" },
     { name = "onnxruntime-gpu", marker = "extra == 'onnx'", specifier = ">=1.23.2" },
     { name = "opencv-python", specifier = ">=4.10.0" },

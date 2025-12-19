@@ -8,9 +8,7 @@ import os
 import sys
 import json
 import socket
-import numpy as np
 from pathlib import Path
-from posix_ipc import SharedMemory
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent.parent
@@ -18,7 +16,13 @@ tools_path = project_root / "tools"
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(tools_path))
 
-from torch_models import load_models, detect_faces, check_liveness, extract_embedding
+try:
+    import numpy as np
+    from posix_ipc import SharedMemory
+    from torch_models import load_models, detect_faces, check_liveness, extract_embedding
+except ImportError as e:
+    print(json.dumps({"error": f"Import failed: {e}. Python: {sys.version}, Path: {sys.path}"}), file=sys.stderr, flush=True)
+    sys.exit(1)
 
 
 class InferenceServer:

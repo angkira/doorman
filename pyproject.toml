@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=1.26.0",
     "pillow>=10.0.0",
     "posix-ipc>=1.1.0",
+    "onnxruntime>=1.19.2",
 ]
 
 [project.optional-dependencies]
