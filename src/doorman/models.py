@@ -81,22 +81,22 @@ class ModelManager:
         "liveness": ModelInfo(
             name="Liveness Detection",
             filename="liveness.onnx",
-            url="",  # Manual installation required - see OBTAINING_LIVENESS_MODEL.md
+            url="hf://ECCV2022/FAS-Zoo/2.7_MiniVision(MiniFASNetV2SE)/MiniFASNetV2SE.onnx",
             sha256="",
             size_mb=4.0,
-            description="Anti-spoofing liveness (MiniFASNet or InsightFace) - manual installation required",
+            description="Anti-spoofing liveness detection (MiniFASNet)",
             input_shape=(80, 80, 3),  # Input: 80x80 RGB (MiniFASNet)
             output_size=3  # Output: [real, fake, uncertain] probabilities
         ),
         "mobilefacenet": ModelInfo(
-            name="MobileFaceNet (or use existing ResNet50)",
+            name="MobileFaceNet",
             filename="mobilefacenet.onnx",
-            url="",  # Use InsightFace Python API or keep existing w600k_r50.onnx
+            url="hf://onnx-community/mobilefacenet-arcface/onnx/model.onnx",
             sha256="",
-            size_mb=174.0,  # w600k_r50.onnx from buffalo_l (ResNet50, production-tested)
-            description="Face recognition embeddings - CURRENT: Using w600k_r50.onnx (174MB ResNet50) from InsightFace buffalo_l, ~10-15ms on Ryzen 8700G",
+            size_mb=5.0,
+            description="Face recognition embeddings (MobileFaceNet with ArcFace)",
             input_shape=(112, 112, 3),  # Input: 112x112 RGB (standard ArcFace size)
-            output_size=512  # Output: 512-dimensional embedding vector (buffalo_l)
+            output_size=512  # Output: 512-dimensional embedding vector
         ),
     }
     
