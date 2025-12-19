@@ -43,16 +43,13 @@ pub async fn run_detection_pipeline(
         let sequence = raw_frame.sequence;
         let broadcaster = debug_broadcaster.clone();  // Clone for this iteration
 
-        // Spawn blocking ML work
-        // Proper flow: Liveness → Detect → Crop → Recognize (on small crop)
-        tokio::task::spawn_blocking(move || {
+        // Spawn async ML work (ML backend handles sync internally with mutex)
+        tokio::task::spawn(async move {
             let start = Instant::now();
 
             // Use the proper ML pipeline that does: detect → liveness → embedding
             // This processes on downscaled frame and crops to face automatically
-            let (face, embedding) = match tokio::runtime::Handle::current().block_on(
-                ml.process_frame(&*frame)
-            ) {
+            let (face, embedding) = match ml.process_frame(&*frame).await {
                 Ok(Some(result)) => result,
                 Ok(None) => {
                     // No face detected or liveness check failed

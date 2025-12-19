@@ -147,18 +147,15 @@ impl TorchShmBackend {
         socket.write_all(msg.as_bytes())?;
         socket.flush()?;
         
-        // Read response (newline-terminated JSON)
+        // Read response (newline-terminated JSON) - use buffered reading
         let mut response = String::new();
-        let mut buf = [0u8; 1];
-        loop {
-            socket.read_exact(&mut buf)?;
-            if buf[0] == b'\n' {
-                break;
-            }
-            response.push(buf[0] as char);
+        {
+            let mut reader = std::io::BufReader::new(&mut *socket);
+            use std::io::BufRead;
+            reader.read_line(&mut response)?;
         }
         
-        Ok(response)
+        Ok(response.trim_end().to_string())
     }
 }
 

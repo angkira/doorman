@@ -255,15 +255,13 @@ class InferenceServer:
         conn, _ = self.server_socket.accept()
         print("✓ Client connected", file=sys.stderr, flush=True)
         
+        # Use buffered file object for efficient reading
+        conn_file = conn.makefile('rwb', buffering=8192)
+        
         try:
             while True:
                 # Read command: "command width height buffer_index\n"
-                line = b""
-                while True:
-                    byte = conn.recv(1)
-                    if not byte or byte == b'\n':
-                        break
-                    line += byte
+                line = conn_file.readline()
                 
                 if not line:
                     break
@@ -288,15 +286,18 @@ class InferenceServer:
                     response = self.handle_warmup()
                 elif command == "shutdown":
                     response = {"status": "shutting down"}
-                    conn.sendall(json.dumps(response).encode('utf-8') + b'\n')
+                    conn_file.write(json.dumps(response).encode('utf-8') + b'\n')
+                    conn_file.flush()
                     break
                 else:
                     response = {"error": f"Unknown command: {command}"}
                 
                 # Send response
-                conn.sendall(json.dumps(response).encode('utf-8') + b'\n')
+                conn_file.write(json.dumps(response).encode('utf-8') + b'\n')
+                conn_file.flush()
         
         finally:
+            conn_file.close()
             conn.close()
             self.server_socket.close()
             # Clean up mmaps and shared memory
