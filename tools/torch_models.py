@@ -131,8 +131,8 @@ def check_liveness(models: DoormanModels, face_crop_rgb: np.ndarray) -> Dict:
     Returns:
         Dict with is_live and confidence
     """
-    # Resize to liveness model input (112x112)
-    img = Image.fromarray(face_crop_rgb).resize((112, 112))
+    # Resize to liveness model input (96x96)
+    img = Image.fromarray(face_crop_rgb).resize((96, 96))
     img_array = np.array(img).astype(np.float32)
     
     # Normalize

@@ -257,7 +257,10 @@ name = "doorman"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "numpy" },
     { name = "opencv-python" },
+    { name = "pillow" },
+    { name = "posix-ipc" },
     { name = "rich" },
     { name = "typer" },
 ]
@@ -279,9 +282,12 @@ torch-rocm = [
 requires-dist = [
     { name = "facenet-pytorch", marker = "extra == 'torch-rocm'", specifier = ">=2.6.0" },
     { name = "insightface", marker = "extra == 'onnx'", specifier = ">=0.7.3" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "onnxruntime", marker = "extra == 'onnx'", specifier = ">=1.23.0" },
     { name = "onnxruntime-gpu", marker = "extra == 'onnx'", specifier = ">=1.23.2" },
     { name = "opencv-python", specifier = ">=4.10.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
+    { name = "posix-ipc", specifier = ">=1.1.0" },
     { name = "posix-ipc", marker = "extra == 'torch-rocm'", specifier = ">=1.1.0" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "torch", marker = "extra == 'torch-rocm'" },

@@ -7,6 +7,9 @@ dependencies = [
     "typer>=0.15.0",
     "rich>=13.9.0",
     "opencv-python>=4.10.0",
+    "numpy>=1.26.0",
+    "pillow>=10.0.0",
+    "posix-ipc>=1.1.0",
 ]
 
 [project.optional-dependencies]
