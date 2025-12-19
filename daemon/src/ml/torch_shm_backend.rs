@@ -86,7 +86,7 @@ impl TorchShmBackend {
         debug!("Using Python: {}", python_bin.display());
         debug!("Script: {}", script_path.display());
         
-        // Set VIRTUAL_ENV to activate venv properly
+        // Activate venv properly - DO NOT set PYTHONPATH, venv handles it!
         let mut cmd = Command::new(&python_bin);
         cmd.arg("-u")
             .arg(script_path)
@@ -96,20 +96,8 @@ impl TorchShmBackend {
             .env("DOORMAN_DEVICE", device)
             .env("DOORMAN_SHM_NAME_0", &shm_name_0)
             .env("DOORMAN_SHM_NAME_1", &shm_name_1)
-            .env("DOORMAN_SOCKET_PATH", SOCKET_PATH);
-        
-        // Activate venv if using it (DO NOT set PYTHONPATH - venv handles it!)
-        if venv_path.exists() {
-            cmd.env("VIRTUAL_ENV", venv_path.display().to_string());
-            let venv_bin = venv_path.join("bin");
-            if let Ok(path) = std::env::var("PATH") {
-                cmd.env("PATH", format!("{}:{}", venv_bin.display(), path));
-            } else {
-                cmd.env("PATH", venv_bin.display().to_string());
-            }
-            // Clear PYTHONPATH to let venv work properly
-            cmd.env_remove("PYTHONPATH");
-        }
+            .env("DOORMAN_SOCKET_PATH", SOCKET_PATH)
+            .env_remove("PYTHONPATH"); // Clear PYTHONPATH - venv will set it
         
         let process = cmd
             .stdout(Stdio::piped())

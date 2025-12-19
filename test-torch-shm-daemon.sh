@@ -8,7 +8,7 @@ echo ""
 
 # Ensure torch dependencies are installed
 echo "Installing Python dependencies..."
-uv sync --extra torch --quiet
+uv sync --group torch --quiet
 echo "✓ Dependencies installed"
 echo ""
 
