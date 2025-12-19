@@ -26,11 +26,13 @@ torch-cpu = [
 
 # PyTorch CUDA backend dependencies
 torch-cuda = [
-    "torch[cu118]>=2.2.0",
+    "torch>=2.2.2",
     "torchvision>=0.17.0",
     "numpy>=1.26.0",
     "pillow>=10.0.0",
     "opencv-python-headless>=4.10.0",
+    "posix-ipc>=1.3.2",
+    "onnxruntime-gpu==1.20.1",  # Requires cuDNN 9.x + CUDA 12.x (BLOCKER: libcudnn.so.9 missing)
 ]
 
 # Development dependencies
