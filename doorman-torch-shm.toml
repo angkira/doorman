@@ -4,7 +4,7 @@
 [ml]
 # ML backend selection
 backend = "torch-shm"  # PyTorch with shared memory (optimized IPC)
-device = "cuda"  # cuda or cpu
+device = "cpu"  # cuda or cpu
 models_dir = "~/.local/share/doorman/models"
 
 # Recognition thresholds

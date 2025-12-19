@@ -38,9 +38,15 @@ class InferenceServer:
         self.socket_path = socket_path
         
         # Open both shared memory buffers for double buffering
+        import mmap
         self.shm_buffers = [
             SharedMemory(shm_name_0),
             SharedMemory(shm_name_1)
+        ]
+        # Create persistent mmaps for each buffer (reuse, don't recreate)
+        self.mmaps = [
+            mmap.mmap(self.shm_buffers[0].fd, 1920 * 1080 * 3),
+            mmap.mmap(self.shm_buffers[1].fd, 1920 * 1080 * 3)
         ]
         print(f"Opened shared memory buffers: {shm_name_0}, {shm_name_1}", file=sys.stderr, flush=True)
         
@@ -83,19 +89,13 @@ class InferenceServer:
         """Read frame from shared memory - COPY data to avoid holding references."""
         size = height * width * 3
         
-        # Memory-map correct shared memory buffer
-        import mmap
-        shm = self.shm_buffers[buffer_index]
-        mm = mmap.mmap(shm.fd, size)
+        # Use persistent mmap (don't create/destroy on every call)
+        mm = self.mmaps[buffer_index]
         
-        try:
-            # Read frame data and COPY to new array (don't hold reference to shm buffer)
-            data = np.frombuffer(mm, dtype=np.uint8, count=size)
-            frame = data.reshape((height, width, 3)).copy()  # COPY to release shm reference
-            return frame
-        finally:
-            # ALWAYS close mmap to release shared memory reference
-            mm.close()
+        # Read frame data and COPY to new array (don't hold reference to shm buffer)
+        data = np.frombuffer(mm, dtype=np.uint8, count=size)
+        frame = data.reshape((height, width, 3)).copy()  # COPY to release shm reference
+        return frame
     
     def handle_detect(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle face detection request."""
@@ -239,6 +239,11 @@ class InferenceServer:
         finally:
             conn.close()
             self.server_socket.close()
+            # Clean up mmaps and shared memory
+            for mm in self.mmaps:
+                mm.close()
+            for shm in self.shm_buffers:
+                shm.close_fd()
             if os.path.exists(self.socket_path):
                 os.remove(self.socket_path)
             print("✓ Server shut down", file=sys.stderr, flush=True)
