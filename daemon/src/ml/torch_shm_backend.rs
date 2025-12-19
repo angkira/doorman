@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tracing::{debug, info};
 
@@ -50,7 +51,8 @@ impl ShmSegment {
 pub struct TorchShmBackend {
     process: Mutex<Option<Child>>,
     socket: Mutex<UnixStream>,
-    shm: Mutex<ShmSegment>,
+    shm_buffers: [ShmSegment; 2],
+    current_buffer: AtomicUsize,
     device: String,
 }
 
@@ -60,10 +62,12 @@ impl TorchShmBackend {
         info!("Models directory: {:?}", models_dir);
         info!("Device: {}", device);
 
-        // Create shared memory
-        let shm_name = format!("doorman_shm_{}", std::process::id());
-        let shm = ShmSegment::new(&shm_name)?;
-        info!("Created shared memory: {}", shm_name);
+        // Create two shared memory segments for double buffering
+        let shm_name_0 = format!("doorman_shm_{}_0", std::process::id());
+        let shm_name_1 = format!("doorman_shm_{}_1", std::process::id());
+        let shm0 = ShmSegment::new(&shm_name_0)?;
+        let shm1 = ShmSegment::new(&shm_name_1)?;
+        info!("Created shared memory buffers: {} and {}", shm_name_0, shm_name_1);
 
         // Remove old socket if exists
         let _ = std::fs::remove_file(SOCKET_PATH);
@@ -97,7 +101,8 @@ impl TorchShmBackend {
             .arg(script_path)
             .env("DOORMAN_MODELS_DIR", models_dir)
             .env("DOORMAN_DEVICE", device)
-            .env("DOORMAN_SHM_NAME", &shm_name)
+            .env("DOORMAN_SHM_NAME_0", &shm_name_0)
+            .env("DOORMAN_SHM_NAME_1", &shm_name_1)
             .env("DOORMAN_SOCKET_PATH", SOCKET_PATH)
             .env("PYTHONPATH", pythonpath);
         
@@ -141,16 +146,17 @@ impl TorchShmBackend {
         Ok(Self {
             process: Mutex::new(Some(process)),
             socket: Mutex::new(socket),
-            shm: Mutex::new(shm),
+            shm_buffers: [shm0, shm1],
+            current_buffer: AtomicUsize::new(0),
             device: device.to_string(),
         })
     }
 
-    fn send_command(&self, cmd: &str, width: u32, height: u32) -> Result<String> {
+    fn send_command(&self, cmd: &str, width: u32, height: u32, buffer_index: usize) -> Result<String> {
         let mut socket = self.socket.lock().unwrap();
         
-        // Send command: "command width height\n"
-        let msg = format!("{} {} {}\n", cmd, width, height);
+        // Send command: "command width height buffer_index\n"
+        let msg = format!("{} {} {} {}\n", cmd, width, height, buffer_index);
         socket.write_all(msg.as_bytes())?;
         socket.flush()?;
         
@@ -200,14 +206,20 @@ impl TorchShmBackend {
         let (width, height) = rgb.dimensions();
         let data = rgb.as_raw();
 
-        // Write frame to shared memory
+        // Write frame to current shared memory buffer
+        let buffer_index = self.current_buffer.load(Ordering::Relaxed);
         {
-            let mut shm = self.shm.lock().unwrap();
-            shm.write_frame(data)?;
+            let shm = self.shm_buffers[buffer_index].shmem.as_ptr() as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), shm, data.len());
+            }
         }
 
-        // Send detect command (no image data over socket!)
-        let response = self.send_command("detect", width, height)?;
+        // Send detect command with buffer index
+        let response = self.send_command("detect", width, height, buffer_index)?;
+        
+        // Switch to other buffer for next operation
+        self.current_buffer.store(1 - buffer_index, Ordering::Relaxed);
         
         // Parse JSON response
         let result: serde_json::Value = serde_json::from_str(&response)
@@ -246,14 +258,20 @@ impl TorchShmBackend {
         let (width, height) = rgb.dimensions();
         let data = rgb.as_raw();
 
-        // Write face to shared memory
+        // Write face to current shared memory buffer
+        let buffer_index = self.current_buffer.load(Ordering::Relaxed);
         {
-            let mut shm = self.shm.lock().unwrap();
-            shm.write_frame(data)?;
+            let shm = self.shm_buffers[buffer_index].shmem.as_ptr() as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), shm, data.len());
+            }
         }
 
-        // Send liveness command
-        let response = self.send_command("liveness", width, height)?;
+        // Send liveness command with buffer index
+        let response = self.send_command("liveness", width, height, buffer_index)?;
+        
+        // Switch to other buffer for next operation
+        self.current_buffer.store(1 - buffer_index, Ordering::Relaxed);
         
         let result: serde_json::Value = serde_json::from_str(&response)?;
         
@@ -274,14 +292,20 @@ impl TorchShmBackend {
         let (width, height) = rgb.dimensions();
         let data = rgb.as_raw();
 
-        // Write face to shared memory
+        // Write face to current shared memory buffer
+        let buffer_index = self.current_buffer.load(Ordering::Relaxed);
         {
-            let mut shm = self.shm.lock().unwrap();
-            shm.write_frame(data)?;
+            let shm = self.shm_buffers[buffer_index].shmem.as_ptr() as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), shm, data.len());
+            }
         }
 
-        // Send embedding command
-        let response = self.send_command("embedding", width, height)?;
+        // Send embedding command with buffer index
+        let response = self.send_command("embedding", width, height, buffer_index)?;
+        
+        // Switch to other buffer for next operation
+        self.current_buffer.store(1 - buffer_index, Ordering::Relaxed);
         
         let result: serde_json::Value = serde_json::from_str(&response)?;
         
@@ -302,7 +326,7 @@ impl TorchShmBackend {
         info!("Warming up PyTorch Shared Memory backend...");
         
         // Send warmup command
-        let response = self.send_command("warmup", 0, 0)?;
+        let response = self.send_command("warmup", 0, 0, 0)?;
         
         let result: serde_json::Value = serde_json::from_str(&response)?;
         
@@ -318,7 +342,7 @@ impl TorchShmBackend {
 impl Drop for TorchShmBackend {
     fn drop(&mut self) {
         // Send shutdown command
-        let _ = self.send_command("shutdown", 0, 0);
+        let _ = self.send_command("shutdown", 0, 0, 0);
         
         // Kill subprocess
         if let Ok(mut process_opt) = self.process.lock() {

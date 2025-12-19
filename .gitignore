@@ -56,3 +56,4 @@ test_data/
 models/
 .doorman-debug/
 .cache_npu
+.aider*

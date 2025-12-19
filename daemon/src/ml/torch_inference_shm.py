@@ -26,15 +26,17 @@ except ImportError as e:
 
 
 class InferenceServer:
-    def __init__(self, models_dir: str, device: str, shm_name: str, socket_path: str):
+    def __init__(self, models_dir: str, device: str, shm_name_0: str, shm_name_1: str, socket_path: str):
         self.models_dir = models_dir
         self.device = device
-        self.shm_name = shm_name
         self.socket_path = socket_path
         
-        # Open shared memory
-        self.shm = SharedMemory(shm_name)
-        print(f"Opened shared memory: {shm_name}", file=sys.stderr, flush=True)
+        # Open both shared memory buffers for double buffering
+        self.shm_buffers = [
+            SharedMemory(shm_name_0),
+            SharedMemory(shm_name_1)
+        ]
+        print(f"Opened shared memory buffers: {shm_name_0}, {shm_name_1}", file=sys.stderr, flush=True)
         
         # Load models
         print(f"Loading models from {models_dir} on {device}...", file=sys.stderr, flush=True)
@@ -71,31 +73,33 @@ class InferenceServer:
         # Warmup recognition
         # _ = extract_embedding(self.models, dummy_face)
     
-    def read_frame_from_shm(self, width: int, height: int) -> np.ndarray:
-        """Read frame from shared memory."""
+    def read_frame_from_shm(self, width: int, height: int, buffer_index: int) -> np.ndarray:
+        """Read frame from shared memory - COPY data to avoid holding references."""
         size = height * width * 3
         
-        # Memory-map shared memory
+        # Memory-map correct shared memory buffer
         import mmap
-        mm = mmap.mmap(self.shm.fd, size)
+        shm = self.shm_buffers[buffer_index]
+        mm = mmap.mmap(shm.fd, size)
         
-        # Read frame data
+        # Read frame data and COPY to new array (don't hold reference to shm buffer)
         data = np.frombuffer(mm, dtype=np.uint8, count=size)
-        frame = data.reshape((height, width, 3))
+        frame = data.reshape((height, width, 3)).copy()  # COPY to release shm reference
         
         mm.close()
         return frame
     
-    def handle_detect(self, width: int, height: int) -> dict:
+    def handle_detect(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle face detection request."""
+        frame = None
         try:
             # Read frame from shared memory (zero-copy!)
-            frame = self.read_frame_from_shm(width, height)
+            frame = self.read_frame_from_shm(width, height, buffer_index)
             
             # Detect faces
             detections = detect_faces(self.models, frame, width, height)
             
-            return {
+            result = {
                 "detections": [
                     {
                         "bbox": [float(x) for x in det['bbox']],
@@ -104,33 +108,68 @@ class InferenceServer:
                     for det in detections
                 ]
             }
+            
+            # Explicitly release memory
+            del frame
+            import gc
+            gc.collect()
+            
+            return result
         except Exception as e:
+            if frame is not None:
+                del frame
+                import gc
+                gc.collect()
             return {"error": str(e)}
     
-    def handle_liveness(self, width: int, height: int) -> dict:
+    def handle_liveness(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle liveness check request."""
+        face = None
         try:
             # Read face from shared memory
-            face = self.read_frame_from_shm(width, height)
+            face = self.read_frame_from_shm(width, height, buffer_index)
             
             # Check liveness
             score = check_liveness(self.models, face)
             
-            return {"score": float(score)}
+            result = {"score": float(score)}
+            
+            # Explicitly release memory
+            del face
+            import gc
+            gc.collect()
+            
+            return result
         except Exception as e:
+            if face is not None:
+                del face
+                import gc
+                gc.collect()
             return {"error": str(e)}
     
-    def handle_embedding(self, width: int, height: int) -> dict:
+    def handle_embedding(self, width: int, height: int, buffer_index: int) -> dict:
         """Handle embedding extraction request."""
+        face = None
         try:
             # Read face from shared memory
-            face = self.read_frame_from_shm(width, height)
+            face = self.read_frame_from_shm(width, height, buffer_index)
             
             # Extract embedding
             embedding = extract_embedding(self.models, face)
             
-            return {"embedding": embedding.tolist()}
+            result = {"embedding": embedding.tolist()}
+            
+            # Explicitly release memory
+            del face, embedding
+            import gc
+            gc.collect()
+            
+            return result
         except Exception as e:
+            if face is not None:
+                del face
+                import gc
+                gc.collect()
             return {"error": str(e)}
     
     def handle_warmup(self) -> dict:
@@ -150,7 +189,7 @@ class InferenceServer:
         
         try:
             while True:
-                # Read command: "command width height\n"
+                # Read command: "command width height buffer_index\n"
                 line = b""
                 while True:
                     byte = conn.recv(1)
@@ -169,14 +208,14 @@ class InferenceServer:
                 
                 # Handle command
                 if command == "detect":
-                    width, height = int(parts[1]), int(parts[2])
-                    response = self.handle_detect(width, height)
+                    width, height, buffer_index = int(parts[1]), int(parts[2]), int(parts[3])
+                    response = self.handle_detect(width, height, buffer_index)
                 elif command == "liveness":
-                    width, height = int(parts[1]), int(parts[2])
-                    response = self.handle_liveness(width, height)
+                    width, height, buffer_index = int(parts[1]), int(parts[2]), int(parts[3])
+                    response = self.handle_liveness(width, height, buffer_index)
                 elif command == "embedding":
-                    width, height = int(parts[1]), int(parts[2])
-                    response = self.handle_embedding(width, height)
+                    width, height, buffer_index = int(parts[1]), int(parts[2]), int(parts[3])
+                    response = self.handle_embedding(width, height, buffer_index)
                 elif command == "warmup":
                     response = self.handle_warmup()
                 elif command == "shutdown":
@@ -200,7 +239,8 @@ class InferenceServer:
 def main():
     models_dir = os.environ.get('DOORMAN_MODELS_DIR', '~/.local/share/doorman/models')
     device = os.environ.get('DOORMAN_DEVICE', 'cpu')
-    shm_name = os.environ.get('DOORMAN_SHM_NAME', 'doorman_shm')
+    shm_name_0 = os.environ.get('DOORMAN_SHM_NAME_0', 'doorman_shm_0')
+    shm_name_1 = os.environ.get('DOORMAN_SHM_NAME_1', 'doorman_shm_1')
     socket_path = os.environ.get('DOORMAN_SOCKET_PATH', '/tmp/doorman-inference.sock')
     
     # Expand home directory
@@ -209,11 +249,11 @@ def main():
     print(f"Starting inference server...", file=sys.stderr, flush=True)
     print(f"Models: {models_dir}", file=sys.stderr, flush=True)
     print(f"Device: {device}", file=sys.stderr, flush=True)
-    print(f"Shared memory: {shm_name}", file=sys.stderr, flush=True)
+    print(f"Shared memory buffers: {shm_name_0}, {shm_name_1}", file=sys.stderr, flush=True)
     print(f"Socket: {socket_path}", file=sys.stderr, flush=True)
     
     try:
-        server = InferenceServer(models_dir, device, shm_name, socket_path)
+        server = InferenceServer(models_dir, device, shm_name_0, shm_name_1, socket_path)
         server.run()
     except KeyboardInterrupt:
         print("\n✓ Server stopped", file=sys.stderr, flush=True)

@@ -6,11 +6,17 @@ echo "   Testing Torch Shared Memory Backend"
 echo "=============================================="
 echo ""
 
+# Ensure torch dependencies are installed
+echo "Installing Python dependencies..."
+uv sync --extra torch --quiet
+echo "✓ Dependencies installed"
+echo ""
+
 # Check models (use doorman CLI to verify)
-if ! doorman models list | grep -q "3/3 installed"; then
+if ! uv run doorman models list | grep -q "3/3 installed"; then
     echo "❌ Not all models installed"
     echo "Please download models first:"
-    echo "  doorman models download"
+    echo "  uv run doorman models download --force"
     exit 1
 fi
 echo "✓ All models found"
@@ -43,6 +49,6 @@ sleep 5
 echo ""
 echo "[3/3] Starting preview (Press 'q' to quit)..."
 echo "------------------------------------------------------------"
-doorman preview
+uv run doorman preview
 
 echo "✓ Done"
