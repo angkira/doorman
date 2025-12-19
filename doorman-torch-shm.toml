@@ -1,5 +1,5 @@
 # Doorman Configuration - PyTorch Shared Memory Backend
-# Zero-copy IPC with ~40-50 FPS performance
+# Zero-copy IPC with GPU acceleration
 
 [ml]
 # ML backend selection
@@ -12,16 +12,22 @@ face_confidence_threshold = 0.7
 liveness_threshold = 0.5
 recognition_threshold = 0.6
 
+[daemon]
+# Processing FPS for continuous face detection (matches camera FPS for real-time)
+processing_fps = 30  # CUDA can handle 30 FPS easily (BlazeFace alone: 1397 FPS!)
+user_mode = true
+data_dir = "~/.local/share/doorman"
+socket_path = "/run/user/1000/doorman.sock"
+
 [camera]
 device_id = 0  # Camera device ID
 width = 1280
 height = 720
-fps = 30
+fps = 30  # Hardware limit for this camera
 
 [pipeline]
-# Pipeline FPS limits (reduce CPU usage)
-detection_fps = 10    # Face detection rate
-preview_fps = 15      # Preview stream rate
+# Pipeline FPS limits - for preview streaming only
+preview_fps = 30      # Smooth preview (if using preview mode)
 
 [system]
 # System paths
