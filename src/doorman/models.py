@@ -79,24 +79,24 @@ class ModelManager:
             output_size=None  # Outputs bounding boxes + landmarks
         ),
         "liveness": ModelInfo(
-            name="Liveness Detection",
+            name="Liveness Detection (Placeholder)",
             filename="liveness.onnx",
-            url="hf://ECCV2022/FAS-Zoo/2.7_MiniVision(MiniFASNetV2SE)/MiniFASNetV2SE.onnx",
+            url="",  # TODO: Find working anti-spoofing ONNX model
             sha256="",
-            size_mb=4.0,
-            description="Anti-spoofing liveness detection (MiniFASNet)",
-            input_shape=(80, 80, 3),  # Input: 80x80 RGB (MiniFASNet)
-            output_size=3  # Output: [real, fake, uncertain] probabilities
+            size_mb=0.0,
+            description="PLACEHOLDER - Anti-spoofing model not yet available. Face detection will work without liveness check.",
+            input_shape=(80, 80, 3),
+            output_size=3
         ),
         "mobilefacenet": ModelInfo(
-            name="MobileFaceNet",
+            name="MobileFaceNet (Placeholder)",
             filename="mobilefacenet.onnx",
-            url="hf://onnx-community/mobilefacenet-arcface/onnx/model.onnx",
+            url="",  # TODO: Find working MobileFaceNet ONNX model
             sha256="",
-            size_mb=5.0,
-            description="Face recognition embeddings (MobileFaceNet with ArcFace)",
-            input_shape=(112, 112, 3),  # Input: 112x112 RGB (standard ArcFace size)
-            output_size=512  # Output: 512-dimensional embedding vector
+            size_mb=0.0,
+            description="PLACEHOLDER - Face recognition model not yet available. Download manually from InsightFace.",
+            input_shape=(112, 112, 3),
+            output_size=512
         ),
     }
     

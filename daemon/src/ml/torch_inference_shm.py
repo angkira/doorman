@@ -63,12 +63,13 @@ class InferenceServer:
         # Warmup detection
         _ = detect_faces(self.models, dummy_image, 640, 480)
         
+        # TODO: Re-enable when liveness/recognition models are available
         # Warmup liveness (112x112 face)
-        dummy_face = np.random.randint(0, 255, (112, 112, 3), dtype=np.uint8)
-        _ = check_liveness(self.models, dummy_face)
+        # dummy_face = np.random.randint(0, 255, (112, 112, 3), dtype=np.uint8)
+        # _ = check_liveness(self.models, dummy_face)
         
         # Warmup recognition
-        _ = extract_embedding(self.models, dummy_face)
+        # _ = extract_embedding(self.models, dummy_face)
     
     def read_frame_from_shm(self, width: int, height: int) -> np.ndarray:
         """Read frame from shared memory."""

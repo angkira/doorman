@@ -9,21 +9,54 @@ dependencies = [
     "opencv-python>=4.10.0",
     "numpy>=1.26.0",
     "pillow>=10.0.0",
-    "posix-ipc>=1.1.0",
-    "onnxruntime>=1.19.2",
 ]
 
 [project.optional-dependencies]
-onnx = [
-    "onnxruntime>=1.23.0",
-    "onnxruntime-gpu>=1.23.2",
-    "insightface>=0.7.3",
+# CPU backend (ONNX Runtime)
+cpu = [
+    "onnxruntime>=1.19.2",
+    "posix-ipc>=1.1.0",
 ]
-torch-rocm = [
-    "torch",
-    "torchvision",
+
+# GPU backends
+gpu-cuda = [
+    "onnxruntime-gpu>=1.23.2",
+    "posix-ipc>=1.1.0",
+]
+
+gpu-rocm = [
+    "onnxruntime-rocm>=1.22.0",
+    "posix-ipc>=1.1.0",
+]
+
+# PyTorch backends (for testing/benchmarking)
+torch-cpu = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
     "facenet-pytorch>=2.6.0",
-    "posix-ipc>=1.1.0",  # Shared memory
+    "posix-ipc>=1.1.0",
+]
+
+torch-cuda = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "facenet-pytorch>=2.6.0",
+    "posix-ipc>=1.1.0",
+]
+
+torch-rocm = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "facenet-pytorch>=2.6.0",
+    "posix-ipc>=1.1.0",
+]
+
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
 ]
 
 [project.scripts]
