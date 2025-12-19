@@ -52,4 +52,4 @@ liveness_input_height = 80
 # Face recognizer (MobileFaceNet)
 recognizer_input_width = 112
 recognizer_input_height = 112
-recognizer_embedding_size = 128
+recognizer_embedding_size = 512
