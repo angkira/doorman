@@ -230,10 +230,8 @@ impl OrtBackend {
 #[async_trait]
 impl MLBackend for OrtBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {
-        let detector = match &self.detector {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        let detector = self.get_next_session(&self.detector_pool)
+            .ok_or_else(|| anyhow!("Detector not loaded"))?;
 
         let (orig_width, orig_height) = image.dimensions();
 
@@ -320,15 +318,8 @@ impl MLBackend for OrtBackend {
     }
 
     async fn check_liveness(&self, image: &DynamicImage, face: &Face) -> Result<bool> {
-        let liveness = match &self.liveness {
-            Some(l) => l,
-            None => {
-                warn!("No liveness model loaded - cannot verify face authenticity");
-                return Err(anyhow!(
-                    "Liveness check unavailable: model not loaded. This is a security requirement."
-                ));
-            }
-        };
+        let liveness = self.get_next_session(&self.liveness_pool)
+            .ok_or_else(|| anyhow!("Liveness detector not loaded"))?;
 
         let (x, y, w, h) = face.bbox;
         let face_crop = image.crop_imm(x.max(0.0) as u32, y.max(0.0) as u32, w as u32, h as u32);
@@ -352,10 +343,8 @@ impl MLBackend for OrtBackend {
     }
 
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>> {
-        let recognizer = match &self.recognizer {
-            Some(r) => r,
-            None => return Err(anyhow!("No recognizer model")),
-        };
+        let recognizer = self.get_next_session(&self.recognizer_pool)
+            .ok_or_else(|| anyhow!("Recognizer not loaded"))?;
 
         let (x, y, w, h) = face.bbox;
         let face_crop = image.crop_imm(x.max(0.0) as u32, y.max(0.0) as u32, w as u32, h as u32);
@@ -388,7 +377,7 @@ impl MLBackend for OrtBackend {
     }
 
     fn is_ready(&self) -> bool {
-        self.detector.is_some() && self.liveness.is_some() && self.recognizer.is_some()
+        !self.detector_pool.is_empty() && !self.liveness_pool.is_empty() && !self.recognizer_pool.is_empty()
     }
 
     fn name(&self) -> &'static str {
