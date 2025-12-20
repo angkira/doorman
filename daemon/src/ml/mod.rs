@@ -15,6 +15,8 @@ mod torch_backend;
 mod torch_backend_native;
 #[cfg(feature = "backend-torch-shm")]
 mod torch_shm_backend;
+#[cfg(feature = "backend-tch")]
+mod tch_backend;
 #[cfg(feature = "backend-docker")]
 mod docker_backend;
 #[cfg(feature = "backend-socket")]
@@ -162,6 +164,18 @@ impl MLPipeline {
                 {
                     return Err(anyhow::anyhow!(
                         "Socket backend not compiled. Build with --features backend-socket"
+                    ));
+                }
+            }
+            BackendType::Tch => {
+                #[cfg(feature = "backend-tch")]
+                {
+                    Arc::new(tch_backend::TchBackend::new(&models_dir, &config.ml.device)?)
+                }
+                #[cfg(not(feature = "backend-tch"))]
+                {
+                    return Err(anyhow::anyhow!(
+                        "tch-rs backend not compiled. Build with --features backend-tch or backend-tch-cuda"
                     ));
                 }
             }
