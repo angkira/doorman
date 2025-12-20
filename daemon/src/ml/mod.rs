@@ -167,18 +167,6 @@ impl MLPipeline {
                     ));
                 }
             }
-            BackendType::Tch => {
-                #[cfg(feature = "backend-tch")]
-                {
-                    Arc::new(tch_backend::TchBackend::new(&models_dir, &config.ml.device)?)
-                }
-                #[cfg(not(feature = "backend-tch"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "tch-rs backend not compiled. Build with --features backend-tch or backend-tch-cuda"
-                    ));
-                }
-            }
         };
 
         info!("Using ML backend: {}", backend.name());

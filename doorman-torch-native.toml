@@ -1,0 +1,28 @@
+# Doorman - PyTorch Native Backend (PyO3 direct calls)
+[ml]
+backend = "torch-native"
+device = "cuda"
+models_dir = "~/.local/share/doorman/models"
+face_confidence_threshold = 0.7
+liveness_threshold = 0.5
+recognition_threshold = 0.6
+
+[daemon]
+processing_fps = 30
+user_mode = true
+data_dir = "~/.local/share/doorman"
+socket_path = "/run/user/1000/doorman.sock"
+
+[camera]
+device_id = 0
+width = 1280
+height = 720
+fps = 30
+
+[pipeline]
+preview_fps = 30
+
+[system]
+data_dir = "~/.local/share/doorman"
+socket_path = "/run/user/1000/doorman.sock"
+user_mode = true

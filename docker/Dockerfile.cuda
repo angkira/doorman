@@ -1,0 +1,39 @@
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04
+
+# Install Python and dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /app
+
+# Create virtual environment
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install uv
+RUN pip install --no-cache-dir uv
+
+# Copy requirements
+COPY pyproject.toml uv.lock ./
+
+# Install Python dependencies with CUDA support
+RUN uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 && \
+    uv pip install onnxruntime-gpu pillow numpy
+
+# Copy Python inference script and dependencies
+COPY daemon/src/ml/torch_inference_shm.py /app/
+COPY tools /app/tools
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Expose socket path
+VOLUME ["/tmp"]
+
+# Run inference server
+CMD ["python3", "torch_inference_shm.py"]
