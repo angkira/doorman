@@ -30,17 +30,24 @@ macro_rules! ort_try {
 
 #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 /// ONNX Runtime backend (supports GPU via ROCm/CUDA)
+/// Uses session pooling for concurrent requests
 pub struct OrtBackend {
-    detector: Option<Mutex<Session>>,
-    liveness: Option<Mutex<Session>>,
-    recognizer: Option<Mutex<Session>>,
+    detector_pool: Vec<Mutex<Session>>,
+    liveness_pool: Vec<Mutex<Session>>,
+    recognizer_pool: Vec<Mutex<Session>>,
+    pool_index: AtomicUsize,
 }
 
 #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 impl OrtBackend {
-    pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
-        info!("Initializing ONNX Runtime backend...");
+        pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
+        info!("Initializing ONNX Runtime backend with session pooling...");
         info!("Device: {}", config.ml.device);
+        
+        const POOL_SIZE: usize = 4; // 4 sessions per model for concurrency
 
         // Set environment variable for gfx1103 (Radeon 780M) if needed
         if config.ml.device == "rocm" {
@@ -48,75 +55,80 @@ impl OrtBackend {
             info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.0 for gfx1103 support");
         }
 
-        // Note: ort 2.0 with load-dynamic will use system ONNX Runtime library
-        // which should have MIGraphX/ROCm support if installed from AMD repos
-
-        // Load detector
+        // Load detector pool
         let detector_path = models_dir.join("blazeface.onnx");
-        let detector = match Self::load_model(&detector_path, config) {
-            Ok(model) => {
-                info!("✓ Loaded face detector: {:?}", detector_path);
-                Some(Mutex::new(model))
+        let mut detector_pool = Vec::new();
+        for i in 0..POOL_SIZE {
+            match Self::load_model(&detector_path, config) {
+                Ok(model) => {
+                    detector_pool.push(Mutex::new(model));
+                }
+                Err(e) => {
+                    warn!("✗ Failed to load detector session {}: {}", i, e);
+                }
             }
-            Err(e) => {
-                warn!(
-                    "✗ Failed to load face detector from {:?}: {}",
-                    detector_path, e
-                );
-                None
-            }
-        };
-
-        // Load liveness detector
-        let liveness_path = models_dir.join("liveness.onnx");
-        let liveness = match Self::load_model(&liveness_path, config) {
-            Ok(model) => {
-                info!("✓ Loaded liveness detector: {:?}", liveness_path);
-                Some(Mutex::new(model))
-            }
-            Err(e) => {
-                warn!(
-                    "✗ Failed to load liveness detector from {:?}: {}",
-                    liveness_path, e
-                );
-                None
-            }
-        };
-
-        // Load face recognizer
-        let recognizer_path = models_dir.join("mobilefacenet.onnx");
-        let recognizer = match Self::load_model(&recognizer_path, config) {
-            Ok(model) => {
-                info!("✓ Loaded face recognizer: {:?}", recognizer_path);
-                Some(Mutex::new(model))
-            }
-            Err(e) => {
-                warn!(
-                    "✗ Failed to load face recognizer from {:?}: {}",
-                    recognizer_path, e
-                );
-                None
-            }
-        };
-
-        let loaded = [&detector, &liveness, &recognizer]
-            .iter()
-            .filter(|m| m.is_some())
-            .count();
-
-        info!("ORT backend: loaded {}/3 models", loaded);
-
-        if loaded == 0 {
-            warn!("No models loaded! Face authentication will not work.");
-            warn!("Please ensure models are present in: {:?}", models_dir);
+        }
+        if !detector_pool.is_empty() {
+            info!("✓ Loaded {} face detector sessions", detector_pool.len());
         }
 
+        // Load liveness pool
+        let liveness_path = models_dir.join("liveness.onnx");
+        let mut liveness_pool = Vec::new();
+        for i in 0..POOL_SIZE {
+            match Self::load_model(&liveness_path, config) {
+                Ok(model) => {
+                    liveness_pool.push(Mutex::new(model));
+                }
+                Err(e) => {
+                    warn!("✗ Failed to load liveness session {}: {}", i, e);
+                }
+            }
+        }
+        if !liveness_pool.is_empty() {
+            info!("✓ Loaded {} liveness detector sessions", liveness_pool.len());
+        }
+
+        // Load recognizer pool
+        let recognizer_path = models_dir.join("mobilefacenet.onnx");
+        let mut recognizer_pool = Vec::new();
+        for i in 0..POOL_SIZE {
+            match Self::load_model(&recognizer_path, config) {
+                Ok(model) => {
+                    recognizer_pool.push(Mutex::new(model));
+                }
+                Err(e) => {
+                    warn!("✗ Failed to load recognizer session {}: {}", i, e);
+                }
+            }
+        }
+        if !recognizer_pool.is_empty() {
+            info!("✓ Loaded {} face recognizer sessions", recognizer_pool.len());
+        }
+
+        info!(
+            "ORT backend: loaded {}/{} detector, {}/{} liveness, {}/{} recognizer sessions",
+            detector_pool.len(), POOL_SIZE,
+            liveness_pool.len(), POOL_SIZE,
+            recognizer_pool.len(), POOL_SIZE
+        );
+
         Ok(Self {
-            detector,
-            liveness,
-            recognizer,
+            detector_pool,
+            liveness_pool,
+            recognizer_pool,
+            pool_index: AtomicUsize::new(0),
         })
     }
+    
+    fn get_next_session<'a>(&'a self, pool: &'a [Mutex<Session>]) -> Option<&'a Mutex<Session>> {
+        if pool.is_empty() {
+            return None;
+        }
+        let idx = self.pool_index.fetch_add(1, Ordering::Relaxed) % pool.len();
+        Some(&pool[idx])
+    }
+
 
     fn load_model(path: &Path, config: &Config) -> Result<Session> {
         let threads = if config.ml.cpu_threads > 0 {
