@@ -249,7 +249,7 @@ class InferenceServer:
             return {"error": str(e)}
     
     def run(self):
-        """Run server loop."""
+        """Run server loop - single threaded but fast I/O."""
         print("✓ Server ready", file=sys.stderr, flush=True)
         
         conn, _ = self.server_socket.accept()
@@ -292,7 +292,7 @@ class InferenceServer:
                 else:
                     response = {"error": f"Unknown command: {command}"}
                 
-                # Send response
+                # Send response immediately
                 conn_file.write(json.dumps(response).encode('utf-8') + b'\n')
                 conn_file.flush()
         

@@ -3,7 +3,7 @@ mod backend;
 mod blazeface_decoder;
 mod model_config;
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 mod ort_backend;
 #[cfg(feature = "backend-tract")]
 pub mod tract_backend;
@@ -66,11 +66,11 @@ impl MLPipeline {
                 }
             }
             BackendType::OnnxRuntime => {
-                #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+                #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
                 {
                     Arc::new(ort_backend::OrtBackend::new(&models_dir, config)?)
                 }
-                #[cfg(not(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm")))]
+                #[cfg(not(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm")))]
                 {
                     return Err(anyhow::anyhow!(
                         "ORT backend not compiled. Build with --features backend-ort-cpu or backend-ort-rocm"
@@ -177,7 +177,7 @@ impl MLPipeline {
 
     pub fn dummy(config: &Config) -> Self {
         // For testing - create dummy backend with whatever is available
-        #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+        #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
         {
             let models_dir = PathBuf::from(&config.ml.models_dir);
             let backend = ort_backend::OrtBackend::new(&models_dir, config)
@@ -188,7 +188,7 @@ impl MLPipeline {
                 config: config.clone(),
             }
         }
-        #[cfg(all(feature = "backend-tract", not(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))))]
+        #[cfg(all(feature = "backend-tract", not(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))))]
         {
             let models_dir = PathBuf::from(&config.ml.models_dir);
             let backend = tract_backend::TractBackend::new(&models_dir)
@@ -199,7 +199,7 @@ impl MLPipeline {
                 config: config.clone(),
             }
         }
-        #[cfg(not(any(feature = "backend-tract", feature = "backend-ort-cpu", feature = "backend-ort-rocm")))]
+        #[cfg(not(any(feature = "backend-tract", feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm")))]
         {
             panic!("No backend available for dummy. Compile with --features backend-tract, backend-ort-cpu, or backend-ort-rocm");
         }

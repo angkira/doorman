@@ -1,34 +1,34 @@
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use super::backend::{Face, MLBackend};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use anyhow::{anyhow, Context, Result};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use async_trait::async_trait;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use doorman_shared::Config;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use image::DynamicImage;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use ort::session::{builder::GraphOptimizationLevel, Session};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use ort::value::Value;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use std::path::Path;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use std::sync::Mutex;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use tracing::{info, warn};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 use image::GenericImageView;
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 macro_rules! ort_try {
     ($expr:expr) => {
         $expr.map_err(|e| anyhow!("ORT error: {}", e))?
     };
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 /// ONNX Runtime backend (supports GPU via ROCm/CUDA)
 pub struct OrtBackend {
     detector: Option<Mutex<Session>>,
@@ -36,7 +36,7 @@ pub struct OrtBackend {
     recognizer: Option<Mutex<Session>>,
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 impl OrtBackend {
     pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend...");
@@ -133,6 +133,19 @@ impl OrtBackend {
             .map_err(|e| anyhow!("Failed to set threads: {}", e))?;
 
         // Configure execution provider based on device
+        #[cfg(feature = "backend-ort-cuda")]
+        let builder = if config.ml.device == "cuda" || config.ml.device == "gpu" {
+            info!("Configuring CUDA execution provider for {:?}", path);
+            builder.with_execution_providers([
+                ort::execution_providers::CUDAExecutionProvider::default()
+                    .with_device_id(0)
+                    .build(),
+            ])
+            .map_err(|e| anyhow!("Failed to set CUDA EP: {}", e))?
+        } else {
+            builder
+        };
+        
         #[cfg(feature = "backend-ort-rocm")]
         let builder = if config.ml.device == "rocm" || config.ml.device == "gpu" {
             info!("Configuring ROCm execution provider for {:?}", path);
@@ -146,7 +159,7 @@ impl OrtBackend {
             builder
         };
 
-        #[cfg(not(feature = "backend-ort-rocm"))]
+        #[cfg(not(any(feature = "backend-ort-rocm", feature = "backend-ort-cuda")))]
         let builder = builder;
 
         // Load model file
@@ -161,7 +174,7 @@ impl OrtBackend {
     }
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 impl OrtBackend {
     /// Preprocess image with letterboxing (preserve aspect ratio)
     fn image_to_tensor_letterbox(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> (Vec<f32>, u32, u32, f32, f32) {
@@ -201,7 +214,7 @@ impl OrtBackend {
     }
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-rocm"))]
+#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
 #[async_trait]
 impl MLBackend for OrtBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {
