@@ -1,8 +1,18 @@
-[env]
-LIBCLANG_PATH = "/usr/lib/x86_64-linux-gnu"
-LD_LIBRARY_PATH = "/usr/lib/x86_64-linux-gnu:/usr/lib/llvm-20/lib"
-CLANG_PATH = "/usr/bin/clang-20"
+# Cross-platform build configuration.
+#
+# macOS / generic hosts use the default toolchain with no extra env or linker
+# flags so `cargo build` works out of the box.
+#
+# Linux-specific linker flags (lld + allow-shlib-undefined) are gated to the
+# x86_64 Linux target only.
+#
+# NOTE: The previous global [env] block hardcoded Ubuntu LIBCLANG_PATH /
+# LD_LIBRARY_PATH / CLANG_PATH, which broke builds on macOS. cargo's [env]
+# table is global (it cannot be scoped per-target), so those bindgen/runtime
+# paths must be supplied by the Linux build environment (CI, devcontainer,
+# shell profile) rather than committed here. The default macOS CPU build
+# (backend-ort + camera-mock) pulls in no bindgen-based crates and needs none
+# of them.
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C", "link-arg=-Wl,--allow-shlib-undefined"]
-

@@ -8,7 +8,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 doorman-shared = { path = "../shared" }
-pam-sys = "0.5"
 serde_json = { workspace = true }
 libc = "0.2"
+
+# libpam bindings are only available / meaningful on Linux. On macOS the crate
+# builds to an empty cdylib so the whole workspace still compiles for dev.
+[target.'cfg(target_os = "linux")'.dependencies]
+pam-sys = "0.5"
 
