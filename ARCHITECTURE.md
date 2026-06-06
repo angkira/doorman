@@ -1,27 +1,26 @@
 # Doorman Architecture - Non-Blocking Producer-Consumer Design
 
-## Current Issues
+This is the **shipped** daemon design. Inference runs in-process via ONNX
+Runtime (the `ort` crate) — there is no Python subprocess or model-server IPC
+hop. The four pipeline stages live under `daemon/src/pipeline/`
+(`camera_producer.rs`, `frame_fanout.rs`, `detection_pipeline.rs`,
+`recognition_pipeline.rs`, with shared types in `types.rs`).
 
-The existing architecture has several blocking points that prevent optimal performance:
+## Background: the problem this design solves
 
-1. **Camera Lock Contention** (`background_detection.rs:47`)
-   - Exclusive write lock on camera during capture
-   - Blocks other operations from accessing camera
+An earlier monolithic capture-detect-recognize loop had several blocking points:
 
-2. **Synchronous Capture**
-   - `camera.capture_frame()` blocks async runtime
-   - FFmpeg subprocess I/O causes thread stalls
+1. **Camera lock contention** — an exclusive write lock on the camera during
+   capture blocked other access.
+2. **Synchronous capture** — `camera.capture_frame()` blocked the async runtime.
+3. **ML pipeline blocking** — CPU/GPU inference ran in the async context with no
+   parallelism between capture and inference.
+4. **Sequential processing** — capture → detect → recognize in a single loop, so
+   the slowest stage capped the whole frame rate.
 
-3. **ML Pipeline Blocking** (`background_detection.rs:79, 130`)
-   - CPU/GPU intensive operations in async context
-   - No parallelism between capture and inference
+The staged pipeline below replaces that loop and removes those bottlenecks.
 
-4. **Sequential Processing**
-   - Capture → Detect → Recognize all in single loop
-   - If any stage is slow, entire pipeline stalls
-   - Frame rate limited by slowest component
-
-## Proposed Architecture: Staged Pipeline
+## Architecture: Staged Pipeline
 
 ### Design Principles
 
@@ -464,28 +463,25 @@ pub type FrameData = Vec<u8>;
 3. **Performance Tests**: Verify frame rates and latency
 4. **Regression Tests**: Ensure existing features still work
 
-### Rollback Plan
-- Keep old `background_detection.rs` as `background_detection_legacy.rs`
-- Add feature flag to switch between old and new
-- Monitor metrics for first week after deployment
-
 ## References
 
-### Current Code Locations
-- Background detection: `daemon/src/background_detection.rs`
-- Camera module: `daemon/src/camera/mod.rs`
-- ML pipeline: `daemon/src/ml/mod.rs`
+### Code Locations (shipped)
+- Pipeline tasks: `daemon/src/pipeline/` (`camera_producer.rs`,
+  `frame_fanout.rs`, `detection_pipeline.rs`, `recognition_pipeline.rs`,
+  `types.rs`, `mod.rs`)
+- Camera backends: `daemon/src/camera/` (mock, ffmpeg, v4l2, gstreamer, nokhwa)
+- ML backend (ORT): `daemon/src/ml/` (`ort_backend.rs`, `yunet_decoder.rs`,
+  `align.rs`, `model_config.rs`)
 - Frame streaming: `daemon/src/frame_stream.rs`
 - Debug streaming: `daemon/src/debug_stream.rs`
 
 ### Configuration Parameters
 ```toml
+[camera]
+fps = 30             # camera capture rate
+
 [daemon]
-processing_fps = 5  # Detection rate (existing)
-camera_fps = 30     # Capture rate (new, defaults to camera native)
-pipeline_threads = 4  # ML thread pool size (new, defaults to num_cpus)
-frame_buffer_size = 5  # Camera channel buffer (new)
-detection_buffer_size = 2  # Detection channel buffer (new)
+processing_fps = 10  # detection rate cap (default 10)
 ```
 
 ### Metrics to Track

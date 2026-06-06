@@ -1,199 +1,200 @@
 # doorman
 
-Fast face unlock for Linux. Replaces howdy with proper architecture.
+Fast, lightweight face unlock for Linux — a cleaner-architected alternative to
+howdy.
 
-**Status**: 🟡 **BBox fix applied, awaiting testing** → See [QUICK_TEST.md](QUICK_TEST.md)
+**3 components**: PAM module (`pam_doorman.so`, Rust) → auth daemon (`doormand`,
+Rust) → management CLI (`doorman`, Rust).
 
-**3 components**: PAM module (Rust) → Auth daemon (Rust) → CLI (Python)
+**Key idea**: the daemon owns the camera and the ONNX models. PAM just sends an
+IPC request and falls through to your password on any non-match, so it can never
+lock you out or freeze the greeter.
 
-**Key**: Daemon owns camera + models. PAM just sends IPC requests. No blocking, no crashes.
+Inference runs **in-process** via ONNX Runtime (the `ort` crate) — no Python
+subprocess, no IPC hop to a model server. The default build is **CPU-only** and
+ships the ONNX Runtime CPU library bundled; ROCm/CUDA are optional Linux feature
+builds.
 
-**NEW**: 4-stage non-blocking pipeline for high-performance face recognition.
-
-## 🚀 Quick Start
-
-```bash
-# Test the latest bbox fix:
-./test_bbox.sh                # Terminal 1: Start daemon
-doorman preview --debug       # Terminal 2: View preview
-```
-
-See [MORNING_REPORT.md](MORNING_REPORT.md) for full status and [TODO.md](TODO.md) for priorities.
+> macOS is dev/preview only (there is no PAM unlock target there). Production
+> unlock targets Ubuntu (24.04 LTS reference).
 
 ## Install
 
+Full, careful instructions (build deps, models, systemd, the manual `/etc/pam.d`
+edit) are in [INSTALL.md](INSTALL.md). Short version on Ubuntu:
+
 ```bash
-# Dependencies
-sudo apt install build-essential libpam0g-dev pkg-config
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh  # Rust
-curl -LsSf https://astral.sh/uv/install.sh | sh  # uv
+sudo apt install -y build-essential clang libclang-dev libpam0g-dev libssl-dev pkg-config v4l-utils
+# optional camera backends:
+sudo apt install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev ffmpeg
 
-# For high-performance camera (recommended)
-./install_gstreamer.sh
-
-# Build & install
+git clone https://github.com/doorman/doorman.git
 cd doorman
-uv pip install -e .
-sudo doorman setup
+make build            # builds doormand + doorman + pam_doorman.so (release)
+./scripts/fetch_models.sh   # or: make models
+sudo make install     # installs binaries, PAM module, systemd units; prints the PAM edit
 ```
+
+`doorman` does **not** auto-edit PAM. `sudo make install` (or
+`make pam-instructions`) prints the exact `auth sufficient pam_doorman.so` line
+to add yourself — see [INSTALL.md §6](INSTALL.md) and keep a root shell open
+while you do it.
 
 ## Models
 
-Need 3 ONNX files in `/var/lib/doorman/models/`:
-1. `blazeface.onnx` - Face detection
-2. `liveness.onnx` - Anti-spoofing  
-3. `mobilefacenet.onnx` - Recognition (512-d embeddings)
+Three ONNX files, fetched by `scripts/fetch_models.sh` into `data/models/` and
+your runtime models dir (`/var/lib/doorman/models` for the system service):
 
-Download from:
-- PINTO Model Zoo: https://github.com/PINTO0309/PINTO_model_zoo
-- InsightFace: https://github.com/deepinsight/insightface/tree/master/model_zoo
-- See MODELS.md for details
+1. `face_detection_yunet_2023mar.onnx` — detection (YuNet, **MIT**)
+2. `edgeface_s.onnx` — recognition, 512-d embeddings (EdgeFace-S,
+   **CC-BY-NC-SA 4.0 — non-commercial**)
+3. `minifasnet_v2se.onnx` — anti-spoofing / liveness (MiniFASNetV2-SE,
+   **Apache-2.0**)
+
+> The default EdgeFace-S recognizer weights are **CC-BY-NC-SA 4.0
+> (non-commercial only)**. For commercial use, swap in **AuraFace-v1** (fal,
+> native ONNX, commercial-OK). See [MODELS.md](MODELS.md) for details.
+
+Sources:
+- YuNet: https://github.com/opencv/opencv_zoo
+- EdgeFace: https://github.com/otroshi/edgeface
+- MiniFASNetV2-SE: https://github.com/facenox/face-antispoof-onnx
 
 ## Usage
 
+The `doorman` CLI talks to the daemon over its IPC socket:
+
 ```bash
-# Daemon management (requires sudo)
-sudo doorman start               # Start daemon
-sudo doorman stop                # Stop daemon
-sudo doorman restart             # Restart daemon
-doorman status                   # Check status (no sudo needed)
-
-# User management
-doorman enroll                   # Enroll yourself
-doorman test                     # Test authentication BEFORE enabling in PAM!
-doorman preview                  # Live camera preview (OPTIONAL - see PREVIEW_BUILD.md)
-doorman list                     # Show enrolled users
-sudo doorman enroll <username>   # Enroll another user
-sudo doorman remove <username>   # Remove user
-
-# Model management
-doorman models list              # Show model status
-doorman models download          # Download missing models
-doorman models verify            # Verify models
+doorman enroll "$USER"      # look at the camera; captures diverse embeddings
+doorman list                # show enrolled users
+doorman test "$USER"        # run a real authenticate via the daemon
+doorman remove "$USER"      # remove an enrollment
+doorman status              # daemon version, uptime, camera, models, users
 ```
 
-**⚠️ IMPORTANT:** Run `doorman test` to verify face recognition works BEFORE using it in PAM!
+**⚠️ Run `doorman test` and confirm it passes reliably BEFORE adding the PAM
+line.** Then lock the screen (Meta+L) or run `sudo -k; sudo true` to exercise
+face unlock for real.
 
-Lock screen (Meta+L) to test face unlock in production.
+The daemon itself is managed via systemd:
 
-## GPU Acceleration (Radeon 780M)
+```bash
+sudo systemctl enable --now doormand.service
+sudo systemctl restart doormand.service
+journalctl -u doormand.service -f
+```
+
+## Preview window
+
+`doorman-preview` (built by the default `cargo build`) shows the live camera
+with a bounding box that is **green when your face is recognized, red
+otherwise**, plus the matched name and similarity score. Run the daemon in
+preview mode first:
+
+```bash
+doormand --user --preview        # dev: webcam, stays unlocked with --start-unlocked
+doorman-preview                  # in another terminal
+```
+
+## Performance
+
+There is no Python subprocess or IPC model hop, so the old detection-FPS
+collapse (~0.5 fps in the experimental PyTorch-IPC era) is gone. Detection input
+is rate-capped by `[camera] processing_fps` (default 10).
+
+Measured on Apple Silicon CPU (dev), 640×480, default config:
+
+- **Sustained detection: ~8.6 fps** (capped at the 10 fps target; every 3rd
+  frame runs the full detect → liveness → embed pipeline, the rest detect-only).
+- **Enrollment: ~11 s end-to-end** (10 s recording + ~1.4 s processing). The
+  daemon evenly samples up to 30 recorded frames before inference so a long
+  recording does not serialize hundreds of CPU inferences or starve the live
+  detection loop.
+
+A ROCm/CUDA GPU build raises throughput further; CPU is sufficient for
+single-camera unlock.
+
+## GPU acceleration (optional, Linux-only)
 
 ```toml
 # /etc/doorman/doorman.toml
 [ml]
-device = "rocm"  # or "cuda" for NVIDIA
+device = "rocm"   # or "cuda" for NVIDIA
 gpu_device_id = 0
-
-[authentication]
-auth_frames = 7  # Fewer frames needed with GPU
 ```
 
-Install ROCm, rebuild with `cargo build --release --features gpu`. See GPU_SETUP.md.
-
-## Performance Optimization
-
-### Shared Memory IPC (40-50 FPS)
-
-For best performance with PyTorch backend, use shared memory to eliminate IPC overhead:
-
-```bash
-# Build with shared memory optimization
-cargo build --release --features backend-torch-shm,camera-gstreamer
-
-# Test performance
-./test-torch-shm-daemon.sh
-
-# Benchmark comparison
-python3 tools/benchmark.py -c tools/benchmark_configs/ipc_optimization_comparison.json
-```
-
-**Performance improvement:**
-- torch-ipc (base): ~7 FPS (JSON+Base64 overhead)
-- torch-shm (optimized): ~45 FPS (zero-copy frames)
-
-See [SHARED_MEMORY_QUICKSTART.md](SHARED_MEMORY_QUICKSTART.md) for details.
+Build with `make build-rocm` (AMD) or `make build-cuda` (NVIDIA) and set
+`ORT_DYLIB_PATH` to a GPU-enabled `libonnxruntime.so`. The ROCm/CUDA execution
+provider falls back to CPU automatically if the GPU runtime is unavailable. Full
+setup: [INSTALL.md, Appendix A — GPU builds](INSTALL.md#appendix-a--gpu-builds-optional).
 
 ## Config
 
-Edit `/etc/doorman/doorman.toml`:
+Edit `/etc/doorman/doorman.toml` (system) or `~/.config/doorman/doorman.toml`
+(user). See `packaging/doorman.toml.example` for all keys.
 
 ```toml
 [authentication]
-similarity_threshold = 0.65  # 0.55-0.75 (lower = more lenient)
+similarity_threshold = 0.4   # EdgeFace-S cosine threshold; higher = stricter
 auth_frames = 10
+liveness_enabled = true      # MiniFASNetV2-SE anti-spoof; non-fatal deterrent
 
 [ml]
-device = "cpu"  # or "rocm", "cuda"
+backend = "ort"
+device = "cpu"               # or "rocm", "cuda"
+
+[daemon]
+start_locked = true          # boot locked; background loop unlocks on a match
 ```
 
-Restart: `sudo systemctl restart doormand`
+## Camera backends
 
-## Troubleshooting
+Backends are selected at compile time (Cargo features). The daemon auto-selects
+a working one at runtime.
 
-```bash
-sudo journalctl -u doormand -f    # Check logs
-sudo doorman status               # Check daemon health
-grep doorman /etc/pam.d/kde      # Verify PAM config
+| Backend     | Feature             | Platform       | Notes                          |
+|-------------|---------------------|----------------|--------------------------------|
+| mock        | `camera-mock`       | any            | synthetic / video-file dev     |
+| ffmpeg      | `camera-ffmpeg`     | macOS / Linux  | avfoundation / v4l2 via ffmpeg |
+| v4l2        | `camera-v4l2`       | Linux          | direct V4L2                    |
+| GStreamer   | `camera-gstreamer`  | Linux          | recommended for production     |
+| nokhwa      | `camera-nokhwa`     | macOS          | AVFoundation webcam (dev)      |
+
+Override the build set with e.g. `make build CAMERA_FEATURES=camera-v4l2`.
+
+## Architecture
+
+The daemon runs a 4-stage non-blocking tokio pipeline:
+
+```
+Camera Producer → Frame Fanout → Detection → Recognition
+                       ↓
+                    Preview / frame + debug sockets
 ```
 
-**Face not recognized**: Re-enroll with better lighting or lower threshold in config.  
-**Camera busy**: Close other apps (Zoom, Cheese, etc.)  
-**No models**: Download .onnx files to `/var/lib/doorman/models/`
-
-## Security
-
-**Good for**: Personal workstation convenience  
-**Not for**: High-security servers, shared machines
-
-Password fallback always available. Embeddings are root-only (0600).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ## Testing
 
 ```bash
-make test                        # Unit tests
-make test-video                  # With video support
-cargo test --test e2e_test      # Integration tests
-pytest src/doorman/test_cli.py  # Python tests
+make test                       # Rust unit + integration tests
+make test-docker                # Ubuntu container build/run (Dockerfile.test)
 ```
 
-See TESTING.md for details.
+Model-dependent tests skip automatically when the ONNX files are absent, so a
+fresh clone still builds and tests without fetching models.
 
-## Camera Backends
+## Security
 
-Doorman supports multiple camera backends with automatic fallback:
+**Good for**: personal-workstation convenience.
+**Not for**: high-security or shared machines.
 
-| Backend | Speed | Integration | When to Use |
-|---------|-------|-------------|-------------|
-| **GStreamer** | ⚡ 20-30 fps | PipeWire | **Production (recommended)** |
-| FFmpeg | 🐌 1-10 fps | V4L2 | Fallback/compatibility |
-
-**Use GStreamer for production:**
-```bash
-./install_gstreamer.sh
-cargo build --release --features camera-gstreamer
-```
-
-See [GSTREAMER_BACKEND.md](GSTREAMER_BACKEND.md) for details.
-
-## Architecture
-
-The daemon uses a 4-stage non-blocking pipeline:
-
-```
-Camera Producer (20-30fps) → Frame Fanout → Detection (5fps) → Recognition
-                                 ↓
-                            Preview (15fps)
-```
-
-**Benefits**: No blocking, parallel processing, consistent frame rates, graceful degradation.
-
-**Documentation**:
-- [GSTREAMER_BACKEND.md](GSTREAMER_BACKEND.md) - High-performance camera setup
-- [PIPELINE_QUICK_START.md](PIPELINE_QUICK_START.md) - Quick reference
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Full design specification
-- [PIPELINE_IMPLEMENTATION.md](PIPELINE_IMPLEMENTATION.md) - Implementation details
+Password fallback is always available (PAM `sufficient`). Enrolled embeddings
+are stored root-only (0600). Liveness is a convenience deterrent, not a
+high-assurance anti-spoof.
 
 ## License
 
-MIT
-
+MIT (project code). Model weights carry their own licenses — see
+[MODELS.md](MODELS.md): YuNet **MIT**, MiniFASNetV2-SE **Apache-2.0**, EdgeFace-S
+**CC-BY-NC-SA 4.0 (non-commercial)**.

@@ -2,6 +2,31 @@
 
 All notable changes to doorman will be documented in this file.
 
+## [Unreleased]
+
+Major simplification and a new ONNX model stack.
+
+### Changed
+- **Single ML backend on ONNX Runtime (`ort`)**, CPU by default, in-process — no
+  Python subprocess or model-server IPC hop. ROCm/CUDA are optional Linux
+  feature builds (`backend-ort-rocm` / `backend-ort-cuda`).
+- **New models:** YuNet detection (MIT) + EdgeFace-S recognition (CC-BY-NC-SA 4.0,
+  non-commercial) + MiniFASNetV2-SE liveness (Apache-2.0). Landmark-based 112×112
+  face alignment before embedding. Fetched via `scripts/fetch_models.sh`.
+- **Management CLI rewritten in Rust** (`doorman`: `enroll` / `list` / `remove` /
+  `test` / `status`); replaces the previous Python CLI.
+- **PAM is configured manually** via a documented `/etc/pam.d` edit
+  (`make pam-instructions`); there is no auto-PAM "setup" command. Binaries
+  install to `/usr/bin` via `make install` with systemd units.
+- Added `doorman-preview` (egui) window: green box when recognized, red when not.
+
+### Removed
+- Abandoned ML backends (torch/tch/candle/migraphx/docker/socket/tract) and the
+  `native_ml` PyO3 crate.
+- Abandoned camera backends (pipewire, opencv, rscam, video-file stub). Shipped
+  backends: mock, ffmpeg, v4l2, gstreamer, nokhwa.
+- Stale experiment docs and `.ai-notes`.
+
 ## [0.1.0] - 2025-11-01
 
 ### Added
@@ -16,7 +41,6 @@ All notable changes to doorman will be documented in this file.
 #### GPU Acceleration
 - 🎮 **ROCm support** for AMD GPUs (Radeon RX 6000/7000, 780M)
 - 🚀 **CUDA support** for NVIDIA GPUs
-- 💻 **DirectML support** for Intel iGPUs (Windows)
 - ⚙️ Configurable device selection (CPU/GPU)
 - 📊 3-4x speedup with GPU acceleration
 
@@ -35,12 +59,10 @@ All notable changes to doorman will be documented in this file.
 - 📊 Test coverage >85%
 
 #### Documentation
-- 📚 Complete README with installation guide
-- 🚀 QUICKSTART guide (10-minute setup)
+- 📚 README with installation guide
+- 🛠️ INSTALL guide (Ubuntu, PAM, systemd, GPU appendix)
 - 🏗️ ARCHITECTURE deep-dive
-- 🎨 MODELS guide (ONNX model download)
-- 🧪 TESTING guide (comprehensive test docs)
-- 🎮 GPU_SETUP guide (ROCm/CUDA/DirectML)
+- 🎨 MODELS guide (ONNX models)
 
 ### Components
 
@@ -58,13 +80,15 @@ All notable changes to doorman will be documented in this file.
 - Signal handling for graceful shutdown
 - systemd service integration
 
-#### Python CLI (`doorman`)
-- `setup` - Automated installation
+#### CLI (`doorman`)
 - `enroll` - Face enrollment with progress UI
 - `list` - Show enrolled users
 - `remove` - Remove user enrollment
+- `test` - Run a real authenticate via the daemon
 - `status` - Daemon health check
-- `uninstall` - Complete removal
+
+(Originally a Python CLI; rewritten in Rust — see Unreleased. Install/uninstall
+are handled by `make install` / `make uninstall`, not the CLI.)
 
 ### Security
 - 🔐 Local processing (no cloud)
@@ -98,11 +122,8 @@ All notable changes to doorman will be documented in this file.
 ### Dependencies
 - Rust: 1.70+ (stable)
 - Python: 3.10+
-- ONNX Runtime: 1.16+
-- nokhwa: 0.10 (camera)
-- tokio: 1.35 (async runtime)
-- typer: 0.12 (CLI)
-- OpenCV: 4.x (optional, for video)
+- ONNX Runtime: bundled via the `ort` crate (CPU)
+- tokio (async runtime)
 
 ### Known Limitations
 - 👯 May match identical twins
@@ -126,9 +147,8 @@ All notable changes to doorman will be documented in this file.
 ```bash
 cd doorman
 git pull
-cargo build --release
-sudo doorman uninstall
-sudo doorman setup
+make build
+sudo make install   # reinstalls binaries, PAM module, systemd units
 ```
 
 ## Breaking Changes

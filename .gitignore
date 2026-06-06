@@ -28,9 +28,12 @@ wheels/
 venv/
 ENV/
 
-# ONNX Models (too large for git)
+# ONNX Models (fetched via scripts/fetch_models.sh — too large for git)
 *.onnx
 models/
+
+# Large prebuilt wheels (e.g. ROCm ONNX Runtime — built locally, not committed)
+*.whl
 
 # IDE
 .vscode/
@@ -57,3 +60,7 @@ models/
 .doorman-debug/
 .cache_npu
 .aider*
+
+# Local ROCm scratch helpers (machine-specific hardcoded paths)
+/test_rocm.sh
+/test_rocm_rust.rs

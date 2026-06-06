@@ -1,48 +1,76 @@
-# Build Requirements for doorman
+# Build Requirements — doorman (lean CPU build)
 
-## System Dependencies
+doorman is a Rust workspace. The default ML backend is ONNX Runtime via the
+`ort` crate, which ships a prebuilt CPU library (`download-binaries`), so the
+build has NO system ONNX/PyTorch dependency. There is no Python runtime
+dependency for inference.
+
+## Ubuntu / Debian system packages
 
 ```bash
+sudo apt update
 sudo apt install -y \
-    build-essential \
-    clang \
-    libclang-dev \
-    libpam0g-dev \
-    pkg-config
+    build-essential \   # C toolchain (linker, headers)
+    clang \             # bindgen for native crates
+    libclang-dev \      # libclang for bindgen
+    libpam0g-dev \      # PAM headers (pam_doorman.so)
+    libssl-dev \        # OpenSSL headers (transitive dep of the V4L2/nokhwa camera stack)
+    pkg-config \        # locate native libs
+    v4l-utils           # V4L2 camera tooling (v4l2-ctl)
+
+# Optional camera backends:
+sudo apt install -y \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \  # camera-gstreamer backend
+    ffmpeg                                                  # camera-ffmpeg (CLI webcam path)
 ```
 
-## Rust
+## Rust toolchain
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-```
-
-## Python
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.cargo/env"
 ```
 
 ## Build
 
 ```bash
-# Default build (Tract backend - pure Rust)
+# Lean CPU build for real Linux use (daemon + CLI + PAM, native cameras):
+make build
+#   == cargo build --release -p doormand --no-default-features \
+#        --features backend-ort,camera-mock,camera-ffmpeg,camera-v4l2,camera-gstreamer
+#      cargo build --release -p pam_doorman
+
+# Default workspace build (dev/preview: CPU ort + mock + ffmpeg camera + preview GUI):
 cargo build --release
-
-# With ONNX Runtime backend (GPU support)
-cargo build --release --features backend-ort
-
-# With both backends
-cargo build --release --features backend-tract,backend-ort
-
-# With video support (requires OpenCV)
-cargo build --release --features backend-tract,video
 ```
 
-## Test
+### Feature flags
+
+| Feature             | Meaning                                            | Platform |
+|---------------------|----------------------------------------------------|----------|
+| backend-ort         | CPU ONNX Runtime (default, bundled lib)            | all      |
+| backend-ort-rocm    | AMD ROCm execution provider (`ort/load-dynamic`)   | Linux    |
+| backend-ort-cuda    | NVIDIA CUDA execution provider (`ort/cuda`)        | Linux    |
+| camera-mock         | video-file / synthetic frames (default dev)        | all      |
+| camera-ffmpeg       | live webcam via ffmpeg CLI                         | all      |
+| camera-v4l2         | V4L2 via nokhwa                                    | Linux    |
+| camera-gstreamer    | GStreamer (consumes PipeWire/V4L2 sources)         | Linux    |
+| camera-nokhwa       | native webcam (AVFoundation / MSMF / V4L2)         | all      |
+| preview             | doorman-preview egui window                        | all      |
+
+## GPU (optional)
 
 ```bash
-cargo test --features backend-tract
+# AMD ROCm (requires a working ROCm install + onnxruntime-rocm shared lib on the
+# dynamic loader path):
+make build-rocm
+
+# NVIDIA CUDA (requires CUDA + cuDNN):
+make build-cuda
 ```
 
+## macOS (dev only)
+
+`cargo build` works on macOS for development and preview. The PAM module compiles
+to an empty cdylib there (no libpam); the login/lock-screen unlock path is
+Linux-only and is validated on Ubuntu.
