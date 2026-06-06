@@ -17,7 +17,7 @@ fn test_default_config() {
     assert_eq!(config.ml.cpu_threads, 0);
     assert_eq!(config.ml.gpu_device_id, 0);
     
-    assert_eq!(config.authentication.similarity_threshold, 0.65);
+    assert_eq!(config.authentication.similarity_threshold, 0.4);
     assert_eq!(config.authentication.auth_frames, 10);
     assert_eq!(config.authentication.timeout_secs, 3);
     

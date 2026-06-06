@@ -1,0 +1,87 @@
+# Dockerfile.test — Ubuntu 24.04 build + headless run validation for doorman.
+#
+# This validates the REAL Linux build path (NOT the macOS dev path): it compiles
+# the daemon + `doorman` CLI on Ubuntu with the Linux camera feature set, then
+# runs the daemon headless against a synthetic "face video" and exercises the
+# full IPC flow (enroll -> test/match -> impostor/reject) to prove the pipeline
+# is green on Linux.
+#
+# Build (native arch — fast on Apple Silicon via OrbStack, ort fetches the
+# matching ONNX Runtime build automatically):
+#   docker build -f Dockerfile.test -t doorman-test .
+#
+# Build the TRUE x86_64 path (emulated on ARM hosts, slower):
+#   docker build --platform=linux/amd64 -f Dockerfile.test -t doorman-test .
+#
+# Run the in-container test harness:
+#   docker run --rm doorman-test
+#
+# `scripts/test_ubuntu.sh` / `make test-docker` wrap both steps.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- System build + runtime dependencies -----------------------------------
+# build-essential/clang/libclang: compile + bindgen for native crates.
+# libpam0g-dev: PAM module build.
+# v4l-utils / ffmpeg: Linux camera runtime tooling (mock/ffmpeg backends).
+# libgstreamer*: GStreamer/PipeWire camera backend.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        lld \
+        libclang-dev \
+        libpam0g-dev \
+        libssl-dev \
+        pkg-config \
+        curl \
+        ca-certificates \
+        v4l-utils \
+        ffmpeg \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Rust toolchain ----------------------------------------------------------
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy the workspace (target/ and other heavy/dev artifacts excluded via
+# .dockerignore). Models in data/models/ are .gitignored but ARE copied here
+# because the test harness needs them at runtime.
+COPY . .
+
+# --- Build the Linux daemon + CLI -------------------------------------------
+# Feature set mirrors the real Linux service build: CPU ONNX Runtime + all
+# Linux camera backends (mock fallback always available). NOTE: --release with
+# LTO is slow; that's expected for a one-shot validation image.
+RUN cargo build --release --no-default-features \
+        --features backend-ort,camera-mock,camera-ffmpeg,camera-v4l2,camera-gstreamer \
+        --bin doormand \
+    && cargo build --release --no-default-features \
+        --features backend-ort \
+        --bin doorman
+
+# --- Prepare a synthetic "face video" from the bundled fixture --------------
+# personA_1.jpg is looped into a short H.264 clip the daemon can read via its
+# --video-file (mock) source. personB/personC act as the impostor.
+RUN mkdir -p /test \
+    && ffmpeg -loglevel error -loop 1 -i daemon/tests/fixtures/faces/personA_1.jpg \
+        -t 6 -r 15 -pix_fmt yuv420p -vf "scale=640:480" /test/personA.mp4 \
+    && ffmpeg -loglevel error -loop 1 -i daemon/tests/fixtures/faces/personB_1.jpg \
+        -t 6 -r 15 -pix_fmt yuv420p -vf "scale=640:480" /test/personB.mp4
+
+# Models are loaded from the daemon's user-mode models dir; stage them there.
+RUN mkdir -p /root/.local/share/doorman/models \
+    && cp data/models/*.onnx /root/.local/share/doorman/models/
+
+COPY scripts/run_container_test.sh /test/run_container_test.sh
+RUN chmod +x /test/run_container_test.sh
+
+CMD ["/test/run_container_test.sh"]

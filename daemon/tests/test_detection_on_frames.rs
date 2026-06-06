@@ -18,7 +18,7 @@ async fn test_video_frame_detection() {
             Ok(img) => {
                 println!("\n=== Frame {} ===", i);
                 match pipeline.process_frame(&img).await {
-                    Ok(Some(embedding)) => {
+                    Ok(Some((_face, embedding))) => {
                         println!("✓ Face detected and recognized!");
                         println!("  Embedding size: {}", embedding.len());
                     }

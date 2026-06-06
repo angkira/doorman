@@ -1,0 +1,14 @@
+# Keep the Docker build context lean. target/ alone is ~7GB and must never be
+# shipped into the build (the container rebuilds from source). Models in
+# data/models/ are intentionally NOT ignored — the test harness needs them.
+target/
+**/target/
+.git/
+.github/
+*.mp4
+*.mov
+benchmark_results/
+.ai-notes/
+.session/
+.plans/
+node_modules/
