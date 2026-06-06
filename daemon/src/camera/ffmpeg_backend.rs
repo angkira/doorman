@@ -1,244 +1,204 @@
-/// FFmpeg camera backend - Continuous streaming implementation
-///
-/// This implementation uses a persistent FFmpeg process for continuous frame capture.
-/// - One ffmpeg process for the entire session (not per frame!)
-/// - Streams raw RGB frames continuously via stdout
-/// - Extremely stable and battle-tested
-/// - Works with any camera supported by FFmpeg
-use super::CameraBackend;
-use anyhow::{anyhow, Context, Result};
+//! ffmpeg-based live webcam capture backend.
+//!
+//! This is the reliable real-camera path for macOS development (and a portable
+//! fallback on Linux). `nokhwa` 0.10's AVFoundation path is known to hang
+//! (`frame()` never returns), so instead we spawn the `ffmpeg` CLI and read raw
+//! RGB24 frames from its stdout pipe.
+//!
+//! Input device is gated by target OS:
+//! - macOS:   `-f avfoundation -i "<index>"`        (capture device by index)
+//! - Linux:   `-f v4l2 -i /dev/video<index>`        (V4L2 device)
+//!
+//! If `ffmpeg` is not installed the constructor fails so the caller falls back
+//! to the mock backend. On macOS the user must also grant the terminal camera
+//! permission, otherwise ffmpeg will error out when opening the device.
+
+use anyhow::{anyhow, Result};
 use doorman_shared::Config;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use std::io::Read;
-use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, Command, Stdio};
 use tracing::{debug, info, warn};
 
-pub struct FFmpegCamera {
-    source: CameraSource,
+use super::CameraBackend;
+
+pub struct FfmpegCamera {
     width: u32,
     height: u32,
-    fps: u32,
-    process: Arc<Mutex<Option<Child>>>,
-    stdout: Arc<Mutex<Option<ChildStdout>>>,
-    frame_size: usize,
+    process: Child,
 }
 
-enum CameraSource {
-    Device(String),  // /dev/videoN
-    VideoFile(String),  // path to video file
-}
+// Safety: the `Child` is only ever touched from a single thread at a time;
+// the daemon serializes camera access behind an RwLock.
+unsafe impl Send for FfmpegCamera {}
+unsafe impl Sync for FfmpegCamera {}
 
-// FFmpegCamera is thread-safe via Arc<Mutex>
-unsafe impl Send for FFmpegCamera {}
-unsafe impl Sync for FFmpegCamera {}
+impl FfmpegCamera {
+    /// Returns true if the `ffmpeg` CLI is available on PATH.
+    pub fn ffmpeg_available() -> bool {
+        which_ffmpeg().is_some()
+    }
 
-impl CameraBackend for FFmpegCamera {
-    async fn new_with_config(config: &Config) -> Result<Self> {
-        info!("Initializing FFmpeg camera backend (continuous streaming)");
-        
-        // Determine source: video file or camera device
-        let source = if let Some(ref video_file) = config.camera.video_file {
-            info!("Using video file: {}", video_file);
-            CameraSource::VideoFile(video_file.clone())
-        } else {
-            let device_path = format!("/dev/video{}", config.camera.device_index);
-            info!("Using camera device: {}", device_path);
-            CameraSource::Device(device_path)
-        };
+    fn spawn_capture(width: u32, height: u32, fps: u32, device_index: u32) -> Result<Child> {
+        let ffmpeg = which_ffmpeg().ok_or_else(|| {
+            anyhow!("ffmpeg CLI not found on PATH (macOS: `brew install ffmpeg`)")
+        })?;
 
-        // Test that ffmpeg is available
-        let test = Command::new("ffmpeg")
-            .arg("-version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let mut cmd = Command::new(ffmpeg);
 
-        if test.is_err() || !test.unwrap().success() {
-            return Err(anyhow!("ffmpeg not found. Install with: sudo apt-get install ffmpeg"));
+        // Platform-gated input device.
+        #[cfg(target_os = "macos")]
+        {
+            // AVFoundation: "<video>:<audio>"; we only want video, by index.
+            cmd.arg("-f")
+                .arg("avfoundation")
+                .arg("-framerate")
+                .arg(fps.to_string())
+                .arg("-video_size")
+                .arg(format!("{}x{}", width, height))
+                .arg("-i")
+                .arg(format!("{}", device_index));
         }
 
-        // For video files, skip camera test and use configured resolution
-        let (actual_width, actual_height) = match &source {
-            CameraSource::VideoFile(_) => {
-                info!("Video file source, using configured resolution: {}x{}", 
-                      config.camera.width, config.camera.height);
-                (config.camera.width, config.camera.height)
-            }
-            CameraSource::Device(device_path) => {
-                // Test camera access and detect actual resolution
-                info!("Testing camera access and detecting actual resolution...");
-                let test_capture = Command::new("ffmpeg")
-                    .args(&[
-                        "-f", "v4l2",
-                        "-i", device_path,
-                        "-frames:v", "1",
-                        "-f", "null",
-                        "-"
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .output();
+        #[cfg(target_os = "linux")]
+        {
+            cmd.arg("-f")
+                .arg("v4l2")
+                .arg("-framerate")
+                .arg(fps.to_string())
+                .arg("-video_size")
+                .arg(format!("{}x{}", width, height))
+                .arg("-i")
+                .arg(format!("/dev/video{}", device_index));
+        }
 
-                match test_capture {
-                    Ok(output) => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (fps, device_index);
+            return Err(anyhow!(
+                "ffmpeg live capture is only wired for macOS and Linux"
+            ));
+        }
 
-                        // Check if camera is busy - if so, just use config resolution
-                        if stderr.contains("Device or resource busy") {
-                            warn!("Camera is busy during test, using configured resolution: {}x{}",
-                                  config.camera.width, config.camera.height);
-                            (config.camera.width, config.camera.height)
-                        } else {
-                            if output.status.success() {
-                                info!("FFmpeg camera test successful, using configured resolution: {}x{}", 
-                                      config.camera.width, config.camera.height);
-                            } else {
-                                warn!("Camera test had issues: {}", stderr.lines().take(3).collect::<Vec<_>>().join(" | "));
-                                warn!("Continuing with configured resolution: {}x{}", 
-                                      config.camera.width, config.camera.height);
-                            }
+        // Common output: scaled raw RGB24 to stdout pipe.
+        cmd.arg("-vf")
+            .arg(format!("scale={}:{}", width, height))
+            .arg("-pix_fmt")
+            .arg("rgb24")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("pipe:1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
 
-                            (config.camera.width, config.camera.height)
-                        }
-                    }
-                    Err(e) => {
-                        return Err(anyhow!("Failed to test camera: {}", e));
-                    }
-                }
-            }
-        };
+        debug!("Spawning ffmpeg live capture: {:?}", cmd);
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn ffmpeg: {}", e))
+    }
+}
 
-        let frame_size = (actual_width * actual_height * 3) as usize;
+impl CameraBackend for FfmpegCamera {
+    async fn new_with_config(config: &Config) -> Result<Self> {
+        if !Self::ffmpeg_available() {
+            return Err(anyhow!(
+                "ffmpeg not installed; cannot use live webcam capture (macOS: `brew install ffmpeg`)"
+            ));
+        }
+
+        let width = config.camera.width;
+        let height = config.camera.height;
+        let fps = config.camera.fps;
+        let device_index = config.camera.device_index;
 
         info!(
-            "FFmpeg camera ready: {}x{} @ {}fps (continuous streaming)",
-            actual_width, actual_height, config.camera.fps
+            "Initializing ffmpeg webcam backend (device {}, {}x{} @ {}fps)",
+            device_index, width, height, fps
         );
 
+        let process = Self::spawn_capture(width, height, fps, device_index)?;
+
         Ok(Self {
-            source,
-            width: actual_width,
-            height: actual_height,
-            fps: config.camera.fps,
-            process: Arc::new(Mutex::new(None)),
-            stdout: Arc::new(Mutex::new(None)),
-            frame_size,
+            width,
+            height,
+            process,
         })
     }
 
     fn capture_frame(&mut self) -> Result<DynamicImage> {
-        // Start the streaming process if not already running
-        {
-            let mut process_lock = self.process.lock().unwrap();
-            if process_lock.is_none() {
-                debug!("Starting FFmpeg streaming process");
-                
-                // Build ffmpeg command based on source type
-                let mut cmd = Command::new("ffmpeg");
-                cmd.arg("-loglevel").arg("panic"); // Suppress warnings
-                
-                match &self.source {
-                    CameraSource::Device(device_path) => {
-                        cmd.arg("-f").arg("v4l2")
-                           .arg("-framerate").arg(self.fps.to_string())
-                           .arg("-video_size").arg(format!("{}x{}", self.width, self.height))
-                           .arg("-i").arg(device_path);
-                    }
-                    CameraSource::VideoFile(video_path) => {
-                        cmd.arg("-stream_loop").arg("-1") // Loop video indefinitely
-                           .arg("-re") // Read at native framerate
-                           .arg("-i").arg(video_path)
-                           .arg("-vf").arg(format!("scale={}:{}", self.width, self.height));
-                    }
-                }
-                
-                cmd.arg("-f").arg("rawvideo")
-                   .arg("-pix_fmt").arg("rgb24")
-                   .arg("-");
-                
-                let mut child = cmd
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .context("Failed to spawn ffmpeg process")?;
+        let frame_size = (self.width * self.height * 3) as usize;
+        let mut buffer = vec![0u8; frame_size];
 
-                let stdout = child.stdout.take()
-                    .ok_or_else(|| anyhow!("Failed to get ffmpeg stdout"))?;
-
-                *self.stdout.lock().unwrap() = Some(stdout);
-                *process_lock = Some(child);
-                
-                match &self.source {
-                    CameraSource::Device(_) => info!("FFmpeg continuous streaming started from camera"),
-                    CameraSource::VideoFile(path) => info!("FFmpeg continuous streaming started from video file: {}", path),
-                }
-            }
+        // ffmpeg may still be opening the device; if it has exited, surface that.
+        if let Ok(Some(status)) = self.process.try_wait() {
+            return Err(anyhow!(
+                "ffmpeg capture process exited ({}); check camera permissions",
+                status
+            ));
         }
 
-        // Read one frame from the continuous stream
-        let mut stdout_lock = self.stdout.lock().unwrap();
-        let stdout = stdout_lock.as_mut()
-            .ok_or_else(|| anyhow!("FFmpeg stdout not available"))?;
+        let stdout = self
+            .process
+            .stdout
+            .as_mut()
+            .ok_or_else(|| anyhow!("ffmpeg has no stdout pipe"))?;
 
-        let mut buffer = vec![0u8; self.frame_size];
+        stdout
+            .read_exact(&mut buffer)
+            .map_err(|e| anyhow!("Failed to read RGB frame from ffmpeg: {}", e))?;
 
-        // Read exactly one frame worth of data
-        stdout.read_exact(&mut buffer)
-            .context("Failed to read frame from ffmpeg stream")?;
+        let img = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(self.width, self.height, buffer)
+            .ok_or_else(|| anyhow!("Failed to build image from ffmpeg buffer"))?;
 
-        // Create image from raw RGB data
-        let img_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(self.width, self.height, buffer)
-            .ok_or_else(|| anyhow!("Failed to create image buffer from frame data"))?;
-
-        Ok(DynamicImage::ImageRgb8(img_buffer))
+        Ok(DynamicImage::ImageRgb8(img))
     }
 
     fn capture_frames(&mut self, count: usize) -> Vec<DynamicImage> {
-        let mut frames = Vec::new();
-
-        for i in 0..count {
-            match self.capture_frame() {
-                Ok(frame) => {
-                    debug!("Captured frame {}/{}", i + 1, count);
-                    frames.push(frame);
-                }
+        (0..count)
+            .filter_map(|i| match self.capture_frame() {
+                Ok(f) => Some(f),
                 Err(e) => {
-                    warn!("Failed to capture frame {}/{}: {}", i + 1, count, e);
-                    // Try to restart the stream on error
-                    *self.process.lock().unwrap() = None;
-                    *self.stdout.lock().unwrap() = None;
+                    warn!("ffmpeg capture_frame {}/{} failed: {}", i + 1, count, e);
+                    None
                 }
-            }
-        }
-
-        frames
+            })
+            .collect()
     }
 
     fn is_ready(&self) -> bool {
-        // Always ready - we test on creation
         true
     }
 
     fn backend_name(&self) -> &'static str {
-        "FFmpeg-Stream"
+        "ffmpeg"
     }
 }
 
-impl FFmpegCamera {
-    pub fn is_open(&self) -> bool {
-        let process_guard = self.process.lock().unwrap();
-        process_guard.is_some()
-    }
-}
-
-impl Drop for FFmpegCamera {
+impl Drop for FfmpegCamera {
     fn drop(&mut self) {
-        debug!("Stopping FFmpeg camera streaming");
-        if let Some(mut child) = self.process.lock().unwrap().take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        debug!("FFmpeg camera dropped");
+        let _ = self.process.kill();
+        let _ = self.process.wait();
     }
+}
+
+/// Locate the `ffmpeg` executable. Honors an explicit PATH lookup plus the
+/// common Homebrew location on macOS where login-shell PATH may not apply.
+fn which_ffmpeg() -> Option<String> {
+    // 1. Anything on PATH.
+    if let Ok(output) = Command::new("which").arg("ffmpeg").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    // 2. Common fixed locations.
+    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
+        if std::path::Path::new(candidate).exists() {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
 }
