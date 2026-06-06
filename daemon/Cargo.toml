@@ -45,11 +45,13 @@ clap = { workspace = true }
 #   - backend-ort-cuda  -> ort/cuda + download-binaries
 # This keeps `download-binaries` and `load-dynamic` from being enabled together
 # (which would download a CPU dylib that the ROCm dynamic-load path then ignores).
-ort = { version = "2.0.0-rc.10", optional = true, default-features = false }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false }
 
 # CPU array/parallel helpers used by preprocessing
 rayon = "1.10"
-ndarray = { version = "0.16", features = ["rayon"] }
+# 0.17 matches what ort 2.0.0-rc.12 depends on (it re-exports ndarray tensor
+# conversions); doorman has no direct ndarray usage so this is a unification bump.
+ndarray = { version = "0.17", features = ["rayon"] }
 
 # Camera backends (Linux-gated except the cross-platform nokhwa webcam dev path)
 gstreamer = { version = "0.22", optional = true }
@@ -71,11 +73,11 @@ bincode = "1.3"
 # Signal handling
 tokio-util = "0.7"
 signal-hook = "0.3"
-signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
 futures = "0.3"
 
 # Permissions
-nix = { version = "0.29", features = ["user", "fs"] }
+nix = { version = "0.31", features = ["user", "fs"] }
 
 # Timestamps
 chrono = "0.4"
@@ -88,9 +90,19 @@ chrono = "0.4"
 default = ["backend-ort", "camera-mock", "camera-ffmpeg", "preview"]
 
 # --- ML backends ---
-backend-ort = ["ort", "ort/download-binaries"]           # CPU (bundled ONNX Runtime), all platforms
-backend-ort-rocm = ["ort", "ort/load-dynamic"]           # AMD ROCm EP (dlopen libonnxruntime.so), Linux only
-backend-ort-cuda = ["ort", "ort/cuda", "ort/download-binaries"] # NVIDIA CUDA EP, Linux only
+# NOTE: ort 2.0.0-rc.12 split TLS out of `download-binaries` — any feature that
+# downloads the bundled ONNX Runtime must now explicitly enable exactly one TLS
+# provider, else ort-sys emits a compile_error!. We pick `tls-rustls` (ring) to
+# avoid a system OpenSSL dependency, keeping the Ubuntu container / CI builds
+# dependency-free as documented below.
+backend-ort = ["ort", "ort/download-binaries", "ort/tls-rustls"]           # CPU (bundled ONNX Runtime), all platforms
+# `ort/api-24` (ort's own default API level) is required on the load-dynamic path:
+# rc.12's always-compiled `ep/vitis.rs` references an `api-18`-gated OrtApi field,
+# and `load-dynamic` (disable-linking) does not pull any `api-*` feature in by
+# itself, so without this the ort crate fails to compile. The statically-linked
+# `download-binaries` path provides the field unconditionally and does not need it.
+backend-ort-rocm = ["ort", "ort/load-dynamic", "ort/api-24"]           # AMD ROCm EP (dlopen libonnxruntime.so), Linux only
+backend-ort-cuda = ["ort", "ort/cuda", "ort/download-binaries", "ort/tls-rustls", "ort/api-24"] # NVIDIA CUDA EP, Linux only
 # Apple-Silicon acceleration: CoreML EP (Neural Engine / GPU / CPU). macOS only.
 # The bundled ONNX Runtime from `download-binaries` ships with CoreML support, so
 # this just turns on the `ort/coreml` API + on-device registration. Opt-in:
@@ -128,4 +140,4 @@ required-features = ["backend-ort-coreml"]
 tempfile = "3.13"
 tokio-test = "0.4"
 approx = "0.5.1"
-toml = "0.8"
+toml = "1.0"
