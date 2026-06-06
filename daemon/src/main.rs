@@ -131,9 +131,14 @@ async fn main() -> Result<()> {
         config.ml.models_dir = std::path::PathBuf::from(&config.daemon.data_dir).join("models").to_string_lossy().to_string();
     }
 
-    // Initialize logging
+    // Initialize logging.
+    //
+    // Include the `ort` target at info by default so ort's own EP registration
+    // logs ("Successfully registered ROCMExecutionProvider" / CPU fallback) are
+    // visible — otherwise an operator can't tell a GPU run from a silent CPU
+    // fallback. Still overridable via RUST_LOG.
     let log_level = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| format!("doormand={}", config.daemon.log_level));
+        .unwrap_or_else(|_| format!("doormand={},ort=info", config.daemon.log_level));
 
     tracing_subscriber::registry()
         .with(

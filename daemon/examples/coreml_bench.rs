@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ort::execution_providers::coreml::{CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat};
+// ort 2.0.0-rc.12 renamed the CoreML EP types (CoreMLExecutionProvider -> CoreML,
+// CoreMLComputeUnits -> ComputeUnits, CoreMLModelFormat -> ModelFormat).
+use ort::execution_providers::coreml::{ComputeUnits, CoreML, ModelFormat};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
 
@@ -82,9 +84,9 @@ fn build_session(path: &Path, coreml: bool) -> ort::Result<Session> {
     let b = if coreml {
         let cache = std::env::temp_dir().join("doorman_coreml_bench_cache");
         let _ = std::fs::create_dir_all(&cache);
-        let ep = CoreMLExecutionProvider::default()
-            .with_compute_units(CoreMLComputeUnits::All)
-            .with_model_format(CoreMLModelFormat::MLProgram)
+        let ep = CoreML::default()
+            .with_compute_units(ComputeUnits::All)
+            .with_model_format(ModelFormat::MLProgram)
             .with_static_input_shapes(true)
             .with_profile_compute_plan(true)
             .with_model_cache_dir(cache.to_string_lossy().to_string());
@@ -92,6 +94,8 @@ fn build_session(path: &Path, coreml: bool) -> ort::Result<Session> {
     } else {
         b
     };
+    // ort 2.0.0-rc.12: commit_from_memory now takes &mut self.
+    let mut b = b;
     let bytes = std::fs::read(path).expect("read model");
     b.commit_from_memory(&bytes)
 }

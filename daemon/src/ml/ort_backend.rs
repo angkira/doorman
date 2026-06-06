@@ -48,19 +48,21 @@ impl OrtBackend {
         pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend with session pooling...");
         info!("Device: {}", config.ml.device);
-        
-        const POOL_SIZE: usize = 4; // 4 sessions per model for concurrency
 
-        // Set environment variable for gfx1103 (Radeon 780M) if needed
-        if config.ml.device == "rocm" {
-            std::env::set_var("HSA_OVERRIDE_GFX_VERSION", "11.0.0");
-            info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.0 for gfx1103 support");
-        }
+        // GPU-aware pool size: a single GPU session already opens its own
+        // MIOpen/cuDNN context + memory arena, so 4 sessions per model on a
+        // memory-constrained iGPU (e.g. Radeon 780M) is wasteful/OOM-prone. Use
+        // a small pool on GPU; keep 4 on CPU where it aids concurrency.
+        let pool_size = Self::pool_size_for_device(&config.ml.device);
+        info!(
+            "ML device requested: {} (device_id={}) — check ort logs for EP registration result",
+            config.ml.device, config.ml.gpu_device_id
+        );
 
         // Load detector pool (YuNet)
         let detector_path = models_dir.join(super::model_config::DetectorConfig::YUNET.model_file);
         let mut detector_pool = Vec::new();
-        for i in 0..POOL_SIZE {
+        for i in 0..pool_size {
             match Self::load_model(&detector_path, config) {
                 Ok(model) => {
                     detector_pool.push(Mutex::new(model));
@@ -80,7 +82,7 @@ impl OrtBackend {
         let liveness_cfg = super::model_config::LivenessConfig::MINIFASNET;
         let liveness_path = models_dir.join(liveness_cfg.model_file);
         let mut liveness_pool = Vec::new();
-        for i in 0..POOL_SIZE {
+        for i in 0..pool_size {
             match Self::load_model(&liveness_path, config) {
                 Ok(model) => liveness_pool.push(Mutex::new(model)),
                 Err(e) => warn!("✗ Failed to load liveness {} session {}: {}", liveness_cfg.model_file, i, e),
@@ -95,7 +97,7 @@ impl OrtBackend {
         // Load recognizer pool
         let recognizer_path = models_dir.join(super::model_config::RecognizerConfig::EDGEFACE.model_file);
         let mut recognizer_pool = Vec::new();
-        for i in 0..POOL_SIZE {
+        for i in 0..pool_size {
             match Self::load_model(&recognizer_path, config) {
                 Ok(model) => {
                     recognizer_pool.push(Mutex::new(model));
@@ -111,9 +113,9 @@ impl OrtBackend {
 
         info!(
             "ORT backend: loaded {}/{} detector, {}/{} liveness, {}/{} recognizer sessions",
-            detector_pool.len(), POOL_SIZE,
-            liveness_pool.len(), POOL_SIZE,
-            recognizer_pool.len(), POOL_SIZE
+            detector_pool.len(), pool_size,
+            liveness_pool.len(), pool_size,
+            recognizer_pool.len(), pool_size
         );
 
         Ok(Self {
@@ -130,6 +132,19 @@ impl OrtBackend {
         }
         let idx = self.pool_index.fetch_add(1, Ordering::Relaxed) % pool.len();
         Some(&pool[idx])
+    }
+
+    /// Number of sessions to pool per model, based on the selected device.
+    ///
+    /// CPU benefits from concurrency, so pool 4. A GPU device (rocm/gpu/cuda)
+    /// gets a small pool of 1: each GPU session opens its own MIOpen/cuDNN
+    /// context + memory arena, so multiple sessions on a memory-constrained
+    /// iGPU (e.g. Radeon 780M) are wasteful and OOM-prone.
+    fn pool_size_for_device(device: &str) -> usize {
+        match device {
+            "rocm" | "gpu" | "cuda" => 1,
+            _ => 4,
+        }
     }
 
 
@@ -152,21 +167,31 @@ impl OrtBackend {
         let builder = if config.ml.device == "cuda" || config.ml.device == "gpu" {
             info!("Configuring CUDA execution provider for {:?}", path);
             builder.with_execution_providers([
-                ort::execution_providers::CUDAExecutionProvider::default()
-                    .with_device_id(0)
+                ort::execution_providers::CUDA::default()
+                    .with_device_id(config.ml.gpu_device_id)
                     .build(),
             ])
             .map_err(|e| anyhow!("Failed to set CUDA EP: {}", e))?
         } else {
             builder
         };
-        
+
         #[cfg(feature = "backend-ort-rocm")]
         let builder = if config.ml.device == "rocm" || config.ml.device == "gpu" {
+            // Set HSA_OVERRIDE_GFX_VERSION as early as possible (before any
+            // HIP/session init) so unsupported gfx targets like gfx1103
+            // (Radeon 780M) report as a supported version (11.0.0). BEST-EFFORT:
+            // only set it if not already exported — run_rocm.sh / systemd is the
+            // preferred place to set this, and we must not clobber the operator's
+            // value.
+            if std::env::var("HSA_OVERRIDE_GFX_VERSION").is_err() {
+                std::env::set_var("HSA_OVERRIDE_GFX_VERSION", "11.0.0");
+                info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.0 for gfx1103 support (set it in run_rocm.sh / systemd to override)");
+            }
             info!("Configuring ROCm execution provider for {:?}", path);
             builder.with_execution_providers([
-                ort::execution_providers::ROCmExecutionProvider::default()
-                    .with_device_id(0)
+                ort::execution_providers::ROCm::default()
+                    .with_device_id(config.ml.gpu_device_id)
                     .build(),
             ])
             .map_err(|e| anyhow!("Failed to set ROCm EP: {}", e))?
@@ -188,15 +213,19 @@ impl OrtBackend {
         let builder = {
             let dev = config.ml.device.as_str();
             if matches!(dev, "coreml" | "ane" | "gpu" | "auto") {
+                // ort 2.0.0-rc.12 renamed the CoreML EP types:
+                //   CoreMLExecutionProvider -> CoreML
+                //   CoreMLComputeUnits       -> ComputeUnits
+                //   CoreMLModelFormat        -> ModelFormat
                 use ort::execution_providers::coreml::{
-                    CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat,
+                    ComputeUnits, CoreML, ModelFormat,
                 };
                 info!("Configuring CoreML execution provider (device='{}') for {:?}", dev, path);
                 let cache_dir = std::env::temp_dir().join("doorman_coreml_cache");
                 let _ = std::fs::create_dir_all(&cache_dir);
-                let coreml = CoreMLExecutionProvider::default()
-                    .with_compute_units(CoreMLComputeUnits::All)
-                    .with_model_format(CoreMLModelFormat::MLProgram)
+                let coreml = CoreML::default()
+                    .with_compute_units(ComputeUnits::All)
+                    .with_model_format(ModelFormat::MLProgram)
                     .with_static_input_shapes(true)
                     .with_model_cache_dir(cache_dir.to_string_lossy().to_string());
                 builder
@@ -207,17 +236,13 @@ impl OrtBackend {
             }
         };
 
-        #[cfg(not(any(
-            feature = "backend-ort-rocm",
-            feature = "backend-ort-cuda",
-            feature = "backend-ort-coreml"
-        )))]
-        let builder = builder;
-
         // Load model file
         let model_bytes = std::fs::read(path)
             .with_context(|| format!("Failed to read model file: {:?}", path))?;
-        
+
+        // ort 2.0.0-rc.12 changed `commit_from_memory` to take `&mut self`
+        // (previously consumed `self`), so the builder must be mutable here.
+        let mut builder = builder;
         let session = builder
             .commit_from_memory(&model_bytes)
             .map_err(|e| anyhow!("Failed to create session from model: {}", e))?;
