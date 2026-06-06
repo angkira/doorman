@@ -1,47 +1,49 @@
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use super::backend::{Face, MLBackend};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use anyhow::{anyhow, Context, Result};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use async_trait::async_trait;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use doorman_shared::Config;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use image::DynamicImage;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use ort::session::{builder::GraphOptimizationLevel, Session};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use ort::value::Value;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use std::path::Path;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use std::sync::Mutex;
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use tracing::{info, warn};
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use image::GenericImageView;
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 macro_rules! ort_try {
     ($expr:expr) => {
         $expr.map_err(|e| anyhow!("ORT error: {}", e))?
     };
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 /// ONNX Runtime backend (supports GPU via ROCm/CUDA)
 /// Uses session pooling for concurrent requests
 pub struct OrtBackend {
     detector_pool: Vec<Mutex<Session>>,
+    /// Single MiniFASNetV2-SE liveness model session pool (may be empty: liveness
+    /// is NON-FATAL and short-circuits to "pass" when unavailable).
     liveness_pool: Vec<Mutex<Session>>,
     recognizer_pool: Vec<Mutex<Session>>,
     pool_index: AtomicUsize,
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 impl OrtBackend {
         pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend with session pooling...");
@@ -55,8 +57,8 @@ impl OrtBackend {
             info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.0 for gfx1103 support");
         }
 
-        // Load detector pool
-        let detector_path = models_dir.join("blazeface.onnx");
+        // Load detector pool (YuNet)
+        let detector_path = models_dir.join(super::model_config::DetectorConfig::YUNET.model_file);
         let mut detector_pool = Vec::new();
         for i in 0..POOL_SIZE {
             match Self::load_model(&detector_path, config) {
@@ -72,25 +74,26 @@ impl OrtBackend {
             info!("✓ Loaded {} face detector sessions", detector_pool.len());
         }
 
-        // Load liveness pool
-        let liveness_path = models_dir.join("liveness.onnx");
+        // Load the single MiniFASNetV2-SE liveness model pool.
+        // Liveness is NON-FATAL: a missing/failed model yields an empty pool and
+        // check_liveness short-circuits to "pass" with a warn.
+        let liveness_cfg = super::model_config::LivenessConfig::MINIFASNET;
+        let liveness_path = models_dir.join(liveness_cfg.model_file);
         let mut liveness_pool = Vec::new();
         for i in 0..POOL_SIZE {
             match Self::load_model(&liveness_path, config) {
-                Ok(model) => {
-                    liveness_pool.push(Mutex::new(model));
-                }
-                Err(e) => {
-                    warn!("✗ Failed to load liveness session {}: {}", i, e);
-                }
+                Ok(model) => liveness_pool.push(Mutex::new(model)),
+                Err(e) => warn!("✗ Failed to load liveness {} session {}: {}", liveness_cfg.model_file, i, e),
             }
         }
         if !liveness_pool.is_empty() {
-            info!("✓ Loaded {} liveness detector sessions", liveness_pool.len());
+            info!("✓ Loaded {} sessions for liveness model {}", liveness_pool.len(), liveness_cfg.model_file);
+        } else {
+            warn!("✗ Liveness model {} unavailable — liveness will be skipped", liveness_cfg.model_file);
         }
 
         // Load recognizer pool
-        let recognizer_path = models_dir.join("mobilefacenet.onnx");
+        let recognizer_path = models_dir.join(super::model_config::RecognizerConfig::EDGEFACE.model_file);
         let mut recognizer_pool = Vec::new();
         for i in 0..POOL_SIZE {
             match Self::load_model(&recognizer_path, config) {
@@ -186,180 +189,327 @@ impl OrtBackend {
     }
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 impl OrtBackend {
-    /// Preprocess image with letterboxing (preserve aspect ratio)
-    fn image_to_tensor_letterbox(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> (Vec<f32>, u32, u32, f32, f32) {
-        use image::{Rgb, RgbImage};
+    /// Preprocess an image into YuNet's input tensor.
+    ///
+    /// YuNet 2023mar has a FIXED `[1, 3, 640, 640]` input expecting **BGR**,
+    /// raw float `0..255` (NO mean/std normalization), NCHW. The image is
+    /// stretch-resized to the square input (aspect ratio NOT preserved); the
+    /// decoder maps coordinates back to the original frame.
+    fn yunet_preprocess(image: &DynamicImage, size: u32) -> Vec<f32> {
+        // Stretch-resize to the square network input.
+        let resized = image.resize_exact(size, size, image::imageops::FilterType::Triangle);
+        let rgb = resized.to_rgb8();
 
-        // Calculate scale to fit image in target size while preserving aspect ratio
-        let (orig_w, orig_h) = image.dimensions();
-        let scale = (target_w as f32 / orig_w as f32).min(target_h as f32 / orig_h as f32);
-        let resized_w = (orig_w as f32 * scale) as u32;
-        let resized_h = (orig_h as f32 * scale) as u32;
+        let n = (size * size) as usize;
+        // NCHW, channel order B, G, R (YuNet/OpenCV expects BGR).
+        let mut data = vec![0.0f32; 3 * n];
+        let (b_off, g_off, r_off) = (0, n, 2 * n);
+        for (i, px) in rgb.pixels().enumerate() {
+            // px is RGB; write into BGR planes, raw 0..255.
+            data[b_off + i] = px[2] as f32;
+            data[g_off + i] = px[1] as f32;
+            data[r_off + i] = px[0] as f32;
+        }
+        data
+    }
 
-        // Resize image WITH aspect ratio preserved
-        let resized = image.resize(resized_w, resized_h, image::imageops::FilterType::Lanczos3);
-        let resized_rgb = resized.to_rgb8();
+    /// Fallback face crop when landmarks are unavailable: crop the (normalized)
+    /// bbox from the full frame and resize to `size`x`size`. This is the legacy
+    /// path and is noticeably less accurate than landmark alignment; it is only
+    /// hit by warmup / landmark-less callers.
+    /// Replicate facenox `crop()`: a SQUARE crop of side
+    /// `max(bbox_w, bbox_h) * factor` centered on the bbox center, with any
+    /// out-of-frame region filled by **reflect-101** padding (mirror without
+    /// repeating the edge pixel, i.e. `cv2.BORDER_REFLECT_101`), then resized to
+    /// `size`x`size` RGB. Mirrors the repo's integer arithmetic.
+    fn antispoof_square_crop(
+        image: &DynamicImage,
+        face: &Face,
+        factor: f32,
+        size: u32,
+    ) -> image::RgbImage {
+        let src = image.to_rgb8();
+        let (img_w, img_h) = (src.width() as i64, src.height() as i64);
 
-        // Create black canvas
-        let mut canvas = RgbImage::from_pixel(target_w, target_h, Rgb([0, 0, 0]));
+        // bbox in source pixels (normalized [0,1] -> px), matching the repo's
+        // (x, y, x+w, y+h) -> (x, y, w, h) reconstruction.
+        let (nx, ny, nw, nh) = face.bbox;
+        let bx = nx * img_w as f32;
+        let by = ny * img_h as f32;
+        let bw = (nw * img_w as f32).max(1.0);
+        let bh = (nh * img_h as f32).max(1.0);
 
-        // Center resized image on canvas
-        let offset_x = (target_w - resized_w) / 2;
-        let offset_y = (target_h - resized_h) / 2;
+        let max_dim = bw.max(bh);
+        let center_x = bx + bw / 2.0;
+        let center_y = by + bh / 2.0;
+        let crop_size = (max_dim * factor) as i64; // int() truncation, as in repo
+        let crop_size = crop_size.max(1);
+        let x0 = (center_x - max_dim * factor / 2.0) as i64; // int() truncation
+        let y0 = (center_y - max_dim * factor / 2.0) as i64;
 
-        image::imageops::overlay(&mut canvas, &resized_rgb, offset_x as i64, offset_y as i64);
+        // Reflect-101 index mapping into [0, len): mirror about the edges
+        // without repeating the border pixel (matches OpenCV BORDER_REFLECT_101).
+        fn reflect101(mut i: i64, len: i64) -> i64 {
+            if len == 1 {
+                return 0;
+            }
+            let period = 2 * (len - 1);
+            i = ((i % period) + period) % period;
+            if i >= len {
+                i = period - i;
+            }
+            i
+        }
 
-        // Convert to tensor (CHW format, normalized)
-        let mut data = Vec::with_capacity((3 * target_w * target_h) as usize);
-        for c in 0..3 {
-            for y in 0..target_h {
-                for x in 0..target_w {
-                    let pixel = canvas.get_pixel(x, y);
-                    data.push(pixel[c] as f32 / 255.0);
-                }
+        // Build the crop_size x crop_size square, sampling source with reflect-101.
+        let mut square = image::RgbImage::new(crop_size as u32, crop_size as u32);
+        for cy in 0..crop_size {
+            let sy = reflect101(y0 + cy, img_h);
+            for cx in 0..crop_size {
+                let sx = reflect101(x0 + cx, img_w);
+                let px = *src.get_pixel(sx as u32, sy as u32);
+                square.put_pixel(cx as u32, cy as u32, px);
             }
         }
 
-        (data, resized_w, resized_h, offset_x as f32, offset_y as f32)
+        // Letterbox-resize to `size` (no-op aspect change for a square crop).
+        image::imageops::resize(
+            &square,
+            size,
+            size,
+            image::imageops::FilterType::Lanczos3,
+        )
+    }
+
+    fn bbox_crop_resize(image: &DynamicImage, face: &Face, size: u32) -> image::RgbImage {
+        let (img_w, img_h) = image.dimensions();
+        let (nx, ny, nw, nh) = face.bbox;
+        let x = (nx.clamp(0.0, 1.0) * img_w as f32) as u32;
+        let y = (ny.clamp(0.0, 1.0) * img_h as f32) as u32;
+        let w = ((nw.clamp(0.0, 1.0) * img_w as f32) as u32).max(1).min(img_w.saturating_sub(x).max(1));
+        let h = ((nh.clamp(0.0, 1.0) * img_h as f32) as u32).max(1).min(img_h.saturating_sub(y).max(1));
+        image
+            .crop_imm(x, y, w, h)
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+            .to_rgb8()
     }
 }
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
 #[async_trait]
 impl MLBackend for OrtBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {
-        let detector = self.get_next_session(&self.detector_pool)
+        use super::model_config::DetectorConfig;
+        use super::yunet_decoder::{self, StrideOutputs};
+
+        let detector = self
+            .get_next_session(&self.detector_pool)
             .ok_or_else(|| anyhow!("Detector not loaded"))?;
 
+        let cfg = DetectorConfig::YUNET;
         let (orig_width, orig_height) = image.dimensions();
+        let input_size = cfg.input_width; // YuNet is square (640x640)
 
-        // Use letterboxing for 320x240 model input
-        let (input_data, resized_w, resized_h, offset_x, offset_y) =
-            self.image_to_tensor_letterbox(image, 320, 240);
+        // Preprocess -> BGR, raw 0..255, NCHW [1,3,640,640].
+        let input_data = Self::yunet_preprocess(image, input_size);
+        let input_tensor = ort_try!(Value::from_array((
+            [1usize, 3, input_size as usize, input_size as usize],
+            input_data
+        )));
 
-        let input_tensor =
-            ort_try!(Value::from_array(([1, 3, 240, 320], input_data)));
         let mut detector_lock = detector.lock().unwrap();
         let outputs = ort_try!(detector_lock.run(ort::inputs![input_tensor]));
 
-        // BlazeFace model outputs: [scores, boxes]
-        let (_, scores) = ort_try!(outputs[0].try_extract_tensor::<f32>());
-        let (_, boxes) = ort_try!(outputs[1].try_extract_tensor::<f32>());
+        // Collect the per-stride output slices by name. The slices borrow from
+        // `outputs`, which outlives the decode call below.
+        let mut stride_views: Vec<StrideOutputs> = Vec::with_capacity(DetectorConfig::YUNET_STRIDES.len());
+        for &stride in DetectorConfig::YUNET_STRIDES.iter() {
+            let (_, cls) = ort_try!(outputs[format!("cls_{}", stride).as_str()].try_extract_tensor::<f32>());
+            let (_, obj) = ort_try!(outputs[format!("obj_{}", stride).as_str()].try_extract_tensor::<f32>());
+            let (_, bbox) = ort_try!(outputs[format!("bbox_{}", stride).as_str()].try_extract_tensor::<f32>());
+            let (_, kps) = ort_try!(outputs[format!("kps_{}", stride).as_str()].try_extract_tensor::<f32>());
+            stride_views.push(StrideOutputs { stride, cls, obj, bbox, kps });
+        }
 
-        // BlazeFace format: boxes may be fewer than scores
-        // Only iterate through boxes that actually exist
-        let mut best_idx = 0;
-        let mut best_score = 0.0f32;
+        let dets = yunet_decoder::decode(
+            &stride_views,
+            input_size,
+            orig_width,
+            orig_height,
+            cfg.confidence_threshold,
+        );
+        let dets = yunet_decoder::nms(dets, cfg.iou_threshold);
 
-        let num_classes = 2;
-        let num_boxes = boxes.len() / 4;
-        let num_score_anchors = scores.len() / num_classes;
+        // Single-user behavior: pick the highest-scoring face.
+        let best = dets
+            .into_iter()
+            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
 
-        let max_check = num_boxes.min(num_score_anchors);
+        match best {
+            Some(d) => {
+                // Clamp the normalized bbox to the frame.
+                let (mut x, mut y, w, h) = d.bbox;
+                x = x.clamp(0.0, 1.0);
+                y = y.clamp(0.0, 1.0);
+                let w = w.clamp(0.0, 1.0 - x);
+                let h = h.clamp(0.0, 1.0 - y);
 
-        // Debug: check first few scores
-        tracing::debug!("Score array size: {}, first 10 values: {:?}", 
-            scores.len(), &scores[..scores.len().min(10)]);
+                tracing::debug!(
+                    "YuNet detection: score={:.3} bbox_norm=({:.3},{:.3},{:.3},{:.3}) frame={}x{}",
+                    d.score, x, y, w, h, orig_width, orig_height
+                );
 
-        for box_idx in 0..max_check {
-            let score_idx = box_idx * num_classes + 1; // face class
-            let face_score = scores[score_idx];
-
-            if face_score > best_score && face_score > 0.5 {
-                best_score = face_score;
-                best_idx = box_idx;
+                Ok(Some(Face {
+                    bbox: (x, y, w, h),
+                    confidence: d.score,
+                    frame_dimensions: (orig_width, orig_height),
+                    landmarks: Some(d.landmarks),
+                }))
+            }
+            None => {
+                tracing::debug!("YuNet: no face above threshold {:.2}", cfg.confidence_threshold);
+                Ok(None)
             }
         }
-
-        tracing::debug!("BlazeFace detection: checked {} boxes, best_score={:.3}", max_check, best_score);
-
-        if best_score > 0.5 {
-            let box_offset = best_idx * 4;
-
-            // BlazeFace outputs [center_x, center_y, w, h] in normalized [0,1] coordinates
-            let center_x = boxes[box_offset];
-            let center_y = boxes[box_offset + 1];
-            let w = boxes[box_offset + 2];
-            let h = boxes[box_offset + 3];
-
-            // Convert from center coords to top-left corner coords
-            let x = center_x - (w / 2.0);
-            let y = center_y - (h / 2.0);
-
-            // Convert from normalized [0,1] coordinates in letterboxed image to original image coordinates
-            // Step 1: Convert normalized coords to letterboxed image pixel coords (320x240)
-            let x_letterbox = x * 320.0;
-            let y_letterbox = y * 240.0;
-            let w_letterbox = w * 320.0;
-            let h_letterbox = h * 240.0;
-
-            // Step 2: Remove letterbox offsets
-            let x_resized = x_letterbox - offset_x;
-            let y_resized = y_letterbox - offset_y;
-
-            // Step 3: Scale back to original image dimensions
-            let scale = (320.0 / orig_width as f32).min(240.0 / orig_height as f32);
-            let x_orig = x_resized / scale;
-            let y_orig = y_resized / scale;
-            let w_orig = w_letterbox / scale;
-            let h_orig = h_letterbox / scale;
-
-            Ok(Some(Face {
-                bbox: (x_orig, y_orig, w_orig, h_orig),
-                confidence: best_score,
-                frame_dimensions: (image.width(), image.height()),
-            }))
-        } else {
-            tracing::debug!("No face detected (best_score={:.3} < 0.5)", best_score);
-            Ok(None)
-        }
     }
 
+    /// MiniFASNetV2-SE anti-spoofing (facenox/face-antispoof-onnx, 128x128).
+    ///
+    /// Replicates the repo pipeline EXACTLY:
+    /// 1. Square crop of side `max(bbox_w, bbox_h) * bbox_expansion_factor`
+    ///    (default 1.5), centered on the bbox center; out-of-frame regions are
+    ///    **reflect-101** padded (`cv2.BORDER_REFLECT_101`).
+    /// 2. Resize to 128x128, color order **RGB**, normalize **`/255` -> [0,1]**
+    ///    (NO mean/std), NCHW float32 `[1, 3, 128, 128]`.
+    /// 3. Output `[1, 2]` raw logits (index 0 = real, index 1 = spoof). Decide
+    ///    `is_real = (real_logit - spoof_logit) >= ln(p/(1-p))` for the configured
+    ///    real-probability `p` (default 0.5 -> plain argmax).
+    ///
+    /// NON-FATAL: with no loaded model, returns `Ok(true)` (skip) with a warn so
+    /// liveness can never block recognition.
     async fn check_liveness(&self, image: &DynamicImage, face: &Face) -> Result<bool> {
-        let liveness = self.get_next_session(&self.liveness_pool)
-            .ok_or_else(|| anyhow!("Liveness detector not loaded"))?;
+        use super::model_config::LivenessConfig;
 
-        let (x, y, w, h) = face.bbox;
-        let face_crop = image.crop_imm(x.max(0.0) as u32, y.max(0.0) as u32, w as u32, h as u32);
-
-        let face_resized = face_crop.resize_exact(96, 96, image::imageops::FilterType::Lanczos3);
-        let img = face_resized.to_rgb8();
-
-        let mut input = Vec::with_capacity(3 * 96 * 96);
-        for pixel in img.pixels() {
-            input.push(pixel[0] as f32 / 255.0);
-            input.push(pixel[1] as f32 / 255.0);
-            input.push(pixel[2] as f32 / 255.0);
+        if self.liveness_pool.is_empty() {
+            warn!("Liveness skipped: MiniFASNetV2-SE model not loaded");
+            return Ok(true);
         }
 
-        let input_tensor = ort_try!(Value::from_array(([1, 3, 96, 96], input)));
-        let mut liveness_lock = liveness.lock().unwrap();
-        let outputs = ort_try!(liveness_lock.run(ort::inputs![input_tensor]));
+        let cfg = LivenessConfig::MINIFASNET;
+        let size = cfg.input_size; // 128
+        let session = match self.get_next_session(&self.liveness_pool) {
+            Some(s) => s,
+            None => {
+                warn!("Liveness skipped: no MiniFASNetV2-SE session available");
+                return Ok(true);
+            }
+        };
 
-        let (_, scores) = ort_try!(outputs[0].try_extract_tensor::<f32>());
-        Ok(scores[1] > 0.5)
+        // Build the reflect-101-padded square crop resized to `size`x`size`, RGB.
+        let crop = Self::antispoof_square_crop(image, face, cfg.bbox_expansion_factor, size);
+
+        // RGB, /255 -> [0,1], NCHW planar (matches the repo's `preprocess`).
+        let n = (size * size) as usize;
+        let mut input = vec![0.0f32; 3 * n];
+        let (r_off, g_off, b_off) = (0, n, 2 * n);
+        for (i, px) in crop.pixels().enumerate() {
+            input[r_off + i] = px[0] as f32 / 255.0;
+            input[g_off + i] = px[1] as f32 / 255.0;
+            input[b_off + i] = px[2] as f32 / 255.0;
+        }
+
+        let input_tensor = ort_try!(Value::from_array((
+            [1usize, 3, size as usize, size as usize],
+            input
+        )));
+        let mut lock = session.lock().unwrap();
+        let outputs = ort_try!(lock.run(ort::inputs![input_tensor]));
+        let (_, logits) = ort_try!(outputs[0].try_extract_tensor::<f32>());
+
+        if logits.len() <= cfg.real_class_index || logits.len() <= cfg.spoof_class_index {
+            warn!("Liveness skipped: unexpected MiniFASNetV2-SE output len {}", logits.len());
+            return Ok(true);
+        }
+        let real_logit = logits[cfg.real_class_index];
+        let spoof_logit = logits[cfg.spoof_class_index];
+        let diff = real_logit - spoof_logit;
+
+        // logit threshold = ln(p/(1-p)); p clamped away from 0/1.
+        let p = cfg.real_prob_threshold.clamp(1e-6, 1.0 - 1e-6);
+        let logit_threshold = (p / (1.0 - p)).ln();
+        let is_real = diff >= logit_threshold;
+
+        // Softmax real-probability for logging only.
+        let p_real = 1.0 / (1.0 + (-diff).exp());
+        tracing::debug!(
+            "MiniFASNetV2-SE liveness: real_logit={:.3} spoof_logit={:.3} diff={:.3} p_real={:.4} threshold_logit={:.3} -> {}",
+            real_logit, spoof_logit, diff, p_real, logit_threshold,
+            if is_real { "REAL" } else { "SPOOF" }
+        );
+        Ok(is_real)
     }
 
+    /// Extract a 512-d face embedding using the EdgeFace-S recognizer.
+    ///
+    /// Preprocessing (must match `RecognizerConfig::EDGEFACE`):
+    /// 1. **Align** the face to the canonical 112x112 5-point template via a
+    ///    similarity transform from the detector's 5 landmarks. If the detector
+    ///    provided no landmarks, fall back to a plain bbox crop+resize (degraded —
+    ///    used only by warmup / landmark-less callers).
+    /// 2. Color order **RGB**, normalization `(x - 127.5) / 127.5` -> [-1, 1]
+    ///    (EdgeFace's `ToTensor()` + `Normalize(0.5, 0.5)`; identical to ArcFace).
+    /// 3. NCHW float32 `[1, 3, 112, 112]`.
+    /// 4. **L2-normalize** the 512-d output so cosine == dot product.
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>> {
-        let recognizer = self.get_next_session(&self.recognizer_pool)
+        use super::align;
+        use super::model_config::RecognizerConfig;
+
+        const SIZE: u32 = 112;
+        let recognizer = self
+            .get_next_session(&self.recognizer_pool)
             .ok_or_else(|| anyhow!("Recognizer not loaded"))?;
 
-        let (x, y, w, h) = face.bbox;
-        let face_crop = image.crop_imm(x.max(0.0) as u32, y.max(0.0) as u32, w as u32, h as u32);
+        let (img_w, img_h) = image.dimensions();
 
-        let face_resized = face_crop.resize_exact(112, 112, image::imageops::FilterType::Lanczos3);
-        let img = face_resized.to_rgb8();
+        // Build the aligned 112x112 RGB crop.
+        let aligned: image::RgbImage = match face.landmarks {
+            Some(landmarks_norm) => {
+                // Landmarks are normalized [0,1]; convert to source pixels.
+                let landmarks_px: [(f32, f32); 5] = std::array::from_fn(|i| {
+                    (
+                        landmarks_norm[i].0 * img_w as f32,
+                        landmarks_norm[i].1 * img_h as f32,
+                    )
+                });
+                match align::align_to_template(
+                    image,
+                    &landmarks_px,
+                    &RecognizerConfig::RECOGNIZER_TEMPLATE_112,
+                    SIZE,
+                ) {
+                    Some(a) => a,
+                    None => Self::bbox_crop_resize(image, face, SIZE),
+                }
+            }
+            None => Self::bbox_crop_resize(image, face, SIZE),
+        };
 
-        let mut input = Vec::with_capacity(3 * 112 * 112);
-        for pixel in img.pixels() {
-            input.push((pixel[0] as f32 / 127.5) - 1.0);
-            input.push((pixel[1] as f32 / 127.5) - 1.0);
-            input.push((pixel[2] as f32 / 127.5) - 1.0);
+        // Preprocess: RGB, (x - 127.5)/127.5, NCHW planar.
+        let n = (SIZE * SIZE) as usize;
+        let mut input = vec![0.0f32; 3 * n];
+        let (r_off, g_off, b_off) = (0, n, 2 * n);
+        for (i, px) in aligned.pixels().enumerate() {
+            input[r_off + i] = (px[0] as f32 - 127.5) / 127.5;
+            input[g_off + i] = (px[1] as f32 - 127.5) / 127.5;
+            input[b_off + i] = (px[2] as f32 - 127.5) / 127.5;
         }
 
-        let input_tensor = ort_try!(Value::from_array(([1, 3, 112, 112], input)));
+        let input_tensor = ort_try!(Value::from_array((
+            [1usize, 3, SIZE as usize, SIZE as usize],
+            input
+        )));
         let mut recognizer_lock = recognizer.lock().unwrap();
         let outputs = ort_try!(recognizer_lock.run(ort::inputs![input_tensor]));
 
@@ -377,7 +527,8 @@ impl MLBackend for OrtBackend {
     }
 
     fn is_ready(&self) -> bool {
-        !self.detector_pool.is_empty() && !self.liveness_pool.is_empty() && !self.recognizer_pool.is_empty()
+        // Liveness is a non-fatal convenience check and does NOT gate readiness.
+        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
     }
 
     fn name(&self) -> &'static str {

@@ -1,32 +1,19 @@
-mod anchors;
 mod backend;
-mod blazeface_decoder;
 mod model_config;
 
-#[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+#[cfg(feature = "backend-ort")]
+mod align;
+
+#[cfg(feature = "backend-ort")]
 mod ort_backend;
-#[cfg(feature = "backend-tract")]
-pub mod tract_backend;
-#[cfg(feature = "backend-migraphx")]
-mod migraphx_backend;
-#[cfg(feature = "backend-torch")]
-mod torch_backend;
-#[cfg(feature = "backend-torch-native")]
-mod torch_backend_native;
-#[cfg(feature = "backend-torch-shm")]
-mod torch_shm_backend;
-#[cfg(feature = "backend-tch")]
-mod tch_backend;
-#[cfg(feature = "backend-docker")]
-mod docker_backend;
-#[cfg(feature = "backend-socket")]
-mod socket_backend;
-#[cfg(feature = "backend-candle")]
-mod candle_backend;
+
+#[cfg(feature = "backend-ort")]
+mod yunet_decoder;
 
 #[cfg(test)]
 mod tests;
 
+#[allow(unused_imports)]
 pub use model_config::{DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig};
 
 use anyhow::Result;
@@ -37,7 +24,7 @@ use doorman_shared::Config;
 use image::{DynamicImage, GenericImageView};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 /// ML Pipeline with pluggable backend
 pub struct MLPipeline {
@@ -55,115 +42,16 @@ impl MLPipeline {
         info!("Initializing ML backend: {:?}", backend_type);
 
         let backend: Arc<dyn MLBackend> = match backend_type {
-            BackendType::Tract => {
-                #[cfg(feature = "backend-tract")]
-                {
-                    Arc::new(tract_backend::TractBackend::new(&models_dir)?)
-                }
-                #[cfg(not(feature = "backend-tract"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Tract backend not compiled. Build with --features backend-tract"
-                    ));
-                }
-            }
             BackendType::OnnxRuntime => {
-                #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+                #[cfg(feature = "backend-ort")]
                 {
                     Arc::new(ort_backend::OrtBackend::new(&models_dir, config)?)
                 }
-                #[cfg(not(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm")))]
+                #[cfg(not(feature = "backend-ort"))]
                 {
+                    let _ = &models_dir;
                     return Err(anyhow::anyhow!(
-                        "ORT backend not compiled. Build with --features backend-ort-cpu or backend-ort-rocm"
-                    ));
-                }
-            }
-            BackendType::Candle => {
-                #[cfg(feature = "backend-candle")]
-                {
-                    Arc::new(candle_backend::CandleBackend::new(&models_dir, &config.ml.device)?)
-                }
-                #[cfg(not(feature = "backend-candle"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Candle backend not compiled. Build with --features backend-candle or backend-candle-rocm"
-                    ));
-                }
-            }
-            BackendType::MIGraphX => {
-                #[cfg(feature = "backend-migraphx")]
-                {
-                    Arc::new(migraphx_backend::MIGraphXBackend::new(&models_dir.to_string_lossy())?)
-                }
-                #[cfg(not(feature = "backend-migraphx"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "MIGraphX backend not compiled. Build with --features backend-migraphx"
-                    ));
-                }
-            }
-            BackendType::Torch => {
-                #[cfg(feature = "backend-torch")]
-                {
-                    Arc::new(torch_backend::TorchBackend::new(&models_dir)?)
-                }
-                #[cfg(not(feature = "backend-torch"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Torch backend not compiled. Build with --features backend-torch"
-                    ));
-                }
-            }
-            BackendType::TorchNative => {
-                #[cfg(feature = "backend-torch-native")]
-                {
-                    Arc::new(torch_backend_native::TorchBackendNative::new(&models_dir, &config.ml.device)?)
-                }
-                #[cfg(not(feature = "backend-torch-native"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Torch Native backend not compiled. Build with --features backend-torch-native"
-                    ));
-                }
-            }
-            BackendType::TorchShm => {
-                #[cfg(feature = "backend-torch-shm")]
-                {
-                    Arc::new(torch_shm_backend::TorchShmBackend::new(&models_dir.to_string_lossy(), &config.ml.device)?)
-                }
-                #[cfg(not(feature = "backend-torch-shm"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Torch Shared Memory backend not compiled. Build with --features backend-torch-shm"
-                    ));
-                }
-            }
-            BackendType::Docker => {
-                #[cfg(feature = "backend-docker")]
-                {
-                    let endpoint = config.ml.docker_endpoint.as_deref()
-                        .unwrap_or("http://localhost:5000");
-                    Arc::new(docker_backend::DockerBackend::new(endpoint)?)
-                }
-                #[cfg(not(feature = "backend-docker"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Docker backend not compiled. Build with --features backend-docker"
-                    ));
-                }
-            }
-            BackendType::Socket => {
-                #[cfg(feature = "backend-socket")]
-                {
-                    let socket_path = config.ml.socket_path.as_deref()
-                        .unwrap_or("/tmp/doorman-ml.sock");
-                    Arc::new(socket_backend::SocketBackend::new(socket_path)?)
-                }
-                #[cfg(not(feature = "backend-socket"))]
-                {
-                    return Err(anyhow::anyhow!(
-                        "Socket backend not compiled. Build with --features backend-socket"
+                        "ORT backend not compiled. Build with --features backend-ort"
                     ));
                 }
             }
@@ -178,8 +66,9 @@ impl MLPipeline {
     }
 
     pub fn dummy(config: &Config) -> Self {
-        // For testing - create dummy backend with whatever is available
-        #[cfg(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))]
+        // For testing / startup fallback - create a backend even if model files
+        // are missing (sessions simply fail to load and is_ready() returns false).
+        #[cfg(feature = "backend-ort")]
         {
             let models_dir = PathBuf::from(&config.ml.models_dir);
             let backend = ort_backend::OrtBackend::new(&models_dir, config)
@@ -190,23 +79,14 @@ impl MLPipeline {
                 config: config.clone(),
             }
         }
-        #[cfg(all(feature = "backend-tract", not(any(feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm"))))]
+        #[cfg(not(feature = "backend-ort"))]
         {
-            let models_dir = PathBuf::from(&config.ml.models_dir);
-            let backend = tract_backend::TractBackend::new(&models_dir)
-                .unwrap_or_else(|e| panic!("Failed to create dummy Tract backend: {}", e));
-
-            Self {
-                backend: Arc::new(backend),
-                config: config.clone(),
-            }
-        }
-        #[cfg(not(any(feature = "backend-tract", feature = "backend-ort-cpu", feature = "backend-ort-cuda", feature = "backend-ort-rocm")))]
-        {
-            panic!("No backend available for dummy. Compile with --features backend-tract, backend-ort-cpu, or backend-ort-rocm");
+            let _ = config;
+            panic!("No backend available for dummy. Compile with --features backend-ort");
         }
     }
 
+    /// Full processing: detection + liveness + embedding (for recognition)
     pub async fn process_frame(&self, image: &DynamicImage) -> Result<Option<(backend::Face, Vec<f32>)>> {
         // Stage 1: Detect (on full-size image, detector will resize internally)
         let face = match self.backend.detect_face(image).await? {
@@ -214,15 +94,36 @@ impl MLPipeline {
             None => return Ok(None),
         };
 
-        // Stage 2: Liveness (on full-size image, liveness will crop and resize)
-        if !self.backend.check_liveness(image, &face).await? {
-            return Ok(None);
+        // Stage 2: Liveness (MiniFASNet anti-spoofing).
+        //
+        // Controlled by `authentication.liveness_enabled` (default true). The
+        // check is NON-FATAL: a failure or error logs and is skipped so it can
+        // never block recognition (the bundled MiniFASNet models are a
+        // convenience deterrent, not high-security).
+        if self.config.authentication.liveness_enabled {
+            match self.backend.check_liveness(image, &face).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("Liveness check failed (non-fatal): proceeding with recognition");
+                }
+                Err(e) => {
+                    tracing::warn!("Liveness check errored (non-fatal): {} — proceeding", e);
+                }
+            }
+        } else {
+            tracing::debug!("Liveness disabled via config; skipping");
         }
 
-        // Stage 3: Embedding (on full-size image, recognizer will crop and resize)
+        // Stage 3: Embedding — aligns via landmarks, then ArcFace 512-d.
         let embedding = self.backend.extract_embedding(image, &face).await?;
 
         Ok(Some((face, embedding)))
+    }
+
+    /// Fast detection only - no embedding extraction (for real-time preview)
+    /// Returns face bounding box without embedding (~2x faster)
+    pub async fn detect_only(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
+        self.backend.detect_face(image).await
     }
 
     pub fn models_loaded(&self) -> bool {
@@ -247,6 +148,16 @@ impl MLPipeline {
         self.backend.extract_embedding(image, face).await
     }
 
+    /// Run the liveness check on a detected face (for preview/debugging/tests).
+    /// Returns `true` if the face is considered real (or if liveness is skipped).
+    pub async fn check_liveness(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<bool> {
+        self.backend.check_liveness(image, face).await
+    }
+
     /// Warmup models by running dummy inference
     /// This preloads and compiles models before processing real frames
     pub async fn warmup(&self) -> Result<()> {
@@ -264,6 +175,7 @@ impl MLPipeline {
             bbox: (0.2, 0.2, 0.4, 0.5), // Normalized coords (x, y, w, h)
             confidence: 0.9,
             frame_dimensions: (640, 480),
+            landmarks: None,
         };
         
         // Run liveness warmup
@@ -295,6 +207,7 @@ impl MLPipeline {
             bbox: *bbox,
             confidence: 1.0, // Confidence not needed for embedding extraction
             frame_dimensions: image.dimensions(),
+            landmarks: None,
         };
         tokio::runtime::Handle::current().block_on(self.backend.extract_embedding(image, &face))
     }
