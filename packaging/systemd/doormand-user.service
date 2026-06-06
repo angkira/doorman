@@ -1,0 +1,38 @@
+# doorman face-authentication daemon — USER service (single-user desktop dev).
+#
+# Runs the daemon inside the logged-in user's session so it can reach the
+# session camera stack (PipeWire / portal) without root. Sockets live under
+# $XDG_RUNTIME_DIR (/run/user/<uid>/). This is convenient for development and
+# preview; for a real login/lock-screen unlock prefer the SYSTEM unit
+# (doormand.service) because PAM at the greeter runs before any user session.
+#
+# Install:  ~/.config/systemd/user/doormand.service  (or /usr/lib/systemd/user/)
+# Enable:   systemctl --user enable --now doormand.service
+
+[Unit]
+Description=doorman Face Authentication Daemon (user)
+Documentation=https://github.com/doorman/doorman
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/doormand --user --config %h/.config/doorman/doorman.toml
+
+# Clean up a stale socket left by a crash before re-binding.
+ExecStartPre=/bin/sh -c 'rm -f "$XDG_RUNTIME_DIR/doorman.sock" "$XDG_RUNTIME_DIR/doorman-debug.sock" "$XDG_RUNTIME_DIR/doorman-frames.sock"'
+
+Restart=on-failure
+RestartSec=5s
+
+# Hardening (user-scope; cannot be as strict as the system unit).
+NoNewPrivileges=true
+PrivateTmp=true
+MemoryMax=1G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=doormand-user
+
+[Install]
+WantedBy=default.target

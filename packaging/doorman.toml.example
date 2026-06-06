@@ -1,0 +1,38 @@
+# doorman daemon configuration (system service).
+#
+# Installed to /etc/doorman/doorman.toml by `make install` if no config exists.
+# All keys are optional; omitted keys fall back to the documented defaults.
+
+[daemon]
+socket_path = "/run/doorman.sock"
+data_dir    = "/var/lib/doorman"
+log_level   = "info"
+# Real deployment: boot LOCKED and clear the lock only on a recognized face.
+# The background recognition loop processes frames while locked. PAM
+# authentication runs an on-demand face check regardless of this flag.
+start_locked = true
+# Leave false for the system service; only the dev/preview build streams frames.
+preview_mode = false
+debug_mode   = false
+
+[camera]
+# V4L2 device index (/dev/video0 -> 0). The lean Linux build uses the
+# camera-v4l2 or camera-gstreamer backend selected at compile time.
+device_index = 0
+width  = 1280
+height = 720
+fps    = 30
+
+[ml]
+backend    = "ort"
+device     = "cpu"            # "rocm" / "cuda" only with the matching feature build
+models_dir = "/var/lib/doorman/models"
+cpu_threads = 0              # 0 = let ONNX Runtime pick
+
+[authentication]
+# Cosine-similarity match threshold for EdgeFace-S (see shared/src/lib.rs).
+similarity_threshold = 0.4
+auth_frames          = 10
+timeout_secs         = 3     # must stay <= the PAM hard timeout
+# MiniFASNet liveness is a convenience deterrent; non-fatal when it fails.
+liveness_enabled     = true

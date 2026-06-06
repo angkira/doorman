@@ -1,0 +1,82 @@
+# doorman face-authentication daemon — SYSTEM service.
+#
+# This is the unit used for a real Ubuntu login/lock-screen unlock. The daemon
+# runs continuously as a dedicated, unprivileged `doorman` system user and the
+# PAM module (pam_doorman.so) talks to it over /run/doorman.sock on demand.
+#
+# Install:   /etc/systemd/system/doormand.service   (handled by `make install`)
+# Enable:    sudo systemctl enable --now doormand.service
+#
+# Prerequisites created by `make install`:
+#   - system user/group `doorman` (member of `video` for camera access)
+#   - /var/lib/doorman           (0750, owned by doorman:doorman) — embeddings
+#   - /var/lib/doorman/models    — ONNX models (or symlink to /usr/share/doorman/models)
+#
+# NOTE: this is the SYSTEM unit. For single-user dev on a desktop with PipeWire,
+# use the user unit packaging/systemd/doormand-user.service instead.
+
+[Unit]
+Description=doorman Face Authentication Daemon (system)
+Documentation=https://github.com/doorman/doorman
+# Camera + local filesystems must be up; we do not need the network at all.
+After=systemd-udev-settle.service local-fs.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=doorman
+Group=doorman
+# `video` is required to open /dev/video* (V4L2 / nokhwa / gstreamer).
+SupplementaryGroups=video
+
+# Reads models from /var/lib/doorman/models (preferred) — `make install` can
+# instead point that at the read-only /usr/share/doorman/models tree via symlink.
+# DOORMAN_CONFIG is honored if /etc/doorman/doorman.toml is not auto-discovered.
+Environment=RUST_LOG=info
+ExecStart=/usr/bin/doormand --config /etc/doorman/doorman.toml
+
+Restart=on-failure
+RestartSec=2s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=doormand
+
+# --- Security hardening -----------------------------------------------------
+# The daemon needs: its socket under /run, its data dir, and the camera device.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+
+# Writable paths: embeddings/state and the listening socket.
+# systemd creates /run/doorman (RuntimeDirectory) as doorman:doorman.
+StateDirectory=doorman
+RuntimeDirectory=doorman
+ReadWritePaths=/var/lib/doorman
+
+# Camera device access. ProtectSystem=strict makes /dev mostly read-only and
+# DevicePolicy=closed denies devices by default; explicitly allow video nodes.
+DevicePolicy=closed
+DeviceAllow=/dev/video0 rw
+DeviceAllow=char-video4linux rw
+DeviceAllow=/dev/dri rw
+
+# Resource ceilings — single-camera CPU inference is light.
+MemoryMax=1G
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
