@@ -266,6 +266,27 @@ make build-cuda
 
 These map to the `backend-ort-rocm` / `backend-ort-cuda` Cargo features.
 
+### Apple Silicon — CoreML (macOS dev, ANE/GPU)
+
+macOS is a **dev/preview** target (no PAM-unlock), but on Apple Silicon you can
+still accelerate inference with the CoreML execution provider (Neural Engine +
+GPU + CPU fallback). The bundled ONNX Runtime already ships CoreML support, so
+no extra runtime is needed — just the feature flag:
+
+```bash
+cargo build --release --features backend-ort-coreml
+# then in ~/.config/doorman/doorman.toml:  [ml] device = "coreml"
+# or per run:  doormand --device coreml   (use --device cpu to compare)
+```
+
+Maps to the `backend-ort-coreml` Cargo feature (macOS-only; enables `ort/coreml`
+and registers `CoreMLExecutionProvider` with compute units = ALL, MLProgram
+format, and non-fatal `.build()` CPU fallback). On macOS with this feature
+built, an unset `device` auto-selects CoreML. Detection (YuNet) runs fully on
+ANE/GPU (~5–6× faster); recognition/liveness stay on CPU. See the README
+"Apple Silicon acceleration" section and the `coreml_bench` example for the
+measured node-placement and latency table.
+
 ---
 
 ## Appendix B — Configuration

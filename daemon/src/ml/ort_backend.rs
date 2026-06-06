@@ -174,7 +174,44 @@ impl OrtBackend {
             builder
         };
 
-        #[cfg(not(any(feature = "backend-ort-rocm", feature = "backend-ort-cuda")))]
+        // CoreML execution provider (Apple Silicon: Neural Engine / GPU / CPU).
+        //
+        // Selected when `ml.device` is one of `coreml`/`ane`/`gpu`/`auto` and the
+        // `backend-ort-coreml` feature was compiled. Registered via the
+        // non-fatal `.build()` so that any node/op CoreML can't run falls back to
+        // the ORT CPU EP automatically (CoreML partitions the graph). Compute
+        // units = ALL lets the runtime place subgraphs on ANE + GPU + CPU;
+        // MLProgram is the newer, more-op-complete format; the model cache lets
+        // CoreML reuse the compiled artifact across session loads (warmup absorbs
+        // the first compile).
+        #[cfg(feature = "backend-ort-coreml")]
+        let builder = {
+            let dev = config.ml.device.as_str();
+            if matches!(dev, "coreml" | "ane" | "gpu" | "auto") {
+                use ort::execution_providers::coreml::{
+                    CoreMLComputeUnits, CoreMLExecutionProvider, CoreMLModelFormat,
+                };
+                info!("Configuring CoreML execution provider (device='{}') for {:?}", dev, path);
+                let cache_dir = std::env::temp_dir().join("doorman_coreml_cache");
+                let _ = std::fs::create_dir_all(&cache_dir);
+                let coreml = CoreMLExecutionProvider::default()
+                    .with_compute_units(CoreMLComputeUnits::All)
+                    .with_model_format(CoreMLModelFormat::MLProgram)
+                    .with_static_input_shapes(true)
+                    .with_model_cache_dir(cache_dir.to_string_lossy().to_string());
+                builder
+                    .with_execution_providers([coreml.build()])
+                    .map_err(|e| anyhow!("Failed to set CoreML EP: {}", e))?
+            } else {
+                builder
+            }
+        };
+
+        #[cfg(not(any(
+            feature = "backend-ort-rocm",
+            feature = "backend-ort-cuda",
+            feature = "backend-ort-coreml"
+        )))]
         let builder = builder;
 
         // Load model file

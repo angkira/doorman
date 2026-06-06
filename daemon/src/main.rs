@@ -49,6 +49,13 @@ async fn main() -> Result<()> {
         .skip_while(|arg| arg != "--video-file")
         .nth(1)
         .map(std::path::PathBuf::from);
+    // Inference device override: `--device <cpu|coreml|ane|gpu|auto>`. Takes
+    // precedence over the config's `ml.device`. On Apple Silicon with the
+    // `backend-ort-coreml` feature compiled, `auto`/`coreml` selects the CoreML
+    // EP (Neural Engine + GPU + CPU fallback); otherwise the daemon stays on CPU.
+    let device_override = std::env::args()
+        .skip_while(|arg| arg != "--device")
+        .nth(1);
 
     // Load configuration from --config, DOORMAN_CONFIG env var, or standard locations
     let mut config = if let Some(config_path) = config_file {
@@ -71,6 +78,25 @@ async fn main() -> Result<()> {
     if preview_mode {
         config.daemon.preview_mode = true;
         config.daemon.debug_mode = true;  // Preview mode implies debug mode
+    }
+
+    // Resolve the inference device.
+    //
+    // Precedence: `--device` flag > `ml.device` config > platform default.
+    // Platform default: on macOS built WITH the CoreML feature, an unset device
+    // (still the config default "cpu") is promoted to "coreml" so Apple Silicon
+    // uses the Neural Engine/GPU out of the box; everywhere else it stays "cpu".
+    if let Some(dev) = device_override {
+        info!("Device override via --device: {}", dev);
+        config.ml.device = dev;
+    } else {
+        #[cfg(all(target_os = "macos", feature = "backend-ort-coreml"))]
+        {
+            if config.ml.device == "cpu" {
+                info!("Apple Silicon + CoreML feature: defaulting ml.device to 'coreml'");
+                config.ml.device = "coreml".to_string();
+            }
+        }
     }
 
     // Resolve the initial system lock state.

@@ -128,6 +128,56 @@ Build with `make build-rocm` (AMD) or `make build-cuda` (NVIDIA) and set
 provider falls back to CPU automatically if the GPU runtime is unavailable. Full
 setup: [INSTALL.md, Appendix A — GPU builds](INSTALL.md#appendix-a--gpu-builds-optional).
 
+## Apple Silicon (M-series) acceleration (optional, macOS-only)
+
+On Apple Silicon you can offload inference to the **Neural Engine (ANE) / GPU**
+via ONNX Runtime's **CoreML execution provider**. The bundled ONNX Runtime
+already includes CoreML support, so this is purely a build flag plus a config
+switch — no extra runtime to install.
+
+```bash
+cargo build --release --features backend-ort-coreml
+```
+
+```toml
+# ~/.config/doorman/doorman.toml
+[ml]
+device = "coreml"   # aliases: "ane" / "gpu" / "auto" all select CoreML
+```
+
+When the `backend-ort-coreml` feature is compiled on macOS, an unset device
+auto-selects CoreML; you can also force it per-run with `doormand --device coreml`
+(or `--device cpu` to compare). CoreML uses **compute units = ALL** (ANE + GPU +
+CPU), the **MLProgram** format, and registers ahead of the CPU EP with automatic
+**CPU fallback** — any op CoreML can't run silently stays on CPU, so correctness
+is never affected.
+
+What actually runs where (M3 Max, measured), and the honest verdict:
+
+| Model | CoreML node placement | CPU ms | CoreML ms | Speedup |
+|-------|-----------------------|-------:|----------:|--------:|
+| **YuNet** (detector) | **106/106 nodes → 1 partition, all on ANE/GPU** | 7.6 | **1.3** | **~5.8×** |
+| **EdgeFace** (recognizer) | 681/694 nodes, 8 partitions (fragmented) | 6.2 | 5.9 | ~1.05× |
+| **MiniFASNet** (liveness) | **0/115 nodes → 100% CPU fallback** | 2.4 | 2.4 | ~1.0× |
+
+- **Detection is the big win** (~5–6× faster, fully on ANE/GPU) — and it runs on
+  every frame, so the preview/auth loop benefits the most.
+- **Recognition** is accepted by CoreML but the graph fragments into 8 islands
+  interleaved with CPU nodes; partition-crossing overhead cancels the gain
+  (~1.05×). It still runs correctly.
+- **Liveness** (MiniFASNet) has **no CoreML-supported ops** and runs entirely on
+  CPU — CoreML neither helps nor hurts it.
+- **Correctness:** CoreML output matched the CPU EP **bit-for-bit** in this build
+  (cosine = 1.000000, max-abs Δ = 0.0 on all three models; runtime detection
+  scores were identical). No fp16 accuracy loss was observed here — but CoreML
+  *may* fall back to fp16 on the GPU path, so treat a small embedding-cosine
+  delta as possible on other models/devices.
+
+Net: on Apple Silicon, `device = "coreml"` is worth enabling for the detection
+speedup; recognition/liveness are unchanged. This path is **macOS-only** (Linux
+uses the ROCm/CUDA features above). Reproduce the table with:
+`cargo run --release --example coreml_bench --features backend-ort-coreml`.
+
 ## Config
 
 Edit `/etc/doorman/doorman.toml` (system) or `~/.config/doorman/doorman.toml`
@@ -141,7 +191,7 @@ liveness_enabled = true      # MiniFASNetV2-SE anti-spoof; non-fatal deterrent
 
 [ml]
 backend = "ort"
-device = "cpu"               # or "rocm", "cuda"
+device = "cpu"               # or "rocm"/"cuda" (Linux GPU), "coreml" (macOS ANE/GPU)
 
 [daemon]
 start_locked = true          # boot locked; background loop unlocks on a match

@@ -91,6 +91,18 @@ default = ["backend-ort", "camera-mock", "camera-ffmpeg", "preview"]
 backend-ort = ["ort", "ort/download-binaries"]           # CPU (bundled ONNX Runtime), all platforms
 backend-ort-rocm = ["ort", "ort/load-dynamic"]           # AMD ROCm EP (dlopen libonnxruntime.so), Linux only
 backend-ort-cuda = ["ort", "ort/cuda", "ort/download-binaries"] # NVIDIA CUDA EP, Linux only
+# Apple-Silicon acceleration: CoreML EP (Neural Engine / GPU / CPU). macOS only.
+# The bundled ONNX Runtime from `download-binaries` ships with CoreML support, so
+# this just turns on the `ort/coreml` API + on-device registration. Opt-in:
+#   cargo build --features backend-ort-coreml
+# Enabling `ort/coreml` is a no-op on non-Apple platforms (the EP refuses to
+# register via `supported_by_platform()`), so the flag is harmless if mis-set,
+# but it is intended for macOS only — Linux uses backend-ort-rocm / -cuda.
+# Pulls in `backend-ort` (the full CPU backend module tree + bundled ONNX
+# Runtime) and additionally turns on the CoreML EP API, so every
+# `#[cfg(feature = "backend-ort")]` code path stays compiled and CoreML is a
+# pure add-on with CPU fallback baked in.
+backend-ort-coreml = ["backend-ort", "ort/coreml"] # CoreML EP (ANE/GPU/CPU), macOS only
 
 # --- Camera backends ---
 camera-mock = []                                         # video-file / synthetic frames, all platforms
@@ -106,6 +118,11 @@ preview = ["eframe", "egui"]
 [[example]]
 name = "camera_test"
 required-features = ["camera-nokhwa"]
+
+# CPU vs CoreML benchmark + node-placement report (Apple Silicon).
+[[example]]
+name = "coreml_bench"
+required-features = ["backend-ort-coreml"]
 
 [dev-dependencies]
 tempfile = "3.13"
