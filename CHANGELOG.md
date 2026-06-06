@@ -20,6 +20,42 @@ Major simplification and a new ONNX model stack.
   install to `/usr/bin` via `make install` with systemd units.
 - Added `doorman-preview` (egui) window: green box when recognized, red when not.
 
+### Added
+- **CoreML backend (`backend-ort-coreml`)** for Apple Silicon dev/preview: CoreML
+  EP (ANE/GPU + CPU fallback), compute units = ALL, MLProgram format. Uses the
+  bundled ONNX Runtime (no extra runtime); selected via `ml.device = "coreml"`
+  (aliases `ane`/`gpu`/`auto`). macOS-only; harmless no-op elsewhere.
+
+### Fixed / GPU
+- **`ml.gpu_device_id` is now honored** by the ROCm and CUDA execution providers
+  (`.with_device_id`); previously the device id was effectively hardcoded to 0.
+- **`HSA_OVERRIDE_GFX_VERSION=11.0.0` auto-set** (best-effort, only if unset)
+  before HIP init when `ml.device` is `rocm` **or** `gpu`, so unofficial targets
+  like gfx1103 (Radeon 780M) work out of the box. Prefer setting it in
+  `run_rocm.sh` / the systemd unit; the daemon never clobbers an exported value.
+- **EP-registration logs are visible by default**: the log filter now includes
+  `ort=info`, so `Successfully registered \`ROCMExecutionProvider\`` (or the
+  CPU-fallback warning) shows up without setting `RUST_LOG`. `RUST_LOG` still
+  overrides. CPU fallback remains non-fatal.
+- **GPU-aware session pool**: 1 session per model on `rocm`/`gpu`/`cuda` (avoids
+  4× MIOpen/cuDNN context + arena on memory-constrained iGPUs); 4 on CPU.
+
+### Dependencies
+- `ort` 2.0.0-rc.10 → **2.0.0-rc.12**. rc.12 requires an explicit TLS provider on
+  the `download-binaries` path (we use `tls-rustls`) and an `api-*` feature on the
+  `load-dynamic`/cuda/rocm paths (`api-24`).
+- **Pinned & synchronized the GPU stack**: `ort` 2.0.0-rc.12 (api-24) ↔ ONNX
+  Runtime **1.24.2** ↔ ROCm **7.2.4** (gfx1103 / Radeon 780M). The load-dynamic
+  ROCm `libonnxruntime.so` MUST be ORT 1.24.x or the runtime `dlopen` breaks.
+  Updated `build_onnxruntime_rocm.sh` (ORT_VERSION v1.24.2, ROCM_VERSION 7.2.4),
+  `test_rocm.sh`, INSTALL.md, BUILD_REQUIREMENTS.txt and the ROCm testing plan;
+  removed the stale 1.20.1/1.22.1 references.
+- Bumped: `ndarray` 0.17, `nix` 0.31, `dirs` 6, `signal-hook-tokio` 0.4,
+  `toml` 1.0, plus assorted semver-compatible updates.
+- **Intentionally pinned:** `eframe`/`egui` 0.29 (0.34 API churn),
+  `bincode` 1.3 (v3 changes the on-disk embedding format), `gstreamer` 0.22
+  (Linux-only), `pam-sys` 0.5 (1.0 is alpha).
+
 ### Removed
 - Abandoned ML backends (torch/tch/candle/migraphx/docker/socket/tract) and the
   `native_ml` PyO3 crate.

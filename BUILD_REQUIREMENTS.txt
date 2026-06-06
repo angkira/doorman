@@ -49,8 +49,9 @@ cargo build --release
 | Feature             | Meaning                                            | Platform |
 |---------------------|----------------------------------------------------|----------|
 | backend-ort         | CPU ONNX Runtime (default, bundled lib)            | all      |
-| backend-ort-rocm    | AMD ROCm execution provider (`ort/load-dynamic`)   | Linux    |
-| backend-ort-cuda    | NVIDIA CUDA execution provider (`ort/cuda`)        | Linux    |
+| backend-ort-rocm    | AMD ROCm EP (`ort/load-dynamic` + `ort/api-24`)    | Linux    |
+| backend-ort-cuda    | NVIDIA CUDA EP (`ort/cuda` + bundled lib)          | Linux    |
+| backend-ort-coreml  | Apple CoreML EP (ANE/GPU/CPU, bundled lib)         | macOS    |
 | camera-mock         | video-file / synthetic frames (default dev)        | all      |
 | camera-ffmpeg       | live webcam via ffmpeg CLI                         | all      |
 | camera-v4l2         | V4L2 via nokhwa                                    | Linux    |
@@ -61,13 +62,31 @@ cargo build --release
 ## GPU (optional)
 
 ```bash
-# AMD ROCm (requires a working ROCm install + onnxruntime-rocm shared lib on the
-# dynamic loader path):
+# AMD ROCm (requires a working ROCm install + a ROCm-enabled onnxruntime shared
+# lib; backend-ort-rocm uses ort/load-dynamic, so the daemon dlopen()s it at
+# runtime via ORT_DYLIB_PATH — nothing GPU is linked at build time):
 make build-rocm
 
-# NVIDIA CUDA (requires CUDA + cuDNN):
+# NVIDIA CUDA (requires CUDA + cuDNN; backend-ort-cuda downloads a CUDA-enabled
+# ONNX Runtime via ort/download-binaries):
 make build-cuda
+
+# Apple CoreML (macOS, Apple Silicon; bundled ONNX Runtime already has CoreML):
+cargo build --release --features backend-ort-coreml
 ```
+
+Note on ONNX Runtime / TLS: doorman uses `ort` 2.0.0-rc.12. rc.12 split TLS out
+of `download-binaries`, so any download-binaries path (`backend-ort`,
+`backend-ort-cuda`, `backend-ort-coreml`) now pulls in exactly one TLS provider —
+we pick `ort/tls-rustls` (ring, no system OpenSSL), keeping the CPU/CUDA/CoreML
+builds dependency-free. The `backend-ort-rocm` load-dynamic path links no ONNX
+Runtime, so it needs no TLS provider but does add `ort/api-24`. Build the daemon
+with ROCm by setting `ORT_DYLIB_PATH` to your ROCm `libonnxruntime.so` at runtime
+(see INSTALL.md, AMD ROCm appendix).
+
+Pinned GPU stack (keep in lock-step): `ort` 2.0.0-rc.12 (api-24) <-> ONNX Runtime
+1.24.2 (the load-dynamic libonnxruntime.so MUST be this ORT minor) <-> ROCm 7.2.4
+for gfx1103 (Radeon 780M). A mismatched ORT minor breaks the dlopen at runtime.
 
 ## macOS (dev only)
 

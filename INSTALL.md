@@ -199,11 +199,18 @@ execution providers are optional and Linux-only.
 ### AMD ROCm (e.g. Radeon 780M / gfx1103 iGPU)
 
 The ROCm build links **no bundled ONNX Runtime** — the `backend-ort-rocm` feature
-enables `ort/load-dynamic`, so the daemon loads a ROCm-enabled `libonnxruntime.so`
-at runtime. You supply that library; the stock CPU build does not contain the
-ROCm execution provider.
+enables `ort/load-dynamic` (plus `ort/api-24`; no `ort/rocm` cargo feature is
+needed), so the daemon `dlopen`s a ROCm-enabled `libonnxruntime.so` at runtime
+via `ORT_DYLIB_PATH`. You supply that library; the stock CPU build does not
+contain the ROCm execution provider. (doorman uses `ort` `2.0.0-rc.12`.)
 
-**1. Install ROCm runtime** (Ubuntu 24.04, ROCm 6.x):
+> **Pinned GPU stack** — keep these in lock-step or the runtime `dlopen` fails:
+> `ort` crate **2.0.0-rc.12** (`ort/api-24`) ↔ **ONNX Runtime 1.24.2** (the `load-dynamic`
+> `libonnxruntime.so` MUST be this ORT minor — rc.12 targets the ORT 1.24 C API) ↔
+> **ROCm 7.2.4** for **gfx1103** (Radeon 780M). A mismatched ORT minor (e.g. 1.20.x/1.22.x)
+> is ABI-incompatible and breaks at runtime.
+
+**1. Install ROCm runtime** (Ubuntu 24.04, ROCm 7.2.4):
 
 ```bash
 # Follow https://rocm.docs.amd.com for the apt repo, then:
@@ -211,10 +218,12 @@ sudo apt install rocm-hip-runtime rocm-libs miopen-hip rocblas
 sudo usermod -aG render,video "$USER"   # log out/in afterwards
 ```
 
-**2. Obtain a ROCm-enabled ONNX Runtime shared library.** Either build ONNX
-Runtime with `--use_rocm` (see onnxruntime build docs) or install the
-`onnxruntime-rocm` package, then note the path to `libonnxruntime.so`
-(e.g. `/opt/onnxruntime-rocm/lib/libonnxruntime.so`).
+**2. Obtain a ROCm-enabled ONNX Runtime 1.24.2 shared library.** Either build ONNX
+Runtime with `--use_rocm` (see onnxruntime build docs; or run the bundled
+`build_onnxruntime_rocm.sh`, which defaults to `ORT_VERSION=v1.24.2`) or install a
+matching **1.24.2** `onnxruntime-rocm` package, then note the path to
+`libonnxruntime.so` (e.g. `/opt/onnxruntime-rocm/lib/libonnxruntime.so`). The ORT
+minor **must be 1.24** to match `ort` 2.0.0-rc.12 on the load-dynamic path.
 
 > Note: some pre-built `onnxruntime-rocm` wheels ship a `libonnxruntime.so` with
 > an **executable stack**, which the loader may reject. The repo includes
@@ -232,37 +241,63 @@ make build-rocm     # = cargo build --release -p doormand \
 **4. Point the loader + config at ROCm and run:**
 
 ```bash
+# Required: the dynamic loader must find the ROCm-enabled ONNX Runtime.
 export ORT_DYLIB_PATH=/opt/onnxruntime-rocm/lib/libonnxruntime.so
-# gfx1103 (Radeon 780M) is not an official ROCm target; the daemon already sets
-# HSA_OVERRIDE_GFX_VERSION=11.0.0 when device="rocm", but you can override it:
-# export HSA_OVERRIDE_GFX_VERSION=11.0.0
+export LD_LIBRARY_PATH=/opt/onnxruntime-rocm/lib:${LD_LIBRARY_PATH}   # so its ROCm deps resolve
+
+# gfx1103 (Radeon 780M) is not an official ROCm target. The daemon AUTO-SETS
+# HSA_OVERRIDE_GFX_VERSION=11.0.0 best-effort (only when device="rocm"/"gpu" AND
+# the var is unset) before HIP init — but the preferred place to set it is the
+# launcher / unit so it always applies before the process starts:
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
 ```
+
+`run_rocm.sh` is a ready-made launcher that exports all of the above
+(`ORT_DYLIB_PATH`, `HSA_OVERRIDE_GFX_VERSION`, MIOpen tuning); for the system
+service, set these in the systemd unit (`Environment=`) rather than relying on
+the daemon's best-effort fallback.
 
 In `/etc/doorman/doorman.toml` (or the user config):
 
 ```toml
 [ml]
 device = "rocm"        # selects the ROCm execution provider (see below)
-gpu_device_id = 0
+gpu_device_id = 0      # honored by the ROCm EP (.with_device_id); pick the HIP device
 ```
+
+**GPU-aware session pool.** On a GPU device (`rocm`/`gpu`/`cuda`) doorman pools
+**one** session per model: each GPU session opens its own MIOpen/cuDNN context +
+memory arena, so the 4-session-per-model pool used on CPU would 4× that footprint
+and OOM a memory-constrained iGPU (e.g. Radeon 780M). On CPU it stays at 4 for
+concurrency. No config knob — it is derived from `ml.device`.
 
 **Execution-provider selection & CPU fallback.** With `device = "rocm"` (or
 `"gpu"`), `ort_backend.rs` registers `ROCMExecutionProvider` on every model
-session. EP registration is **non-fatal** (we use `.build()`, not
-`.error_on_failure()`): if the ROCm EP can't be registered — missing
+session at `gpu_device_id`. EP registration is **non-fatal** (we use `.build()`,
+not `.error_on_failure()`): if the ROCm EP can't be registered — missing
 `libonnxruntime.so` symbols, unsupported gfx target, no GPU — ONNX Runtime logs a
 warning and **silently falls back to the CPU provider**, so the daemon keeps
-working (just slower). Set `RUST_LOG=ort=info,doormand=info` and look for
-`Successfully registered ROCMExecutionProvider` to confirm the GPU is actually in
-use rather than the CPU fallback.
+working (just slower). The `ort` target now logs at `info` **by default** (the
+filter is `doormand=<level>,ort=info`), so the `Successfully registered
+\`ROCMExecutionProvider\`` line — or the CPU-fallback warning — is visible in
+`journalctl` without any extra flag. `RUST_LOG` still overrides (e.g.
+`RUST_LOG=ort=debug` for more).
+
+> Full GPU validation steps (build, smoke test, confirming the EP actually
+> registered, latency check) live in
+> [`.plans/2026-06-06_rocm-testing-plan.md`](.plans/2026-06-06_rocm-testing-plan.md).
 
 ### NVIDIA CUDA
 
 ```bash
 # Requires CUDA + cuDNN.
 make build-cuda
-# then in /etc/doorman/doorman.toml:  [ml] device = "cuda"
+# then in /etc/doorman/doorman.toml:
+#   [ml] device = "cuda"   (gpu_device_id is honored by the CUDA EP too)
 ```
+
+The CUDA EP also reads `gpu_device_id`, uses the same one-session GPU pool, and
+its registration line is visible under the default `ort=info` log filter.
 
 These map to the `backend-ort-rocm` / `backend-ort-cuda` Cargo features.
 

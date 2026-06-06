@@ -123,10 +123,17 @@ device = "rocm"   # or "cuda" for NVIDIA
 gpu_device_id = 0
 ```
 
-Build with `make build-rocm` (AMD) or `make build-cuda` (NVIDIA) and set
-`ORT_DYLIB_PATH` to a GPU-enabled `libonnxruntime.so`. The ROCm/CUDA execution
-provider falls back to CPU automatically if the GPU runtime is unavailable. Full
-setup: [INSTALL.md, Appendix A — GPU builds](INSTALL.md#appendix-a--gpu-builds-optional).
+Build with `make build-rocm` (AMD, `backend-ort-rocm`) or `make build-cuda`
+(NVIDIA, `backend-ort-cuda`) and set `ORT_DYLIB_PATH` to a GPU-enabled
+`libonnxruntime.so` (ROCm uses `ort/load-dynamic`). `gpu_device_id` is honored by
+both execution providers, and on a GPU device doorman pools one session per model
+(not four) to fit memory-constrained iGPUs. EP registration is **non-fatal**: the
+ROCm/CUDA provider falls back to CPU automatically if the GPU runtime is
+unavailable — and because the `ort` log target is on by default, the
+`Successfully registered \`ROCMExecutionProvider\`` line (or the CPU-fallback
+warning) shows up in the daemon log so you can tell GPU from a silent fallback.
+Full setup, incl. `HSA_OVERRIDE_GFX_VERSION` for gfx1103:
+[INSTALL.md, Appendix A — GPU builds](INSTALL.md#appendix-a--gpu-builds-optional).
 
 ## Apple Silicon (M-series) acceleration (optional, macOS-only)
 
