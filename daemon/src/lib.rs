@@ -5,6 +5,6 @@ pub mod storage;
 
 // Re-export commonly used types
 pub use camera::Camera;
-pub use ml::MLPipeline;
+pub use ml::{MLPipeline, Face};
 pub use storage::Storage;
 

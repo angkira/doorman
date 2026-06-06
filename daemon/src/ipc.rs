@@ -295,7 +295,29 @@ async fn handle_enroll(
         };
     }
 
-    info!("Captured {} frames, processing...", frames.len());
+    // Subsample the captured frames before running (serial, CPU-bound) inference.
+    //
+    // Recording ~10s at ~30fps yields ~300 frames. Embedding every one of them
+    // (detect → align → embed) ran serially for ~57s and, because each
+    // `process_frame` borrows a recognizer session from the shared pool, it also
+    // starved the background detection pipeline. Consecutive frames are nearly
+    // identical, so we evenly sample at most ENROLL_MAX_PROCESS_FRAMES of them —
+    // this is enough variation for the diverse-embedding selection below while
+    // cutting enrollment processing time by ~10x and freeing recognizer sessions
+    // for live detection sooner.
+    const ENROLL_MAX_PROCESS_FRAMES: usize = 30;
+    let frames: Vec<image::DynamicImage> = if frames.len() > ENROLL_MAX_PROCESS_FRAMES {
+        let total = frames.len();
+        // Evenly spaced indices across the whole recording.
+        let step = total as f64 / ENROLL_MAX_PROCESS_FRAMES as f64;
+        (0..ENROLL_MAX_PROCESS_FRAMES)
+            .map(|i| frames[((i as f64 * step) as usize).min(total - 1)].clone())
+            .collect()
+    } else {
+        frames
+    };
+
+    info!("Captured frames, processing {} sampled frames...", frames.len());
 
     // Broadcast processing start
     state.debug_broadcaster.broadcast(StreamMessage::Enrollment {

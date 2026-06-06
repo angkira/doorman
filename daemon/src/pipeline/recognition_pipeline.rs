@@ -1,7 +1,7 @@
 use super::types::DetectionResult;
 use crate::debug_stream::DebugStreamBroadcaster;
 use crate::storage::Storage;
-use doorman_shared::{StreamMessage, Config, DebugStreamMessage, DetectionInfo, SIMILARITY_THRESHOLD};
+use doorman_shared::{StreamMessage, Config, DetectionInfo};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;

@@ -38,18 +38,16 @@ image_width = 256
 image_height = 256
 filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
 
-# Model specifications (single source of truth)
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFASNetV2-SE (minifasnet_v2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consumed by the
+# shipped backend.
 [models]
-# Face detector (BlazeFace)
-detector_input_width = 128
-detector_input_height = 128
-detector_num_anchors = 896
-
-# Liveness detector
-liveness_input_width = 80
-liveness_input_height = 80
-
-# Face recognizer (MobileFaceNet)
 recognizer_input_width = 112
 recognizer_input_height = 112
 recognizer_embedding_size = 512

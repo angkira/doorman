@@ -143,7 +143,9 @@ impl Storage {
             .map(|e| doorman_shared::UserInfo {
                 username: e.username.clone(),
                 enrolled_at: e.enrolled_at.clone(),
-                num_embeddings: 1, // We store one averaged embedding per user
+                // Report the real number of stored per-angle embeddings (enrollment
+                // selects up to TARGET_EMBEDDINGS diverse vectors), not a hardcoded 1.
+                num_embeddings: e.embeddings.len(),
             })
             .collect()
     }

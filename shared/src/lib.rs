@@ -105,9 +105,18 @@ pub const AUTH_FRAMES: usize = 10;
 /// Duration to record video during enrollment (in seconds)
 pub const ENROLL_DURATION_SECS: u64 = 10;
 
-/// Cosine similarity threshold for face matching (0.0-1.0)
-/// Higher value = stricter matching, less false positives
-pub const SIMILARITY_THRESHOLD: f32 = 0.75;
+/// Cosine similarity threshold for face matching (0.0-1.0).
+/// Higher value = stricter matching, fewer false positives.
+///
+/// Tuned for the **EdgeFace-S** recognizer (`edgeface_s.onnx`, CC-BY-NC-SA 4.0,
+/// non-commercial) with
+/// landmark alignment. Measured on this repo's LFW fixtures (3xA enroll/probe,
+/// B & C impostors): genuine A↔A = 0.79, impostor B↔A = -0.06, impostor C↔A =
+/// 0.05 — a 0.74 separation gap. 0.4 sits centered in that gap (~0.35 above the
+/// top impostor, ~0.39 below the genuine), giving margin for harder genuine
+/// pairs (pose/lighting) while still rejecting impostors decisively.
+/// Configurable via `authentication.similarity_threshold`.
+pub const SIMILARITY_THRESHOLD: f32 = 0.4;
 
 /// Stream message types sent to preview/debug clients
 #[derive(Debug, Clone, Serialize, Deserialize)]

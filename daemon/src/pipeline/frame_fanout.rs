@@ -17,11 +17,11 @@ pub async fn run_frame_fanout(
 ) {
     let detection_interval_ms = 1000 / target_detection_fps as u64;
     let mut last_detection = Instant::now();
-    
-    // Rate limit preview to 15fps to avoid overwhelming blocking thread pool
+
+    // Preview rate limited to 15fps
     let preview_interval_ms = 66; // ~15fps
     let mut last_preview = Instant::now();
-    
+
     let mut frame_count = 0u64;
     let mut last_log = Instant::now();
 
@@ -42,9 +42,8 @@ pub async fn run_frame_fanout(
         // Broadcast to preview clients (if enabled) - rate limited to 15fps
         if let Some(ref broadcaster) = frame_broadcaster {
             if last_preview.elapsed().as_millis() >= preview_interval_ms as u128 {
-                // Clone Arc (cheap - just pointer copy)
                 let broadcaster = broadcaster.clone();
-                let image = raw_frame.image.clone();  // Arc clone - just increments refcount
+                let image = raw_frame.image.clone();
                 // Spawn blocking task for CPU-intensive JPEG encoding
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = broadcaster.broadcast_frame(&*image) {
@@ -57,8 +56,17 @@ pub async fn run_frame_fanout(
 
         // Send to detection at target FPS
         if last_detection.elapsed().as_millis() >= detection_interval_ms as u128 {
-            if let Err(_) = detection_tx.try_send(raw_frame) {
-                debug!("Detection channel full, skipping frame");
+            let send_result = detection_tx.try_send(raw_frame);
+            match send_result {
+                Ok(_) => {
+                    debug!("Sent frame {} to detection, gap={}ms", frame_count, last_detection.elapsed().as_millis());
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    debug!("Detection channel full, skipping frame {}", frame_count);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    info!("Detection channel closed");
+                }
             }
             last_detection = Instant::now();
         }

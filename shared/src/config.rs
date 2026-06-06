@@ -73,6 +73,22 @@ pub struct DaemonConfig {
     /// Preview mode: stream frames to preview clients (enables frame_socket)
     #[serde(default)]
     pub preview_mode: bool,
+
+    /// Initial system lock state at daemon startup.
+    ///
+    /// In a real deployment the daemon runs as an always-on system service and
+    /// the screen is locked until a face is recognized, so this defaults to
+    /// `true`. The background recognition pipeline only processes frames while
+    /// locked (or in `debug_mode`), and clears the lock on a match.
+    ///
+    /// PAM authentication does NOT depend on this flag: an `Authenticate`
+    /// request always triggers a fresh on-demand capture + match regardless of
+    /// lock state. The flag only gates the autonomous background unlock loop.
+    ///
+    /// Set `false` (or pass `--start-unlocked`) for dev/preview so the pipeline
+    /// keeps running without auto-locking the session.
+    #[serde(default = "default_start_locked")]
+    pub start_locked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,9 +141,17 @@ pub struct AuthConfig {
     
     #[serde(default = "default_auth_frames")]
     pub auth_frames: usize,
-    
+
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+
+    /// Run the MiniFASNet liveness (anti-spoofing) check during recognition.
+    /// Default: `true`. Liveness is NON-FATAL — when enabled it logs a warning
+    /// on failure but never blocks recognition (the bundled MiniFASNet models
+    /// are a convenience deterrent, not high-security). Set `false` to skip the
+    /// inference entirely.
+    #[serde(default = "default_liveness_enabled")]
+    pub liveness_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,13 +210,15 @@ fn default_socket_path() -> String { "/run/doorman.sock".to_string() }
 fn default_debug_socket() -> String { "/run/doorman-debug.sock".to_string() }
 fn default_frame_socket() -> String { "/run/doorman-frames.sock".to_string() }
 fn default_processing_fps() -> u32 { 10 }
+fn default_start_locked() -> bool { true }
 fn default_data_dir() -> String { "/var/lib/doorman".to_string() }
 fn default_log_level() -> String { "info".to_string() }
 fn default_models_dir() -> String { "/var/lib/doorman/models".to_string() }
-fn default_backend() -> String { "tract".to_string() }
+fn default_backend() -> String { "ort".to_string() }
 fn default_device() -> String { "cpu".to_string() }
-fn default_similarity_threshold() -> f32 { 0.65 }
+fn default_similarity_threshold() -> f32 { 0.4 }
 fn default_auth_frames() -> usize { 10 }
+fn default_liveness_enabled() -> bool { true }
 fn default_timeout_secs() -> u64 { 3 }
 fn default_enroll_frames() -> usize { 20 }
 fn default_min_valid_frames() -> usize { 5 }
@@ -224,6 +250,7 @@ impl Default for DaemonConfig {
             user_mode: false,
             debug_mode: false,
             preview_mode: false,
+            start_locked: default_start_locked(),
         }
     }
 }
@@ -260,6 +287,7 @@ impl Default for AuthConfig {
             similarity_threshold: default_similarity_threshold(),
             auth_frames: default_auth_frames(),
             timeout_secs: default_timeout_secs(),
+            liveness_enabled: default_liveness_enabled(),
         }
     }
 }
@@ -359,7 +387,10 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.daemon.socket_path, "/run/doorman.sock");
         assert_eq!(config.ml.device, "cpu");
-        assert_eq!(config.authentication.similarity_threshold, 0.65);
+        assert_eq!(config.authentication.similarity_threshold, 0.4);
+        assert!(config.authentication.liveness_enabled);
+        // Real deployment default: daemon boots locked.
+        assert!(config.daemon.start_locked);
     }
 
     #[test]

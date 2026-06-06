@@ -2,7 +2,6 @@
 // GStreamer backend is default (PipeWire-integrated)
 // Falls back to V4L2 if GStreamer not available
 use doormand::camera;
-mod background_detection;
 mod debug_stream;
 mod frame_stream;
 mod ipc;
@@ -37,9 +36,11 @@ unsafe impl Sync for DaemonState {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Check for --user, --preview, --config and --video-file flags
+    // Check for --user, --preview, --start-unlocked, --config and --video-file flags
     let user_mode = std::env::args().any(|arg| arg == "--user");
     let preview_mode = std::env::args().any(|arg| arg == "--preview");
+    // Testing override: keep the session unlocked at startup (no auto-lock loop).
+    let start_unlocked = std::env::args().any(|arg| arg == "--start-unlocked");
     let config_file = std::env::args()
         .skip_while(|arg| arg != "--config")
         .nth(1)
@@ -71,6 +72,17 @@ async fn main() -> Result<()> {
         config.daemon.preview_mode = true;
         config.daemon.debug_mode = true;  // Preview mode implies debug mode
     }
+
+    // Resolve the initial system lock state.
+    //
+    // Real deployment: daemon is an always-on system service that should boot
+    // *locked* and only clear the lock when a face is recognized
+    // (config.daemon.start_locked defaults to true).
+    //
+    // Dev/preview: --start-unlocked, or debug/preview mode, keeps the session
+    // unlocked so the pipeline streams frames without auto-locking the desktop.
+    let initial_locked =
+        config.daemon.start_locked && !start_unlocked && !config.daemon.debug_mode;
 
     if user_mode {
         config.daemon.user_mode = true;
@@ -114,6 +126,10 @@ async fn main() -> Result<()> {
     if config.daemon.debug_mode {
         warn!("DEBUG MODE ENABLED - processing frames even when unlocked");
     }
+    info!(
+        "Initial lock state: {} (PAM authenticate always runs an on-demand face check regardless)",
+        if initial_locked { "LOCKED" } else { "unlocked" }
+    );
 
     // Initialize components
     // Ensure data directory exists
@@ -186,7 +202,7 @@ async fn main() -> Result<()> {
         latest_detection: Arc::new(RwLock::new(None)),
         debug_broadcaster: debug_broadcaster.clone(),
         frame_broadcaster: frame_broadcaster.clone(),
-        system_locked: Arc::new(RwLock::new(false)), // Start unlocked for testing
+        system_locked: Arc::new(RwLock::new(initial_locked)),
     };
 
     // Setup signal handlers for graceful shutdown
