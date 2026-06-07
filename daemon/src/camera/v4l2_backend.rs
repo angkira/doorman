@@ -12,7 +12,9 @@ use anyhow::{anyhow, Context, Result};
 use doorman_shared::Config;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
+use nokhwa::utils::{
+    CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution,
+};
 use nokhwa::Camera as NokhwaCamera;
 use tracing::{debug, info, warn};
 
@@ -33,15 +35,24 @@ impl CameraBackend for V4L2Camera {
 
         let index = CameraIndex::Index(config.camera.device_index);
 
-        // Request specific resolution from config
+        // Request the EXACT mode the camera actually streams at: YUYV at the
+        // configured resolution/fps. This webcam exposes some resolutions (e.g.
+        // 1024x720) as YUYV only — they have no MJPEG variant. The previous
+        // request (RgbFormat + AbsoluteHighestResolution, then a post-open
+        // set_resolution) let nokhwa negotiate a different/incompatible mode, so
+        // the very first VIDIOC_DQBUF never completed and nokhwa's frame() —
+        // which polls the v4l fd with an INFINITE timeout — blocked the producer
+        // thread forever, producing zero frames. Requesting the native YUYV
+        // CameraFormat up front makes the first buffer arrive. Decoding to RGB is
+        // unaffected: decode_image::<RgbFormat>() converts from the buffer's real
+        // FrameFormat (YUYV) regardless of what we requested here.
+        let resolution = Resolution::new(config.camera.width, config.camera.height);
+        let camera_format =
+            CameraFormat::new(resolution, FrameFormat::YUYV, config.camera.fps);
         let requested =
-            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(camera_format));
 
         let mut camera = NokhwaCamera::new(index, requested).context("Failed to open camera")?;
-
-        // Try to set the requested resolution
-        let resolution = Resolution::new(config.camera.width, config.camera.height);
-        let _ = camera.set_resolution(resolution);
 
         // Start the camera stream
         camera

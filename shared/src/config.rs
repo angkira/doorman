@@ -37,6 +37,9 @@ pub struct Config {
     
     #[serde(default)]
     pub models: ModelsConfig,
+
+    #[serde(default)]
+    pub recognition: RecognitionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +178,52 @@ pub struct PreprocessingConfig {
     pub filter_type: String,
 }
 
+/// Phase 1 recognition-stability tuning.
+///
+/// All fields are config-driven with sane defaults so existing `doorman.toml`
+/// files keep working unchanged. These control multi-frame embedding
+/// aggregation, preview box-color hysteresis and the pre-embedding frame-quality
+/// gate. None of them touch the recognizer/detector models or the
+/// `authentication.similarity_threshold` value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecognitionConfig {
+    /// Number of recent quality-passed per-frame embeddings to average (rolling
+    /// window) before scoring against the stored template. Averaging
+    /// L2-normalized embeddings suppresses per-frame noise and stabilizes the
+    /// genuine cosine. `1` reproduces the old per-frame behavior.
+    #[serde(default = "default_aggregation_window")]
+    pub aggregation_window: usize,
+
+    /// Preview box-color hysteresis: require this many consecutive aggregated
+    /// results on the opposite side of the threshold before flipping the
+    /// RECOGNIZED <-> unknown decision. Prevents the preview box from flickering.
+    #[serde(default = "default_hysteresis_frames")]
+    pub hysteresis_frames: u32,
+
+    /// Frame-quality gate: minimum sharpness (variance of the Laplacian computed
+    /// on the aligned/crop 112x112 grayscale). Frames below this are skipped
+    /// (not added to the aggregation window, not enrolled). `0.0` disables the
+    /// sharpness gate.
+    #[serde(default = "default_min_sharpness")]
+    pub min_sharpness: f32,
+
+    /// Frame-quality gate: minimum face bbox area as a fraction of the full
+    /// frame area. Rejects tiny / far-away faces. `0.0` disables the size gate.
+    #[serde(default = "default_min_face_area_frac")]
+    pub min_face_area_frac: f32,
+}
+
+impl Default for RecognitionConfig {
+    fn default() -> Self {
+        Self {
+            aggregation_window: default_aggregation_window(),
+            hysteresis_frames: default_hysteresis_frames(),
+            min_sharpness: default_min_sharpness(),
+            min_face_area_frac: default_min_face_area_frac(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
     // Face detector (BlazeFace)
@@ -222,6 +271,13 @@ fn default_liveness_enabled() -> bool { true }
 fn default_timeout_secs() -> u64 { 3 }
 fn default_enroll_frames() -> usize { 20 }
 fn default_min_valid_frames() -> usize { 5 }
+fn default_aggregation_window() -> usize { 5 }
+fn default_hysteresis_frames() -> u32 { 3 }
+// Sharpness = variance of Laplacian on 112x112 grayscale. Sharp aligned faces
+// measure well above this; obvious motion/Gaussian blur falls below it. Kept
+// conservative so synthesized/real faces pass while clearly blurred frames fail.
+fn default_min_sharpness() -> f32 { 8.0 }
+fn default_min_face_area_frac() -> f32 { 0.02 }
 fn default_image_size() -> u32 { 256 }
 fn default_filter_type() -> String { "lanczos3".to_string() }
 fn default_camera_width() -> u32 { 1280 }
@@ -336,6 +392,7 @@ impl Default for Config {
             enrollment: EnrollmentConfig::default(),
             preprocessing: PreprocessingConfig::default(),
             models: ModelsConfig::default(),
+            recognition: RecognitionConfig::default(),
         }
     }
 }

@@ -16,6 +16,9 @@ pub async fn run_detection_pipeline(
     result_tx: mpsc::Sender<DetectionResult>,
     ml_pipeline: Arc<MLPipeline>,
     debug_broadcaster: Option<Arc<DebugStreamBroadcaster>>,
+    // Phase 1 frame-quality gate thresholds (from `[recognition]` config).
+    min_sharpness: f32,
+    min_face_area_frac: f32,
 ) {
     info!("Detection pipeline started");
 
@@ -39,6 +42,9 @@ pub async fn run_detection_pipeline(
         }
 
         let frame = raw_frame.image.clone();
+        // Keep a handle to the frame for the post-detection sharpness gate
+        // (the clone above is moved into the blocking inference closure).
+        let frame_for_quality = raw_frame.image.clone();
         let camera_dimensions = frame.dimensions();
         let timestamp = raw_frame.timestamp;
         let sequence = raw_frame.sequence;
@@ -173,7 +179,40 @@ pub async fn run_detection_pipeline(
             });
         }
 
-        // We have an embedding and face bbox from detection
+        // Phase 1 frame-quality gate (only meaningful on embedding frames).
+        //
+        // A blurry/tiny face yields a noisy embedding that destabilizes
+        // recognition. When this frame carries an embedding, gate it on:
+        //   - face bbox area as a fraction of the frame (rejects far faces), and
+        //   - sharpness = variance of Laplacian (rejects blur).
+        // On failure we still forward the detection (box keeps tracking) but
+        // drop the embedding so it never enters the aggregation window.
+        let mut embedding = Some(embedding);
+        if need_embedding && embedding.as_ref().map_or(false, |e| !e.is_empty()) {
+            let (_, _, w_norm, h_norm) = face.bbox;
+            let area_frac = (w_norm * h_norm).abs();
+            let area_ok = min_face_area_frac <= 0.0 || area_frac >= min_face_area_frac;
+
+            let sharp_ok = if min_sharpness <= 0.0 {
+                true
+            } else {
+                let score = super::aggregate::sharpness_score(&frame_for_quality);
+                let ok = score >= min_sharpness;
+                debug!(
+                    "Quality gate frame {}: sharpness={:.2} (min {:.2}) area_frac={:.4} (min {:.4}) -> {}",
+                    sequence, score, min_sharpness, area_frac, min_face_area_frac,
+                    if ok && area_ok { "PASS" } else { "REJECT" }
+                );
+                ok
+            };
+
+            if !(area_ok && sharp_ok) {
+                debug!("Quality gate rejected frame {} (dropping embedding)", sequence);
+                embedding = None;
+            }
+        }
+
+        // We have a face bbox (and possibly a quality-passed embedding).
         let (camera_width, camera_height) = camera_dimensions;
         let _ = result_tx.try_send(DetectionResult {
             sequence,
@@ -182,7 +221,7 @@ pub async fn run_detection_pipeline(
                 bbox: face.bbox,
                 confidence: face.confidence,
             }),
-            embedding: Some(embedding),
+            embedding,
             processing_time,
             frame_width: camera_width,
             frame_height: camera_height,

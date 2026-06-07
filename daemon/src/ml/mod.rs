@@ -197,19 +197,18 @@ impl MLPipeline {
         tokio::runtime::Handle::current().block_on(self.backend.detect_face(image))
     }
 
-    /// Synchronous embedding extraction for use in spawn_blocking
+    /// Synchronous embedding extraction for use in spawn_blocking.
+    ///
+    /// Takes the full detected `Face` (including its 5-point landmarks) so the
+    /// recognizer uses the aligned-crop path. Previously this discarded the
+    /// landmarks (set `landmarks: None`), forcing the degraded unaligned
+    /// bbox-crop fallback in the backend; carrying them through fixes that.
     pub fn extract_embedding_sync(
         &self,
         image: &DynamicImage,
-        bbox: &(f32, f32, f32, f32),
+        face: &backend::Face,
     ) -> Result<Vec<f32>> {
-        let face = backend::Face {
-            bbox: *bbox,
-            confidence: 1.0, // Confidence not needed for embedding extraction
-            frame_dimensions: image.dimensions(),
-            landmarks: None,
-        };
-        tokio::runtime::Handle::current().block_on(self.backend.extract_embedding(image, &face))
+        tokio::runtime::Handle::current().block_on(self.backend.extract_embedding(image, face))
     }
 }
 

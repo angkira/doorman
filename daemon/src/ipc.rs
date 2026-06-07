@@ -1,5 +1,4 @@
 use crate::DaemonState;
-use crate::camera::Camera;
 use anyhow::{Context, Result};
 use doorman_shared::{
     Request, Response, ResponseData, DaemonInfo, SOCKET_PATH, StreamMessage, EnrollmentPhase,
@@ -136,39 +135,87 @@ async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()>
     Ok(())
 }
 
-/// Attempt to ensure camera is available, reinitializing if needed
-async fn ensure_camera_available(state: &DaemonState) -> Result<(), String> {
-    const MAX_RETRIES: usize = 3;
-    const RETRY_DELAY_MS: u64 = 500;
-    
-    for attempt in 1..=MAX_RETRIES {
-        let mut camera_lock = state.camera.write().await;
-        
-        // Check if camera is already available
-        if camera_lock.is_some() {
-            return Ok(());
-        }
-        
-        // Try to initialize camera
-        info!("Camera not available, attempting to initialize (attempt {}/{})", attempt, MAX_RETRIES);
-        match Camera::new_with_config(&state.config).await {
-            Ok(camera) => {
-                info!("Successfully initialized camera on attempt {}", attempt);
-                *camera_lock = Some(camera);
-                return Ok(());
+/// Wait until the single-owner camera producer thread has published at least
+/// one frame, then return the most recent frame. The producer owns the camera
+/// exclusively; consumers never touch the camera directly.
+async fn wait_for_frame(state: &DaemonState) -> Result<std::sync::Arc<image::DynamicImage>, String> {
+    const TIMEOUT_MS: u64 = 3000;
+    let mut rx = state.latest_frame.clone();
+
+    // Fast path: a frame is already available.
+    if let Some(frame) = rx.borrow().clone() {
+        return Ok(frame);
+    }
+
+    // Otherwise wait for the producer to publish a frame.
+    let wait = async {
+        loop {
+            if rx.changed().await.is_err() {
+                return Err("Camera producer stopped".to_string());
             }
-            Err(e) => {
-                warn!("Failed to initialize camera (attempt {}): {}", attempt, e);
-                drop(camera_lock); // Release lock before sleeping
-                
-                if attempt < MAX_RETRIES {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+            if let Some(frame) = rx.borrow().clone() {
+                return Ok(frame);
+            }
+        }
+    };
+
+    match tokio::time::timeout(tokio::time::Duration::from_millis(TIMEOUT_MS), wait).await {
+        Ok(res) => res,
+        Err(_) => Err("Camera not available (no frames). Please connect camera and try again.".to_string()),
+    }
+}
+
+/// Collect up to `count` distinct successive frames from the camera producer.
+/// Frames are sampled from the latest-frame watch channel as the producer
+/// publishes them.
+async fn collect_frames(state: &DaemonState, count: usize) -> Vec<image::DynamicImage> {
+    let mut rx = state.latest_frame.clone();
+    let mut frames = Vec::with_capacity(count);
+
+    // Include whatever is currently available.
+    if let Some(frame) = rx.borrow().clone() {
+        frames.push((*frame).clone());
+    }
+
+    while frames.len() < count {
+        match tokio::time::timeout(tokio::time::Duration::from_millis(2000), rx.changed()).await {
+            Ok(Ok(())) => {
+                if let Some(frame) = rx.borrow().clone() {
+                    frames.push((*frame).clone());
                 }
             }
+            _ => break, // producer stopped or timed out
         }
     }
-    
-    Err(format!("Camera not available after {} attempts. Please connect camera and try again.", MAX_RETRIES))
+
+    frames
+}
+
+/// Collect frames from the camera producer for a given duration.
+async fn collect_frames_for_duration(state: &DaemonState, duration_secs: u64) -> Vec<image::DynamicImage> {
+    let mut rx = state.latest_frame.clone();
+    let mut frames = Vec::new();
+    let start = std::time::Instant::now();
+    let duration = std::time::Duration::from_secs(duration_secs);
+
+    if let Some(frame) = rx.borrow().clone() {
+        frames.push((*frame).clone());
+    }
+
+    while start.elapsed() < duration {
+        let remaining = duration.saturating_sub(start.elapsed());
+        match tokio::time::timeout(remaining.min(std::time::Duration::from_millis(2000)), rx.changed()).await {
+            Ok(Ok(())) => {
+                if let Some(frame) = rx.borrow().clone() {
+                    frames.push((*frame).clone());
+                }
+            }
+            Ok(Err(_)) => break, // producer stopped
+            Err(_) => {} // timeout slice; loop re-checks duration
+        }
+    }
+
+    frames
 }
 
 async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
@@ -187,22 +234,16 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     };
     drop(storage);
 
-    // Ensure camera is available (with retry logic)
-    if let Err(err_msg) = ensure_camera_available(state).await {
+    // Ensure the camera producer is publishing frames.
+    if let Err(err_msg) = wait_for_frame(state).await {
         error!("{}", err_msg);
         return Response::Failure {
             reason: err_msg,
         };
     }
 
-    // Get camera and capture frames
-    let frames = {
-        let mut camera_lock = state.camera.write().await;
-        let camera = camera_lock.as_mut().expect("Camera should be available after ensure_camera_available");
-
-        // Capture frames before dropping the lock
-        camera.capture_frames(AUTH_FRAMES)
-    }; // Lock is dropped here
+    // Collect frames from the camera producer (single source of truth).
+    let frames = collect_frames(state, AUTH_FRAMES).await;
 
     if frames.is_empty() {
         error!("Failed to capture any frames");
@@ -213,30 +254,20 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
 
     info!("Captured {} frames for authentication", frames.len());
 
-    // Process frames
-    let mut best_similarity = 0.0f32;
+    // Phase 1: collect quality-passed per-frame embeddings, AGGREGATE them
+    // (renormalized mean), and score the aggregate ONCE against the stored
+    // template. Averaging suppresses per-frame noise and stabilizes the genuine
+    // cosine versus the old early-exit-on-first-frame-pass behavior.
+    let rec = &state.config.recognition;
+    let threshold = state.config.authentication.similarity_threshold;
+    let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
     for (i, frame) in frames.iter().enumerate() {
         match state.ml_pipeline.process_frame(frame).await {
-            Ok(Some((_face, embedding))) => {
-                // Compare with all stored embeddings and take best match
-                let max_similarity = stored_embeddings
-                    .iter()
-                    .map(|stored_emb| crate::ml::cosine_similarity(&embedding, stored_emb))
-                    .fold(0.0f32, f32::max);
-                
-                debug!("Frame {}: max similarity = {:.4}", i, max_similarity);
-                
-                if max_similarity > best_similarity {
-                    best_similarity = max_similarity;
+            Ok(Some((face, embedding))) => {
+                if !frame_passes_quality_gate(frame, &face, rec, i, "auth") {
+                    continue;
                 }
-
-                if max_similarity >= SIMILARITY_THRESHOLD {
-                    info!("Authentication successful for {} (similarity: {:.4})", username, max_similarity);
-                    return Response::Success {
-                        message: Some(format!("Authenticated (confidence: {:.2}%)", max_similarity * 100.0)),
-                        data: None,
-                    };
-                }
+                passed_embeddings.push(embedding);
             }
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
@@ -247,10 +278,69 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         }
     }
 
-    warn!("Authentication failed for {} (best similarity: {:.4})", username, best_similarity);
-    Response::Failure {
-        reason: format!("Face not recognized (confidence: {:.2}%)", best_similarity * 100.0),
+    if passed_embeddings.is_empty() {
+        warn!("Authentication failed for {}: no quality-passed faces", username);
+        return Response::Failure {
+            reason: "No clear face detected. Please ensure good lighting and look at the camera.".to_string(),
+        };
     }
+
+    let aggregated = crate::pipeline::aggregate_embeddings(&passed_embeddings)
+        .unwrap_or_else(|| passed_embeddings[0].clone());
+
+    let best_similarity = stored_embeddings
+        .iter()
+        .map(|stored_emb| crate::ml::cosine_similarity(&aggregated, stored_emb))
+        .fold(0.0f32, f32::max);
+
+    info!(
+        "Authentication aggregate for {}: {} quality frames, cosine={:.4} (threshold {:.2})",
+        username, passed_embeddings.len(), best_similarity, threshold
+    );
+
+    let _ = SIMILARITY_THRESHOLD; // kept for back-compat; threshold comes from config now
+    if best_similarity >= threshold {
+        info!("Authentication successful for {} (similarity: {:.4})", username, best_similarity);
+        Response::Success {
+            message: Some(format!("Authenticated (confidence: {:.2}%)", best_similarity * 100.0)),
+            data: None,
+        }
+    } else {
+        warn!("Authentication failed for {} (aggregated similarity: {:.4})", username, best_similarity);
+        Response::Failure {
+            reason: format!("Face not recognized (confidence: {:.2}%)", best_similarity * 100.0),
+        }
+    }
+}
+
+/// Phase 1 frame-quality gate shared by auth and enrollment: rejects tiny faces
+/// (bbox area too small) and blurry frames (low variance-of-Laplacian sharpness)
+/// before their embedding is used. Returns `true` if the frame passes.
+fn frame_passes_quality_gate(
+    frame: &image::DynamicImage,
+    face: &crate::ml::Face,
+    rec: &doorman_shared::RecognitionConfig,
+    idx: usize,
+    ctx: &str,
+) -> bool {
+    let (_, _, w_norm, h_norm) = face.bbox;
+    let area_frac = (w_norm * h_norm).abs();
+    let area_ok = rec.min_face_area_frac <= 0.0 || area_frac >= rec.min_face_area_frac;
+
+    let sharpness = if rec.min_sharpness <= 0.0 {
+        f32::INFINITY
+    } else {
+        crate::pipeline::sharpness_score(frame)
+    };
+    let sharp_ok = rec.min_sharpness <= 0.0 || sharpness >= rec.min_sharpness;
+
+    let pass = area_ok && sharp_ok;
+    debug!(
+        "{} quality gate frame {}: sharpness={:.2} (min {:.2}) area_frac={:.4} (min {:.4}) -> {}",
+        ctx, idx, sharpness, rec.min_sharpness, area_frac, rec.min_face_area_frac,
+        if pass { "PASS" } else { "REJECT" }
+    );
+    pass
 }
 
 async fn handle_enroll(
@@ -260,15 +350,15 @@ async fn handle_enroll(
 ) -> Response {
     info!("Enrollment request for user: {}", username);
 
-    // Ensure camera is available (with retry logic)
-    if let Err(err_msg) = ensure_camera_available(state).await {
+    // Ensure the camera producer is publishing frames.
+    if let Err(err_msg) = wait_for_frame(state).await {
         error!("{}", err_msg);
         return Response::Failure {
             reason: err_msg,
         };
     }
 
-    // Get camera and capture frames
+    // Get frames from the camera producer (single source of truth).
     info!("Recording video for {} seconds for enrollment...", ENROLL_DURATION_SECS);
     
     // Broadcast enrollment start
@@ -280,13 +370,7 @@ async fn handle_enroll(
         username: username.to_string(),
     });
     
-    let frames = {
-        let mut camera_lock = state.camera.write().await;
-        let camera = camera_lock.as_mut().expect("Camera should be available after ensure_camera_available");
-
-        // Capture frames for duration before dropping the lock
-        camera.capture_frames_for_duration(ENROLL_DURATION_SECS)
-    }; // Lock is dropped here
+    let frames = collect_frames_for_duration(state, ENROLL_DURATION_SECS).await;
 
     if frames.is_empty() {
         error!("Failed to capture any frames");
@@ -343,7 +427,12 @@ async fn handle_enroll(
         }
         
         match state.ml_pipeline.process_frame(frame).await {
-            Ok(Some((_face, embedding))) => {
+            Ok(Some((face, embedding))) => {
+                // Phase 1: only enroll quality-passed frames so the stored
+                // template is built from sharp, adequately-sized faces.
+                if !frame_passes_quality_gate(frame, &face, &state.config.recognition, i, "enroll") {
+                    continue;
+                }
                 debug!("Frame {}: Valid embedding extracted", i);
                 valid_embeddings.push(embedding);
             }
@@ -438,12 +527,12 @@ async fn handle_remove_user(state: &DaemonState, username: &str) -> Response {
 
 async fn handle_status(state: &DaemonState) -> Response {
     let storage = state.storage.read().await;
-    let camera_lock = state.camera.read().await;
+    let camera_available = state.latest_frame.borrow().is_some();
 
     let info = DaemonInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: state.start_time.elapsed().as_secs(),
-        camera_available: camera_lock.is_some(),
+        camera_available,
         models_loaded: state.ml_pipeline.models_loaded(),
         enrolled_users: storage.count(),
     };
@@ -457,26 +546,15 @@ async fn handle_status(state: &DaemonState) -> Response {
 async fn handle_detect_and_recognize(state: &DaemonState) -> Response {
     use doorman_shared::DetectionInfo;
 
-    // Capture a single frame
-    let mut camera = state.camera.write().await;
-    let camera = match camera.as_mut() {
-        Some(cam) => cam,
-        None => {
-            return Response::Failure {
-                reason: "Camera not available".to_string(),
-            }
-        }
-    };
-
-    let frame = match camera.capture_frame() {
-        Ok(f) => f,
+    // Get the latest frame from the camera producer (single source of truth).
+    let frame = match wait_for_frame(state).await {
+        Ok(f) => (*f).clone(),
         Err(e) => {
             return Response::Failure {
-                reason: format!("Failed to capture frame: {}", e),
+                reason: e,
             }
         }
     };
-    drop(camera); // Release camera lock
 
     // Detect face
     let face = match state.ml_pipeline.detect_face(&frame).await {

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod config;
-pub use config::Config;
+pub use config::{Config, RecognitionConfig};
 
 /// IPC protocol messages between PAM module/CLI and daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -19,7 +19,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
 pub struct DaemonState {
-    pub camera: Arc<RwLock<Option<camera::Camera>>>,
+    /// Latest captured frame, published by the single-owner camera producer
+    /// thread (see `pipeline::camera_producer`). The `Camera` itself is owned
+    /// solely by that thread and is never shared across threads; consumers
+    /// (IPC enroll/auth/status/detect) read frames from this watch channel
+    /// instead of touching the camera directly.
+    pub latest_frame: tokio::sync::watch::Receiver<Option<Arc<image::DynamicImage>>>,
     pub ml_pipeline: Arc<ml::MLPipeline>,
     pub storage: Arc<RwLock<storage::Storage>>,
     pub start_time: std::time::Instant,
@@ -192,26 +197,38 @@ async fn main() -> Result<()> {
     let storage = Arc::new(RwLock::new(storage::Storage::new_with_dir(&config.daemon.data_dir).await?));
 
     info!("Initializing camera...");
-    let camera = if let Some(ref video_path) = video_file {
+    // The camera is OPENED and OWNED entirely by the producer thread (see
+    // `pipeline::camera_producer`). It must be opened on the same thread that
+    // captures from it — the V4L2 stream's mmap buffers are bound to the opening
+    // thread's fd context, and capturing (VIDIOC_DQBUF) from a different thread
+    // is undefined behavior. We therefore only describe the source here; the
+    // producer thread does the actual `open_stream()` + capture loop.
+    let camera_source = if let Some(ref video_path) = video_file {
         info!("Using video file as camera source: {:?}", video_path);
-        let width = config.camera.width;
-        let height = config.camera.height;
-        let fps = config.camera.fps;
-        let cam = camera::Camera::from_video_file(video_path.clone(), width, height, fps, true);
-        Arc::new(RwLock::new(Some(cam)))
-    } else {
-        match camera::Camera::new_with_config(&config).await {
-            Ok(cam) => {
-                info!("Camera initialized successfully");
-                Arc::new(RwLock::new(Some(cam)))
-            }
-            Err(e) => {
-                warn!("Camera not available at startup: {}", e);
-                warn!("Camera will be initialized on-demand when needed");
-                Arc::new(RwLock::new(None))
-            }
+        pipeline::CameraSource::VideoFile {
+            path: video_path.clone(),
+            width: config.camera.width,
+            height: config.camera.height,
+            fps: config.camera.fps,
+            loop_playback: true,
         }
+    } else {
+        pipeline::CameraSource::Config
     };
+
+    // Spawn the single-owner camera producer thread. It publishes the latest
+    // frame to `latest_frame_rx` (for IPC consumers) and forwards `RawFrame`s to
+    // the pipeline via `camera_rx`.
+    let (latest_frame_tx, latest_frame_rx) =
+        tokio::sync::watch::channel::<Option<Arc<image::DynamicImage>>>(None);
+    let (camera_tx, camera_rx) = tokio::sync::mpsc::channel::<pipeline::RawFrame>(30);
+    pipeline::spawn_camera_producer(
+        camera_source,
+        Arc::new(config.clone()),
+        latest_frame_tx,
+        camera_tx,
+    );
+    let camera_rx = Arc::new(tokio::sync::Mutex::new(Some(camera_rx)));
 
     info!("Initializing debug stream broadcaster...");
     let debug_broadcaster = Arc::new(debug_stream::DebugStreamBroadcaster::new(100));
@@ -225,7 +242,7 @@ async fn main() -> Result<()> {
     };
 
     let state = DaemonState {
-        camera,
+        latest_frame: latest_frame_rx,
         ml_pipeline,
         storage,
         start_time: std::time::Instant::now(),
@@ -288,7 +305,9 @@ async fn main() -> Result<()> {
         } else {
             info!("Starting pipeline (production mode)");
         }
-        let handles = pipeline::start_pipeline(state.clone()).await;
+        let camera_rx = camera_rx.lock().await.take()
+            .expect("camera_rx consumed exactly once by the pipeline");
+        let handles = pipeline::start_pipeline(state.clone(), camera_rx).await;
         Some(handles)
     } else {
         info!("Pipeline disabled (debug mode without preview)");

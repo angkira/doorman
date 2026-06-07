@@ -5,13 +5,15 @@
 ///                        ↓
 ///                   Preview Clients
 
+mod aggregate;
 mod camera_producer;
 mod frame_fanout;
 mod detection_pipeline;
 mod recognition_pipeline;
 mod types;
 
-pub use camera_producer::run_camera_producer;
+pub use aggregate::{aggregate_embeddings, sharpness_score};
+pub use camera_producer::{spawn_camera_producer, CameraSource};
 pub use frame_fanout::run_frame_fanout;
 pub use detection_pipeline::run_detection_pipeline;
 pub use recognition_pipeline::run_recognition_pipeline;
@@ -23,23 +25,20 @@ use tracing::info;
 
 /// Start all pipeline stages
 /// Returns handles to all spawned tasks for graceful shutdown
-pub async fn start_pipeline(state: DaemonState) -> Vec<tokio::task::JoinHandle<()>> {
+pub async fn start_pipeline(
+    state: DaemonState,
+    camera_rx: mpsc::Receiver<RawFrame>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
 
     // Channel configuration - increased buffers to prevent backpressure
-    let (camera_tx, camera_rx) = mpsc::channel::<RawFrame>(30);  // 1 second buffer at 30fps
     let (detection_tx, detection_rx) = mpsc::channel::<RawFrame>(10);  // Allow more queued frames
     let (result_tx, result_rx) = mpsc::channel::<DetectionResult>(30);
 
     info!("Starting pipeline stages...");
 
-    // Stage 1: Camera Producer (owns camera exclusively)
-    let camera_handle = tokio::spawn(run_camera_producer(
-        state.camera.clone(),
-        camera_tx,
-        state.config.clone(),
-    ));
-    handles.push(camera_handle);
+    // Stage 1 (the camera producer) is spawned in `main` as a single-owner OS
+    // thread; we consume its frames here via `camera_rx`.
 
     // Stage 2: Frame Fanout (distributes to preview and detection)
     let fanout_handle = tokio::spawn(run_frame_fanout(
@@ -56,6 +55,8 @@ pub async fn start_pipeline(state: DaemonState) -> Vec<tokio::task::JoinHandle<(
         result_tx,
         state.ml_pipeline.clone(),
         Some(state.debug_broadcaster.clone()),
+        state.config.recognition.min_sharpness,
+        state.config.recognition.min_face_area_frac,
     ));
     handles.push(detection_handle);
 
