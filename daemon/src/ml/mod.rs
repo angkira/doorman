@@ -1,13 +1,13 @@
 mod backend;
 mod model_config;
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 mod align;
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 mod ort_backend;
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 mod yunet_decoder;
 
 #[cfg(test)]
@@ -43,11 +43,11 @@ impl MLPipeline {
 
         let backend: Arc<dyn MLBackend> = match backend_type {
             BackendType::OnnxRuntime => {
-                #[cfg(feature = "backend-ort")]
+                #[cfg(feature = "_ort")]
                 {
                     Arc::new(ort_backend::OrtBackend::new(&models_dir, config)?)
                 }
-                #[cfg(not(feature = "backend-ort"))]
+                #[cfg(not(feature = "_ort"))]
                 {
                     let _ = &models_dir;
                     return Err(anyhow::anyhow!(
@@ -68,7 +68,7 @@ impl MLPipeline {
     pub fn dummy(config: &Config) -> Self {
         // For testing / startup fallback - create a backend even if model files
         // are missing (sessions simply fail to load and is_ready() returns false).
-        #[cfg(feature = "backend-ort")]
+        #[cfg(feature = "_ort")]
         {
             let models_dir = PathBuf::from(&config.ml.models_dir);
             let backend = ort_backend::OrtBackend::new(&models_dir, config)
@@ -79,7 +79,7 @@ impl MLPipeline {
                 config: config.clone(),
             }
         }
-        #[cfg(not(feature = "backend-ort"))]
+        #[cfg(not(feature = "_ort"))]
         {
             let _ = config;
             panic!("No backend available for dummy. Compile with --features backend-ort");
@@ -94,24 +94,52 @@ impl MLPipeline {
             None => return Ok(None),
         };
 
-        // Stage 2: Liveness (MiniFASNet anti-spoofing).
+        // Stage 2: Liveness (FATAL monocular-depth anti-spoofing).
         //
         // Controlled by `authentication.liveness_enabled` (default true). The
-        // check is NON-FATAL: a failure or error logs and is skipped so it can
-        // never block recognition (the bundled MiniFASNet models are a
-        // convenience deterrent, not high-security).
+        // gate is FATAL: when a face's depth-relief score falls below
+        // `authentication.liveness_depth_threshold` it is treated as a spoof and
+        // we return `Ok(None)` (the same "no valid face" path), so the IPC
+        // authenticate replies Failure and PAM falls through to password. A real
+        // 3D face has high depth relief; a flat phone/print replay has ~0.
+        //
+        // The OLD MiniFASNet `check_liveness` is intentionally NOT used here: it
+        // rejected genuine faces and was non-fatal. The depth-relief gate is the
+        // real anti-spoofing check.
         if self.config.authentication.liveness_enabled {
-            match self.backend.check_liveness(image, &face).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    tracing::warn!("Liveness check failed (non-fatal): proceeding with recognition");
+            match self.backend.depth_relief(image, &face).await {
+                Ok(Some(relief)) => {
+                    let threshold = self.config.authentication.liveness_depth_threshold;
+                    if relief < threshold {
+                        tracing::warn!(
+                            "Liveness REJECTED (depth gate): relief={:.4} < threshold={:.4} — treating as spoof",
+                            relief, threshold
+                        );
+                        return Ok(None);
+                    }
+                    tracing::debug!(
+                        "Liveness passed (depth gate): relief={:.4} >= threshold={:.4}",
+                        relief, threshold
+                    );
+                }
+                Ok(None) => {
+                    // Depth model not loaded. Fail-safe for a MAX-security gate:
+                    // if the operator enabled liveness but the depth model is
+                    // missing, reject rather than silently letting everything
+                    // through.
+                    tracing::error!(
+                        "Liveness ENABLED but depth-PAD model not loaded — rejecting frame (fail-safe)"
+                    );
+                    return Ok(None);
                 }
                 Err(e) => {
-                    tracing::warn!("Liveness check errored (non-fatal): {} — proceeding", e);
+                    // An inference error must not become a silent bypass.
+                    tracing::error!("Liveness depth check errored — rejecting frame (fail-safe): {}", e);
+                    return Ok(None);
                 }
             }
         } else {
-            tracing::debug!("Liveness disabled via config; skipping");
+            tracing::debug!("Liveness disabled via config; skipping depth gate");
         }
 
         // Stage 3: Embedding — aligns via landmarks, then ArcFace 512-d.
@@ -181,6 +209,10 @@ impl MLPipeline {
         // Run liveness warmup
         info!("  Warming up liveness detector...");
         let _ = self.backend.check_liveness(&dummy_img, &dummy_face).await;
+
+        // Run depth-PAD warmup (JIT-compiles the depth model on the GPU EP).
+        info!("  Warming up depth-PAD model...");
+        let _ = self.backend.depth_relief(&dummy_img, &dummy_face).await;
         
         // Run embedding warmup
         info!("  Warming up face recognizer...");

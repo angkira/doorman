@@ -148,13 +148,23 @@ pub struct AuthConfig {
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 
-    /// Run the MiniFASNet liveness (anti-spoofing) check during recognition.
-    /// Default: `true`. Liveness is NON-FATAL — when enabled it logs a warning
-    /// on failure but never blocks recognition (the bundled MiniFASNet models
-    /// are a convenience deterrent, not high-security). Set `false` to skip the
-    /// inference entirely.
+    /// Run the depth-relief liveness (anti-spoofing) check during recognition.
+    /// Default: `true`. When enabled the check is **FATAL**: a face whose
+    /// monocular-depth relief falls below `liveness_depth_threshold` is treated
+    /// as a spoof and authentication FAILS (the frame is rejected as if no valid
+    /// face were present). Set `false` to skip liveness inference entirely.
     #[serde(default = "default_liveness_enabled")]
     pub liveness_enabled: bool,
+
+    /// Minimum monocular-depth face relief required to accept a face as a live
+    /// 3D face. The relief score is `std(face_depth) / (depth_range + eps)`
+    /// computed from Depth-Anything-V2 over the detected face bbox: a real 3D
+    /// face has high relief, a flat phone/print replay has near-zero relief.
+    /// Calibrated through the daemon at its native capture resolution
+    /// (1024x720) on in-situ genuine vs screen-replay captures to give APCER=0
+    /// (no spoof passes) with margin. Only used when `liveness_enabled = true`.
+    #[serde(default = "default_liveness_depth_threshold")]
+    pub liveness_depth_threshold: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +278,14 @@ fn default_device() -> String { "cpu".to_string() }
 fn default_similarity_threshold() -> f32 { 0.4 }
 fn default_auth_frames() -> usize { 10 }
 fn default_liveness_enabled() -> bool { true }
+// Calibrated through the daemon at 1024x720 on in-situ genuine vs screen-replay
+// captures (see .session/2026-06-08_liveness-wired.md). On the working
+// (CPU-EP) depth path the relief separates cleanly: genuine 0.068..0.245
+// (n=139), screen-replay spoof 0.002..0.019 (n=86). Any threshold in
+// [0.019, 0.068] gives APCER=0 (no spoof passes) AND BPCER=0 (no genuine
+// rejected). 0.05 sits with margin on both sides (2.7x over spoof max, 1.36x
+// under genuine min), leaning safe for MAX-security.
+fn default_liveness_depth_threshold() -> f32 { 0.05 }
 fn default_timeout_secs() -> u64 { 3 }
 fn default_enroll_frames() -> usize { 20 }
 fn default_min_valid_frames() -> usize { 5 }
@@ -344,6 +362,7 @@ impl Default for AuthConfig {
             auth_frames: default_auth_frames(),
             timeout_secs: default_timeout_secs(),
             liveness_enabled: default_liveness_enabled(),
+            liveness_depth_threshold: default_liveness_depth_threshold(),
         }
     }
 }

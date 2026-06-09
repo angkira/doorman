@@ -199,18 +199,19 @@ execution providers are optional and Linux-only.
 ### AMD ROCm (e.g. Radeon 780M / gfx1103 iGPU)
 
 The ROCm build links **no bundled ONNX Runtime** — the `backend-ort-rocm` feature
-enables `ort/load-dynamic` (plus `ort/api-24`; no `ort/rocm` cargo feature is
+enables `ort/load-dynamic` (plus `ort/api-22`; no `ort/rocm` cargo feature is
 needed), so the daemon `dlopen`s a ROCm-enabled `libonnxruntime.so` at runtime
 via `ORT_DYLIB_PATH`. You supply that library; the stock CPU build does not
 contain the ROCm execution provider. (doorman uses `ort` `2.0.0-rc.12`.)
 
 > **Pinned GPU stack** — keep these in lock-step or the runtime `dlopen` fails:
-> `ort` crate **2.0.0-rc.12** (`ort/api-24`) ↔ **ONNX Runtime 1.24.2** (the `load-dynamic`
-> `libonnxruntime.so` MUST be this ORT minor — rc.12 targets the ORT 1.24 C API) ↔
-> **ROCm 7.2.4** for **gfx1103** (Radeon 780M). A mismatched ORT minor (e.g. 1.20.x/1.22.x)
+> `ort` crate **2.0.0-rc.12** (ROCm path = `ort/api-22`) ↔ **ONNX Runtime 1.22.2** — the
+> **last ORT minor that ships the ROCm execution provider** (it was removed in ORT 1.23.0),
+> so the `load-dynamic` `libonnxruntime.so` MUST be 1.22.x ↔ **ROCm 7.2.2** for **gfx1103**
+> (Radeon 780M). A different ORT minor (e.g. 1.20.x, or 1.23+ which has no ROCm EP at all)
 > is ABI-incompatible and breaks at runtime.
 
-**1. Install ROCm runtime** (Ubuntu 24.04, ROCm 7.2.4):
+**1. Install ROCm runtime** (Ubuntu 24.04, ROCm 7.2.2):
 
 ```bash
 # Follow https://rocm.docs.amd.com for the apt repo, then:
@@ -218,12 +219,13 @@ sudo apt install rocm-hip-runtime rocm-libs miopen-hip rocblas
 sudo usermod -aG render,video "$USER"   # log out/in afterwards
 ```
 
-**2. Obtain a ROCm-enabled ONNX Runtime 1.24.2 shared library.** Either build ONNX
+**2. Obtain a ROCm-enabled ONNX Runtime 1.22.2 shared library.** Either build ONNX
 Runtime with `--use_rocm` (see onnxruntime build docs; or run the bundled
-`build_onnxruntime_rocm.sh`, which defaults to `ORT_VERSION=v1.24.2`) or install a
-matching **1.24.2** `onnxruntime-rocm` package, then note the path to
+`build_onnxruntime_rocm.sh`, which defaults to `ORT_VERSION=v1.22.2`) or install a
+matching **1.22.2** `onnxruntime-rocm` package, then note the path to
 `libonnxruntime.so` (e.g. `/opt/onnxruntime-rocm/lib/libonnxruntime.so`). The ORT
-minor **must be 1.24** to match `ort` 2.0.0-rc.12 on the load-dynamic path.
+minor **must be 1.22** (`ort/api-22`) — it is the last ORT with the ROCm EP (removed
+in 1.23.0), so a newer minor would not even contain the ROCm provider.
 
 > Note: some pre-built `onnxruntime-rocm` wheels ship a `libonnxruntime.so` with
 > an **executable stack**, which the loader may reject. The repo includes

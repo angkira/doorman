@@ -1,34 +1,34 @@
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use super::backend::{Face, MLBackend};
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use anyhow::{anyhow, Context, Result};
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use async_trait::async_trait;
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use doorman_shared::Config;
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use image::DynamicImage;
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use ort::session::{builder::GraphOptimizationLevel, Session};
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use ort::value::Value;
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use std::path::Path;
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use std::sync::Mutex;
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use tracing::{info, warn};
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use image::GenericImageView;
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 macro_rules! ort_try {
     ($expr:expr) => {
         $expr.map_err(|e| anyhow!("ORT error: {}", e))?
     };
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 /// ONNX Runtime backend (supports GPU via ROCm/CUDA)
 /// Uses session pooling for concurrent requests
 pub struct OrtBackend {
@@ -36,14 +36,18 @@ pub struct OrtBackend {
     /// Single MiniFASNetV2-SE liveness model session pool (may be empty: liveness
     /// is NON-FATAL and short-circuits to "pass" when unavailable).
     liveness_pool: Vec<Mutex<Session>>,
+    /// Depth-Anything-V2 session pool for the FATAL depth-relief PAD gate (may be
+    /// empty: when unavailable `depth_relief` returns `Ok(None)` and the auth
+    /// path decides how to treat a missing gate).
+    depth_pool: Vec<Mutex<Session>>,
     recognizer_pool: Vec<Mutex<Session>>,
     pool_index: AtomicUsize,
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 impl OrtBackend {
         pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend with session pooling...");
@@ -94,6 +98,37 @@ impl OrtBackend {
             warn!("✗ Liveness model {} unavailable — liveness will be skipped", liveness_cfg.model_file);
         }
 
+        // Load the Depth-Anything-V2 PAD model pool for the FATAL depth-relief
+        // liveness gate. An empty pool => depth_relief returns Ok(None).
+        let depth_cfg = super::model_config::DepthPadConfig::DEPTH_ANYTHING_V2;
+        let depth_path = models_dir.join(depth_cfg.model_file);
+        // The depth transformer is run on the CPU EP even when ml.device=rocm:
+        // on the gfx1103 iGPU (ROCm EP, ORT 1.22.x, HSA gfx-version override) the
+        // Depth-Anything-V2 graph produces a numerically COMPRESSED depth range
+        // (~2.6 vs ~4.9 on CPU), which collapses the genuine-vs-spoof relief
+        // separation and makes the PAD gate unreliable. On the CPU EP the relief
+        // signal separates cleanly (genuine >> spoof). The detector/recognizer
+        // still run on the iGPU; the depth pass (~518x518, embedding frames only)
+        // is the only CPU model. To move it back to the iGPU, validate the depth
+        // numerics on the target ROCm/EP first.
+        let depth_cpu_config = {
+            let mut c = config.clone();
+            c.ml.device = "cpu".to_string();
+            c
+        };
+        let mut depth_pool = Vec::new();
+        for i in 0..pool_size {
+            match Self::load_model(&depth_path, &depth_cpu_config) {
+                Ok(model) => depth_pool.push(Mutex::new(model)),
+                Err(e) => warn!("✗ Failed to load depth-PAD {} session {}: {}", depth_cfg.model_file, i, e),
+            }
+        }
+        if !depth_pool.is_empty() {
+            info!("✓ Loaded {} sessions for depth-PAD model {}", depth_pool.len(), depth_cfg.model_file);
+        } else {
+            warn!("✗ Depth-PAD model {} unavailable — depth liveness gate will be skipped", depth_cfg.model_file);
+        }
+
         // Load recognizer pool
         let recognizer_path = models_dir.join(super::model_config::RecognizerConfig::EDGEFACE.model_file);
         let mut recognizer_pool = Vec::new();
@@ -121,6 +156,7 @@ impl OrtBackend {
         Ok(Self {
             detector_pool,
             liveness_pool,
+            depth_pool,
             recognizer_pool,
             pool_index: AtomicUsize::new(0),
         })
@@ -156,9 +192,20 @@ impl OrtBackend {
         };
 
         let builder = Session::builder()
-            .map_err(|e| anyhow!("Failed to create session builder: {}", e))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow!("Failed to set optimization level: {}", e))?
+            .map_err(|e| anyhow!("Failed to create session builder: {}", e))?;
+        // ort 2.0.0-rc.12 targets ORT 1.24; the ROCm load-dynamic path links ORT 1.22.x
+        // (the last ORT with the ROCm EP), which rejects rc.12's graph-optimization-level
+        // call ("graph_optimization_level is not valid"). Apply it best-effort: on a 1.24
+        // runtime (CPU build) it is honored as before; on a 1.22.x runtime fall back to
+        // ORT's default optimization level rather than failing session creation.
+        let builder = match builder.with_optimization_level(GraphOptimizationLevel::Level3) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Graph optimization level not applied (ORT runtime rejected it): {}", e);
+                Session::builder().map_err(|e| anyhow!("Failed to create session builder: {}", e))?
+            }
+        };
+        let builder = builder
             .with_intra_threads(threads)
             .map_err(|e| anyhow!("Failed to set threads: {}", e))?;
 
@@ -251,7 +298,7 @@ impl OrtBackend {
     }
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 impl OrtBackend {
     /// Preprocess an image into YuNet's input tensor.
     ///
@@ -359,7 +406,7 @@ impl OrtBackend {
     }
 }
 
-#[cfg(feature = "backend-ort")]
+#[cfg(feature = "_ort")]
 #[async_trait]
 impl MLBackend for OrtBackend {
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>> {
@@ -511,6 +558,116 @@ impl MLBackend for OrtBackend {
             if is_real { "REAL" } else { "SPOOF" }
         );
         Ok(is_real)
+    }
+
+    /// Monocular-depth face relief PAD score (Depth-Anything-V2).
+    ///
+    /// Preprocessing (must match `DepthPadConfig::DEPTH_ANYTHING_V2`):
+    /// 1. Stretch-resize the full RGB frame to `input_size`x`input_size` (518).
+    /// 2. ImageNet-normalize `((x/255) - mean) / std`, NCHW float32, input
+    ///    tensor name `pixel_values`.
+    /// 3. Output `predicted_depth` `[1, Hd, Wd]` inverse-depth map.
+    /// 4. Map the (clamped) face bbox into depth-map coordinates, compute
+    ///    `relief = std(face_depth) / (depth_max - depth_min + eps)`, clamp to
+    ///    `[0, 1]`. Higher = more 3D structure = more likely live.
+    ///
+    /// Returns `Ok(None)` if no depth model is loaded.
+    async fn depth_relief(&self, image: &DynamicImage, face: &Face) -> Result<Option<f32>> {
+        use super::model_config::DepthPadConfig;
+
+        let session = match self.get_next_session(&self.depth_pool) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
+        let size = cfg.input_size;
+
+        // Stretch-resize the whole frame to the square network input (RGB).
+        let resized = image.resize_exact(size, size, image::imageops::FilterType::Triangle);
+        let rgb = resized.to_rgb8();
+
+        // ImageNet-normalized NCHW planar float32.
+        let n = (size * size) as usize;
+        let mut input = vec![0.0f32; 3 * n];
+        let (r_off, g_off, b_off) = (0, n, 2 * n);
+        for (i, px) in rgb.pixels().enumerate() {
+            input[r_off + i] = ((px[0] as f32 / 255.0) - cfg.norm_mean[0]) / cfg.norm_std[0];
+            input[g_off + i] = ((px[1] as f32 / 255.0) - cfg.norm_mean[1]) / cfg.norm_std[1];
+            input[b_off + i] = ((px[2] as f32 / 255.0) - cfg.norm_mean[2]) / cfg.norm_std[2];
+        }
+
+        let input_tensor = ort_try!(Value::from_array((
+            [1usize, 3, size as usize, size as usize],
+            input
+        )));
+        let mut lock = session.lock().unwrap();
+        // The model's input is named `pixel_values`.
+        let outputs = ort_try!(lock.run(ort::inputs!["pixel_values" => input_tensor]));
+        let (shape, depth_view) = ort_try!(outputs[0].try_extract_tensor::<f32>());
+        // Copy out before releasing the session lock (the view borrows `outputs`).
+        let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+        let depth: Vec<f32> = depth_view.to_vec();
+        drop(outputs);
+        drop(lock);
+
+        let (d_h, d_w) = match dims.as_slice() {
+            [_, h, w] => (*h, *w),
+            [h, w] => (*h, *w),
+            _ => return Err(anyhow!("Unexpected depth output shape {:?}", dims)),
+        };
+        if d_h == 0 || d_w == 0 || depth.len() < d_h * d_w {
+            return Err(anyhow!("Depth output too small: shape {:?} len {}", dims, depth.len()));
+        }
+
+        // Global depth range over the whole map.
+        let mut gmin = f32::INFINITY;
+        let mut gmax = f32::NEG_INFINITY;
+        for &v in depth.iter() {
+            if v < gmin { gmin = v; }
+            if v > gmax { gmax = v; }
+        }
+        let global_range = (gmax - gmin) + 1e-8;
+
+        // Map the normalized face bbox into depth-map pixel coordinates. The
+        // depth map and the source frame have the same aspect (both stretched
+        // independently to a square), so normalized coords map linearly.
+        let (nx, ny, nw, nh) = face.bbox;
+        let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
+        let y0 = ((ny.clamp(0.0, 1.0)) * d_h as f32) as usize;
+        let x1 = (((nx + nw).clamp(0.0, 1.0)) * d_w as f32).ceil() as usize;
+        let y1 = (((ny + nh).clamp(0.0, 1.0)) * d_h as f32).ceil() as usize;
+        let x1 = x1.min(d_w);
+        let y1 = y1.min(d_h);
+
+        // Collect the face-region depth values; fall back to whole map if empty.
+        let mut face_vals: Vec<f32> = Vec::new();
+        if x1 > x0 && y1 > y0 {
+            for y in y0..y1 {
+                let row = y * d_w;
+                for x in x0..x1 {
+                    face_vals.push(depth[row + x]);
+                }
+            }
+        }
+        let face_vals = if face_vals.is_empty() {
+            depth.iter().copied().collect::<Vec<f32>>()
+        } else {
+            face_vals
+        };
+
+        // std(face_depth).
+        let count = face_vals.len() as f32;
+        let mean = face_vals.iter().sum::<f32>() / count;
+        let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
+        let std = var.sqrt();
+
+        let relief = (std / global_range).clamp(0.0, 1.0);
+        tracing::debug!(
+            "Depth-PAD relief={:.4} (face_std={:.4} global_range={:.4} bbox_px=({},{},{},{}) depth_grid={}x{})",
+            relief, std, global_range, x0, y0, x1, y1, d_w, d_h
+        );
+        Ok(Some(relief))
     }
 
     /// Extract a 512-d face embedding using the EdgeFace-S recognizer.

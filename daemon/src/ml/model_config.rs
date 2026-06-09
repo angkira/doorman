@@ -110,6 +110,49 @@ impl LivenessConfig {
     pub const STANDARD: LivenessConfig = Self::MINIFASNET;
 }
 
+/// Depth-relief anti-spoofing (PAD) configuration — Depth-Anything-V2-Small.
+///
+/// - Source: Depth-Anything-V2 (small, int8 ONNX). Monocular depth estimator.
+/// - Input tensor `pixel_values`: `[1, 3, H, W]` (dynamic), **RGB**,
+///   ImageNet-normalized `((x/255) - mean) / std` with
+///   mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225], NCHW float32. We feed a
+///   fixed `input_size`x`input_size` square (518 = 37*14, the model's native
+///   multiple-of-14 size).
+/// - Output tensor `predicted_depth`: `[1, Hd, Wd]` per-pixel inverse-depth map.
+/// - PAD score (`depth_face_relief`): map the detected face bbox into the depth
+///   map's coordinates, then `relief = std(face_depth) / (depth.max - depth.min
+///   + eps)`. A real 3D face has high relief (depth varies across the face); a
+///   flat screen/print replay has near-uniform depth -> relief ~0. The relief
+///   is clamped to `[0, 1]`. Decision: `is_live = relief >= threshold` where the
+///   threshold is `authentication.liveness_depth_threshold` (calibrated through
+///   the daemon at its native capture resolution).
+pub struct DepthPadConfig {
+    pub name: &'static str,
+    /// Square network input size fed to the model (518 = 37*14).
+    pub input_size: u32,
+    /// ImageNet normalization mean (RGB).
+    pub norm_mean: [f32; 3],
+    /// ImageNet normalization std (RGB).
+    pub norm_std: [f32; 3],
+    /// ONNX model file name in the models directory.
+    pub model_file: &'static str,
+}
+
+impl DepthPadConfig {
+    pub const DEPTH_ANYTHING_V2: DepthPadConfig = DepthPadConfig {
+        // fp32 export (from `depth-anything/Depth-Anything-V2-Small-hf`). The
+        // int8 variant uses ConvInteger/MatMulInteger ops that the ROCm-EP ORT
+        // 1.22.x runtime cannot run (it segfaults loading them), so an fp32 graph
+        // is used: it runs natively on the iGPU (ROCm EP) and gives the same
+        // structural depth-relief signal.
+        name: "Depth-Anything-V2-Small (fp32)",
+        input_size: 518,
+        norm_mean: [0.485, 0.456, 0.406],
+        norm_std: [0.229, 0.224, 0.225],
+        model_file: "depth_anything_v2_small_fp32.onnx",
+    };
+}
+
 /// Face recognizer configuration
 pub struct RecognizerConfig {
     pub name: &'static str,

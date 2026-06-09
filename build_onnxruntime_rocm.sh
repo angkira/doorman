@@ -7,10 +7,12 @@ set -e
 BUILD_DIR="${HOME}/onnxruntime-build"
 INSTALL_DIR="${HOME}/.local/lib/onnxruntime-rocm-local"
 # Pinned GPU stack — MUST match the `ort` crate so load-dynamic stays ABI-compatible:
-#   ort 2.0.0-rc.12 (ort/api-24)  <->  ONNX Runtime 1.24.x  <->  ROCm 7.2.4 (gfx1103)
-# Build the same ORT minor the crate's C API level (api-24 == ORT 1.24) expects.
-ORT_VERSION="${ORT_VERSION:-v1.24.2}"   # ONNX Runtime 1.24.2 (matches ort 2.0.0-rc.12)
-ROCM_VERSION="${ROCM_VERSION:-7.2.4}"   # latest production ROCm; gfx1103 (780M) supported in 7.x
+#   ort 2.0.0-rc.12 (ROCm path = ort/api-22)  <->  ONNX Runtime 1.22.x
+#     (last ORT with the ROCm EP; it was removed in ORT 1.23.0)  <->  ROCm 7.2.2 (gfx1103),
+#     GPU_TARGETS gfx1100;1101;1102;1103.
+# Build the ORT minor whose C API level the ROCm feature targets (api-22 == ORT 1.22).
+ORT_VERSION="${ORT_VERSION:-v1.22.2}"   # ONNX Runtime 1.22.2 (last ORT with the ROCm EP; api-22)
+ROCM_VERSION="${ROCM_VERSION:-7.2.2}"   # host ROCm; gfx1103 (780M) via HSA_OVERRIDE_GFX_VERSION spoof
 
 echo "=== Building ONNX Runtime ${ORT_VERSION} with ROCm (target ROCm ${ROCM_VERSION}) ==="
 echo "Build directory: ${BUILD_DIR}"

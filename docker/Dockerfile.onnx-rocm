@@ -1,36 +1,150 @@
-# ONNX Runtime inference service with ROCm support
-# For AMD Radeon 780M iGPU (gfx1103)
+# Build ONNX Runtime 1.22.2 with ROCm Execution Provider
+#
+# KEY VERSION RATIONALE:
+#   - ORT removed the ROCm EP in v1.23.0 from mainline Microsoft repo.
+#   - doorman's backend-ort-rocm feature uses ort/api-22, targeting ORT 1.22.x.
+#   - ORT 1.22.2 = last release with both onnxruntime_USE_ROCM and ORT_API_VERSION=22.
+#   - ort-sys 2.0.0-rc.12 with api-22 feature calls GetApi(22), which ORT 1.22.2 satisfies.
+#
+# Base: hars-training-rocm:latest  (ROCm 7.2.4 / Ubuntu 24.04)
+# ABI target: ort crate 2.0.0-rc.12 / api-22 => ORT 1.22.x
+# GPU targets: gfx1100, gfx1101, gfx1102, gfx1103 (RDNA3, covers Radeon 780M)
+#
+# Build:
+#   docker build -f docker/Dockerfile.onnx-rocm -t doorman-ort-rocm:1.22.2 .
+#
+# Extract:
+#   docker run --rm doorman-ort-rocm:1.22.2 tar -C /opt/ort-out -cf - . \
+#     | tar -C ~/.local/lib/onnxruntime-rocm-local -xf -
 
-FROM rocm/pytorch:rocm6.2_ubuntu22.04_py3.10_pytorch_release_2.3.0
+# ─── Stage 1: build ──────────────────────────────────────────────────────────
+FROM hars-training-rocm:latest AS builder
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    libopencv-dev \
-    python3-opencv \
+ARG ORT_VERSION=v1.22.2
+ARG GPU_TARGETS="gfx1100;gfx1101;gfx1102;gfx1103"
+ARG ROCM_HOME=/opt/rocm
+ARG NPROC_BUILD=8
+
+# Ensure build tools are present (all already in base image, but pin explicitly)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    ninja-build \
+    python3 \
+    python3-pip \
+    python3-packaging \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ONNX Runtime with ROCm
-RUN pip install --no-cache-dir \
-    onnxruntime-rocm==1.19.2 \
-    numpy \
-    pillow \
-    opencv-python \
-    flask
+# Clone ONNX Runtime 1.22.2 — last version with onnxruntime_USE_ROCM cmake option.
+# Fresh clone inside the image: avoids the messy host git tree entirely.
+WORKDIR /build
+RUN git clone \
+    --depth 1 \
+    --branch ${ORT_VERSION} \
+    https://github.com/microsoft/onnxruntime.git \
+    onnxruntime \
+    && cd onnxruntime \
+    && git submodule update --init --recursive --depth 1
 
-# Create app directory
-WORKDIR /app
+# Set ROCm environment for HIP compilation
+ENV ROCM_HOME=${ROCM_HOME}
+ENV HIP_PATH=${ROCM_HOME}
+ENV PATH="${ROCM_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${ROCM_HOME}/lib:${ROCM_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 
-# Copy inference servers (both HTTP and Socket)
-COPY inference_server.py /app/
-COPY inference_server_socket.py /app/
+# Configure with cmake directly (build.py argument interface varies between versions;
+# direct cmake invocation is stable and fully explicit).
+# Key flags:
+#   onnxruntime_USE_ROCM=ON          -> enables ROCm Execution Provider
+#   onnxruntime_ROCM_HOME            -> points to host-compatible ROCm 7.2.x
+#   GPU_TARGETS                      -> compile HIP kernels for RDNA3 gfx11xx family
+#   BUILD_SHARED_LIB=ON              -> produce libonnxruntime.so
+#   ENABLE_PYTHON=OFF                -> no Python wheel needed
+#   BUILD_UNIT_TESTS=OFF             -> skip test binaries
+#   noexecstack linker flags         -> required by doorman's security policy
+#
+# ORT 1.22.2 cmake ROCm version detection reads /opt/rocm/.info/version and applies
+# the regex "^([0-9]+)\.([0-9]+)\.([0-9]+)-.*$" — it REQUIRES a dash-suffix.
+# The base image writes "7.2.4\n" with no suffix -> "Cannot determine ROCm version".
+# Patch: rewrite the version file with the expected dash-suffix before cmake runs.
+RUN ROCM_VER=$(cat /opt/rocm/.info/version | tr -d '[:space:]') && \
+    echo "${ROCM_VER}-0" > /opt/rocm/.info/version && \
+    echo "Patched ROCm version file to: $(cat /opt/rocm/.info/version)"
 
-# Expose port for HTTP API
-EXPOSE 5000
+# Patch ORT 1.22.2 source incompatibility with AMD Clang 22.x (ROCm 7.x):
+# cu_inc/common.cuh:580 uses `constexpr int GPU_WARP_SIZE = warpSize;`
+# In ROCm 7.x AMD Clang, warpSize's operator int() is __device__ non-constexpr,
+# so this fails with "constexpr variable must be initialized by a constant expression".
+# Fix: replace the constexpr initialization with a static_assert-guarded compile-time
+# constant. For gfx11xx (RDNA3) warpSize=64; this is safe for all our GPU targets.
+RUN sed -i \
+    's/constexpr int GPU_WARP_SIZE = warpSize;/constexpr int GPU_WARP_SIZE = 64; \/\/ patched: warpSize non-constexpr in ROCm 7.x clang/g' \
+    /build/onnxruntime/onnxruntime/core/providers/rocm/cu_inc/common.cuh && \
+    grep "GPU_WARP_SIZE" /build/onnxruntime/onnxruntime/core/providers/rocm/cu_inc/common.cuh | grep -q "= 64" && \
+    echo "Patch applied: GPU_WARP_SIZE = 64"
 
-# Set ROCm environment
-ENV HSA_OVERRIDE_GFX_VERSION=11.0.1
-ENV HIP_VISIBLE_DEVICES=0
-ENV ONNXRUNTIME_ROCM_VERSION=6.2
+RUN mkdir -p /build/ort-build && cd /build/ort-build && \
+    cmake /build/onnxruntime/cmake \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/ort-install \
+        -DCMAKE_HIP_COMPILER="${ROCM_HOME}/llvm/bin/clang++" \
+        -Donnxruntime_USE_ROCM=ON \
+        -Donnxruntime_ROCM_HOME="${ROCM_HOME}" \
+        -DGPU_TARGETS="${GPU_TARGETS}" \
+        -DCMAKE_HIP_ARCHITECTURES="${GPU_TARGETS}" \
+        -Donnxruntime_BUILD_SHARED_LIB=ON \
+        -Donnxruntime_ENABLE_PYTHON=OFF \
+        -Donnxruntime_BUILD_UNIT_TESTS=OFF \
+        -Donnxruntime_BUILD_BENCHMARKS=OFF \
+        -Donnxruntime_ENABLE_TRAINING=OFF \
+        -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,noexecstack" \
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,noexecstack" \
+        -Donnxruntime_USE_COMPOSABLE_KERNEL_CK_TILE=OFF \
+        -Donnxruntime_USE_COMPOSABLE_KERNEL=OFF \
+        -Donnxruntime_DISABLE_RTTI=OFF
 
-# Run inference server (socket by default)
-CMD ["python3", "inference_server_socket.py"]
+# Patch ORT 1.22.2 hipBLAS API incompatibility with ROCm 7.x (post-configure, pre-build):
+# hipblasGemmStridedBatchedEx_v2 was a transitional name in hipBLAS 3.x that is absent
+# from hipBLAS 4.x (ROCm 7.x). ORT 1.22.2 calls it when -DHIPBLAS_V2 is defined.
+# In ROCm 7.x the plain hipblasGemmStridedBatchedEx is the correct function.
+# Strategy: append a compatibility define to the system hipblas.h header so that the
+# _v2 symbol resolves to the plain function (same signature in ROCm 7.x).
+RUN echo "" >> /opt/rocm/include/hipblas/hipblas.h && \
+    echo "/* ORT 1.22.2 compat: _v2 alias removed in hipBLAS 4.x (ROCm 7.x) */" >> /opt/rocm/include/hipblas/hipblas.h && \
+    echo "#ifndef hipblasGemmStridedBatchedEx_v2" >> /opt/rocm/include/hipblas/hipblas.h && \
+    echo "#define hipblasGemmStridedBatchedEx_v2 hipblasGemmStridedBatchedEx" >> /opt/rocm/include/hipblas/hipblas.h && \
+    echo "#endif" >> /opt/rocm/include/hipblas/hipblas.h && \
+    echo "hipBLAS _v2 compatibility shim added"
+
+# Build (parallel limited to avoid OOM on 16-core host sharing with training container)
+RUN cmake --build /build/ort-build --config Release --parallel ${NPROC_BUILD}
+
+# Install to /opt/ort-install
+RUN cmake --install /build/ort-build --prefix /opt/ort-install
+
+# Collect runtime .so files into /opt/ort-out (flat lib/ layout for easy extraction)
+RUN mkdir -p /opt/ort-out/lib && \
+    cp -P /opt/ort-install/lib/libonnxruntime.so* /opt/ort-out/lib/ && \
+    cp -P /opt/ort-install/lib/libonnxruntime_providers_rocm.so* \
+          /opt/ort-out/lib/ 2>/dev/null || true && \
+    cp -P /opt/ort-install/lib/libonnxruntime_providers_shared.so* \
+          /opt/ort-out/lib/ 2>/dev/null || true && \
+    echo "=== Built artifacts ===" && \
+    ls -lh /opt/ort-out/lib/
+
+# ─── Stage 2: export ─────────────────────────────────────────────────────────
+# Minimal final image containing only the .so files.
+#
+# Extract with:
+#   docker run --rm doorman-ort-rocm:1.22.2 tar -C /opt/ort-out -cf - . \
+#     | tar -C ~/.local/lib/onnxruntime-rocm-local -xf -
+FROM debian:bookworm-slim AS export
+
+COPY --from=builder /opt/ort-out /opt/ort-out
+
+RUN echo "=== ONNX Runtime ROCm 1.22.2 artifacts ===" && \
+    ls -lh /opt/ort-out/lib/
+
+CMD ["sh", "-c", "tar -C /opt/ort-out -cf - ."]

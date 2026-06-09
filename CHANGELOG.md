@@ -43,13 +43,14 @@ Major simplification and a new ONNX model stack.
 ### Dependencies
 - `ort` 2.0.0-rc.10 → **2.0.0-rc.12**. rc.12 requires an explicit TLS provider on
   the `download-binaries` path (we use `tls-rustls`) and an `api-*` feature on the
-  `load-dynamic`/cuda/rocm paths (`api-24`).
-- **Pinned & synchronized the GPU stack**: `ort` 2.0.0-rc.12 (api-24) ↔ ONNX
-  Runtime **1.24.2** ↔ ROCm **7.2.4** (gfx1103 / Radeon 780M). The load-dynamic
-  ROCm `libonnxruntime.so` MUST be ORT 1.24.x or the runtime `dlopen` breaks.
-  Updated `build_onnxruntime_rocm.sh` (ORT_VERSION v1.24.2, ROCM_VERSION 7.2.4),
-  `test_rocm.sh`, INSTALL.md, BUILD_REQUIREMENTS.txt and the ROCm testing plan;
-  removed the stale 1.20.1/1.22.1 references.
+  `load-dynamic`/cuda/rocm paths (ROCm uses `api-22`; CUDA uses `api-24`).
+- **Pinned & synchronized the GPU stack**: `ort` 2.0.0-rc.12 (ROCm path = api-22) ↔
+  ONNX Runtime **1.22.2** ↔ ROCm **7.2.2** (gfx1103 / Radeon 780M). 1.22.x is the
+  **last ORT minor with the ROCm execution provider** (removed in 1.23.0), so the
+  load-dynamic ROCm `libonnxruntime.so` MUST be ORT 1.22.x or the runtime `dlopen`
+  breaks. Updated `build_onnxruntime_rocm.sh` (ORT_VERSION v1.22.2, ROCM_VERSION
+  7.2.2), `test_rocm.sh`, INSTALL.md, BUILD_REQUIREMENTS.txt and the ROCm testing
+  plan; removed the stale 1.20.1/1.24.x references.
 - Bumped: `ndarray` 0.17, `nix` 0.31, `dirs` 6, `signal-hook-tokio` 0.4,
   `toml` 1.0, plus assorted semver-compatible updates.
 - **Intentionally pinned:** `eframe`/`egui` 0.29 (0.34 API churn),

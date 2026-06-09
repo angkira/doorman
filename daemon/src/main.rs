@@ -356,5 +356,13 @@ async fn main() -> Result<()> {
 
     signal_handle.close();
     info!("doorman daemon stopped");
-    Ok(())
+
+    // All application state has been dropped cleanly by the shutdown path above.
+    // On the ROCm path, letting main() return lets the C++ static-destructor sweep
+    // in _dl_fini run onnxruntime::Environment::~Environment() AFTER librocroller
+    // (ROCm) has released its HIP handles, causing a use-after-free SIGSEGV at exit.
+    // Exit directly to skip those cross-library global dtors — the kernel reclaims
+    // all fds/sockets/memory anyway. (CPU ORT doesn't hit this, but the call is safe
+    // unconditionally.)
+    std::process::exit(0);
 }

@@ -95,14 +95,23 @@ default = ["backend-ort", "camera-mock", "camera-ffmpeg", "preview"]
 # provider, else ort-sys emits a compile_error!. We pick `tls-rustls` (ring) to
 # avoid a system OpenSSL dependency, keeping the Ubuntu container / CI builds
 # dependency-free as documented below.
-backend-ort = ["ort", "ort/download-binaries", "ort/tls-rustls"]           # CPU (bundled ONNX Runtime), all platforms
-# `ort/api-24` (ort's own default API level) is required on the load-dynamic path:
+# Internal marker: enabled by EVERY backend-ort-* feature so the ORT backend
+# module tree (gated on `feature = "_ort"`) compiles regardless of which EP / link
+# strategy is selected. Kept separate from `backend-ort` so the load-dynamic
+# (ROCm) path does NOT inherit `download-binaries`.
+_ort = []
+backend-ort = ["_ort", "ort", "ort/download-binaries", "ort/tls-rustls"]           # CPU (bundled ONNX Runtime), all platforms
+# An `ort/api-N` feature is required on the load-dynamic path:
 # rc.12's always-compiled `ep/vitis.rs` references an `api-18`-gated OrtApi field,
 # and `load-dynamic` (disable-linking) does not pull any `api-*` feature in by
 # itself, so without this the ort crate fails to compile. The statically-linked
 # `download-binaries` path provides the field unconditionally and does not need it.
-backend-ort-rocm = ["ort", "ort/load-dynamic", "ort/api-24"]           # AMD ROCm EP (dlopen libonnxruntime.so), Linux only
-backend-ort-cuda = ["ort", "ort/cuda", "ort/download-binaries", "ort/tls-rustls", "ort/api-24"] # NVIDIA CUDA EP, Linux only
+# ROCm note: The ROCm EP was removed from ORT 1.23.0 onward. We build ORT 1.22.x
+# (the last version with the ROCm EP) which implements up to api-22. Using api-24
+# would call GetApi(24) which returns NULL on a 1.22.x .so, causing a crash.
+# api-22 is cumulative (includes api-18..api-21) so it satisfies all compile requirements.
+backend-ort-rocm = ["_ort", "ort", "ort/load-dynamic", "ort/api-22"]           # AMD ROCm EP (dlopen libonnxruntime.so); api-22 targets ORT 1.22.x (ROCm EP was removed in ORT 1.23.0; api-24 would crash against a 1.22.x .so)
+backend-ort-cuda = ["_ort", "ort", "ort/cuda", "ort/download-binaries", "ort/tls-rustls", "ort/api-24"] # NVIDIA CUDA EP, Linux only
 # Apple-Silicon acceleration: CoreML EP (Neural Engine / GPU / CPU). macOS only.
 # The bundled ONNX Runtime from `download-binaries` ships with CoreML support, so
 # this just turns on the `ort/coreml` API + on-device registration. Opt-in:

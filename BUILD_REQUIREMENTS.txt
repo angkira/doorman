@@ -49,7 +49,7 @@ cargo build --release
 | Feature             | Meaning                                            | Platform |
 |---------------------|----------------------------------------------------|----------|
 | backend-ort         | CPU ONNX Runtime (default, bundled lib)            | all      |
-| backend-ort-rocm    | AMD ROCm EP (`ort/load-dynamic` + `ort/api-24`)    | Linux    |
+| backend-ort-rocm    | AMD ROCm EP (`ort/load-dynamic` + `ort/api-22`)    | Linux    |
 | backend-ort-cuda    | NVIDIA CUDA EP (`ort/cuda` + bundled lib)          | Linux    |
 | backend-ort-coreml  | Apple CoreML EP (ANE/GPU/CPU, bundled lib)         | macOS    |
 | camera-mock         | video-file / synthetic frames (default dev)        | all      |
@@ -80,13 +80,15 @@ of `download-binaries`, so any download-binaries path (`backend-ort`,
 `backend-ort-cuda`, `backend-ort-coreml`) now pulls in exactly one TLS provider —
 we pick `ort/tls-rustls` (ring, no system OpenSSL), keeping the CPU/CUDA/CoreML
 builds dependency-free. The `backend-ort-rocm` load-dynamic path links no ONNX
-Runtime, so it needs no TLS provider but does add `ort/api-24`. Build the daemon
+Runtime, so it needs no TLS provider but does add `ort/api-22`. Build the daemon
 with ROCm by setting `ORT_DYLIB_PATH` to your ROCm `libonnxruntime.so` at runtime
 (see INSTALL.md, AMD ROCm appendix).
 
-Pinned GPU stack (keep in lock-step): `ort` 2.0.0-rc.12 (api-24) <-> ONNX Runtime
-1.24.2 (the load-dynamic libonnxruntime.so MUST be this ORT minor) <-> ROCm 7.2.4
-for gfx1103 (Radeon 780M). A mismatched ORT minor breaks the dlopen at runtime.
+Pinned GPU stack (keep in lock-step): `ort` 2.0.0-rc.12 (ROCm path = api-22) <->
+ONNX Runtime 1.22.2 — the last ORT minor with the ROCm EP (removed in 1.23.0), so
+the load-dynamic libonnxruntime.so MUST be 1.22.x <-> ROCm 7.2.2 for gfx1103
+(Radeon 780M). A mismatched ORT minor breaks the dlopen at runtime. (The CUDA
+path, by contrast, uses `ort/api-24` with a bundled download-binaries lib.)
 
 ## macOS (dev only)
 

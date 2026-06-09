@@ -21,9 +21,21 @@ pub trait MLBackend: Send + Sync {
     /// Detect faces in image
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>>;
     
-    /// Check if face is real (anti-spoofing)
+    /// Check if face is real (anti-spoofing) — legacy MiniFASNet check.
     async fn check_liveness(&self, image: &DynamicImage, face: &Face) -> Result<bool>;
-    
+
+    /// Monocular-depth face relief score for anti-spoofing (PAD).
+    ///
+    /// Runs Depth-Anything-V2 over the frame, crops the depth map to the
+    /// detected face bbox, and returns `std(face_depth) / (depth_range + eps)`
+    /// clamped to `[0, 1]`. A real 3D face scores high; a flat screen/print
+    /// replay scores near zero. Returns `Ok(None)` when the depth model is not
+    /// loaded (the caller decides how to treat an unavailable gate).
+    async fn depth_relief(&self, _image: &DynamicImage, _face: &Face) -> Result<Option<f32>> {
+        Ok(None)
+    }
+
+
     /// Extract face embedding (512-d vector)
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>>;
     
