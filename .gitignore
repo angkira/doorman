@@ -68,3 +68,24 @@ models/
 # Local ROCm scratch helpers (machine-specific hardcoded paths)
 /test_rocm.sh
 /test_rocm_rust.rs
+
+# Model weights / embeddings (never commit binary ML artifacts)
+*.pt
+*.safetensors
+embeddings.bin
+
+# Datasets
+**/datasets/
+
+# Test fixtures and ad-hoc testing artifacts (contain personal images/video)
+tests/fixtures/
+daemon/tests/fixtures/
+tools/testing/
+benchmark_results/
+
+# AI session/planning notes (internal, contain machine paths and personal data)
+.session/
+.plans/
+
+# Environment files
+.env*
