@@ -28,6 +28,7 @@ fn test_config() -> Config {
 }
 
 #[tokio::test]
+#[ignore = "requires daemon/tests/fixtures/face_lena.jpg, removed for public release (personal/biometric image)"]
 async fn yunet_detects_real_face() {
     let config = test_config();
     if !models_present(&config) {
@@ -75,6 +76,7 @@ async fn yunet_detects_real_face() {
 }
 
 #[tokio::test]
+#[ignore = "requires daemon/tests/fixtures/no_face_pattern.jpg, removed for public release"]
 async fn yunet_no_face_on_test_pattern() {
     let config = test_config();
     if !models_present(&config) {

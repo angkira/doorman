@@ -339,6 +339,7 @@ async fn embed_face(pipeline: &MLPipeline, path: &Path) -> Vec<f32> {
 }
 
 #[tokio::test]
+#[ignore = "requires daemon/tests/fixtures/liveness/{real_face,spoof_face}.jpg, removed for public release (personal/biometric images)"]
 async fn e2e_liveness_real_face_passes() {
     let d = models_dir();
     if !d.join("face_detection_yunet_2023mar.onnx").exists()
@@ -405,6 +406,7 @@ async fn e2e_liveness_real_face_passes() {
 }
 
 #[tokio::test]
+#[ignore = "requires daemon/tests/fixtures/faces/*.jpg, removed for public release (personal/biometric images)"]
 async fn e2e_enroll_match_reject_separation() {
     if !have_recognition_models() {
         eprintln!(
