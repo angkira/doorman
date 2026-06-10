@@ -1,7 +1,11 @@
 # doorman Configuration
 
 [daemon]
-socket_path = "/run/doorman.sock"
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
 data_dir = "/var/lib/doorman"
 log_level = "info"
 

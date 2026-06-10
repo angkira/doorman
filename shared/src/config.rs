@@ -265,9 +265,13 @@ pub struct ModelsConfig {
 }
 
 // Default values
-fn default_socket_path() -> String { "/run/doorman.sock".to_string() }
-fn default_debug_socket() -> String { "/run/doorman-debug.sock".to_string() }
-fn default_frame_socket() -> String { "/run/doorman-frames.sock".to_string() }
+// SYSTEM-mode socket paths live under /run/doorman/ — the systemd
+// RuntimeDirectory=doorman, owned by the sandboxed `doorman` user. Placing them
+// in root-owned /run (e.g. /run/doorman.sock) makes the daemon fail to bind
+// under ProtectSystem=strict. `--user` (dev) mode overrides these with XDG paths.
+fn default_socket_path() -> String { "/run/doorman/doorman.sock".to_string() }
+fn default_debug_socket() -> String { "/run/doorman/doorman-debug.sock".to_string() }
+fn default_frame_socket() -> String { "/run/doorman/doorman-frames.sock".to_string() }
 fn default_processing_fps() -> u32 { 10 }
 fn default_start_locked() -> bool { true }
 fn default_data_dir() -> String { "/var/lib/doorman".to_string() }
@@ -461,7 +465,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.daemon.socket_path, "/run/doorman.sock");
+        assert_eq!(config.daemon.socket_path, "/run/doorman/doorman.sock");
         assert_eq!(config.ml.device, "cpu");
         assert_eq!(config.authentication.similarity_threshold, 0.4);
         assert!(config.authentication.liveness_enabled);

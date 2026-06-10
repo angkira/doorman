@@ -148,6 +148,41 @@ impl MLPipeline {
         Ok(Some((face, embedding)))
     }
 
+    /// Run ONLY the FATAL depth-liveness gate on an already-detected face.
+    /// Returns Ok(true) = live, Ok(false) = spoof / rejected / model-missing
+    /// (same fail-safe semantics as `process_frame`). The auth path calls this
+    /// ONCE per attempt instead of per-frame: depth is the slow stage on CPU
+    /// (~0.5s), and running it on every one of the ~10 auth frames overran the
+    /// PAM screen-unlock deadline even though the face authenticated fine.
+    pub async fn liveness_gate(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
+        if !self.config.authentication.liveness_enabled {
+            return Ok(true);
+        }
+        match self.backend.depth_relief(image, face).await {
+            Ok(Some(relief)) => {
+                let t = self.config.authentication.liveness_depth_threshold;
+                if relief < t {
+                    tracing::warn!(
+                        "Liveness REJECTED (depth gate): relief={:.4} < threshold={:.4} — treating as spoof",
+                        relief, t
+                    );
+                    Ok(false)
+                } else {
+                    tracing::debug!("Liveness passed (depth gate): relief={:.4} >= {:.4}", relief, t);
+                    Ok(true)
+                }
+            }
+            Ok(None) => {
+                tracing::error!("Liveness ENABLED but depth-PAD model not loaded — reject (fail-safe)");
+                Ok(false)
+            }
+            Err(e) => {
+                tracing::error!("Liveness depth check errored — reject (fail-safe): {}", e);
+                Ok(false)
+            }
+        }
+    }
+
     /// Fast detection only - no embedding extraction (for real-time preview)
     /// Returns face bounding box without embedding (~2x faster)
     pub async fn detect_only(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {

@@ -261,20 +261,47 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let rec = &state.config.recognition;
     let threshold = state.config.authentication.similarity_threshold;
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
+    // Liveness (FATAL depth gate) runs ONCE per attempt — depth is ~0.5s on CPU
+    // and running it on every frame overran the PAM screen-unlock deadline.
+    // Recognition still aggregates EVERY quality frame (embedding is ~15ms).
+    let mut liveness_checked = false;
     for (i, frame) in frames.iter().enumerate() {
-        match state.ml_pipeline.process_frame(frame).await {
-            Ok(Some((face, embedding))) => {
-                if !frame_passes_quality_gate(frame, &face, rec, i, "auth") {
-                    continue;
-                }
-                passed_embeddings.push(embedding);
-            }
+        let face = match state.ml_pipeline.detect_face(frame).await {
+            Ok(Some(f)) => f,
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
+                continue;
             }
             Err(e) => {
-                warn!("Frame {}: Processing error: {}", i, e);
+                warn!("Frame {}: Detection error: {}", i, e);
+                continue;
             }
+        };
+        if !frame_passes_quality_gate(frame, &face, rec, i, "auth") {
+            continue;
+        }
+        // First quality face: run the anti-spoofing depth gate ONCE.
+        if !liveness_checked {
+            liveness_checked = true;
+            match state.ml_pipeline.liveness_gate(frame, &face).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!("Authentication failed for {}: liveness/anti-spoof gate rejected", username);
+                    return Response::Failure {
+                        reason: "Liveness check failed (not a live face).".to_string(),
+                    };
+                }
+                Err(e) => {
+                    warn!("Authentication failed for {}: liveness error: {}", username, e);
+                    return Response::Failure {
+                        reason: "Liveness check error.".to_string(),
+                    };
+                }
+            }
+        }
+        match state.ml_pipeline.extract_embedding(frame, &face).await {
+            Ok(embedding) => passed_embeddings.push(embedding),
+            Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
         }
     }
 

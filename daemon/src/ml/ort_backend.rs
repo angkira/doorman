@@ -172,14 +172,21 @@ impl OrtBackend {
 
     /// Number of sessions to pool per model, based on the selected device.
     ///
-    /// CPU benefits from concurrency, so pool 4. A GPU device (rocm/gpu/cuda)
-    /// gets a small pool of 1: each GPU session opens its own MIOpen/cuDNN
-    /// context + memory arena, so multiple sessions on a memory-constrained
-    /// iGPU (e.g. Radeon 780M) are wasteful and OOM-prone.
+    /// A GPU device (rocm/gpu/cuda) gets a small pool of 1: each GPU session
+    /// opens its own MIOpen/cuDNN context + memory arena, so multiple sessions
+    /// on a memory-constrained iGPU (e.g. Radeon 780M) are wasteful and
+    /// OOM-prone.
+    ///
+    /// CPU gets a pool of 2 (was 4). This is a system face-auth daemon: PAM auth
+    /// is SEQUENTIAL (one unlock at a time), not a high-concurrency server, so a
+    /// large pool only inflates resident memory (each session loads its own copy
+    /// of every model — the dominant driver of the ~1.6 GB idle RSS) without
+    /// improving auth latency. Two sessions keep enough headroom for the brief
+    /// detect→liveness→embed overlap inside a single auth attempt.
     fn pool_size_for_device(device: &str) -> usize {
         match device {
             "rocm" | "gpu" | "cuda" => 1,
-            _ => 4,
+            _ => 2,
         }
     }
 

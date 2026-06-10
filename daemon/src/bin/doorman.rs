@@ -35,6 +35,13 @@ use doorman_shared::{
     DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage, UserInfo,
 };
 
+// Self-contained installer (doctor / install / uninstall). Kept in a sibling
+// file so this bin stays a pure std+clap client that still builds with
+// --no-default-features.
+#[path = "doorman_install.rs"]
+mod install;
+use install::{EpChoice, InstallOpts, PamScope, UninstallOpts};
+
 /// Default runtime directory when neither `--socket`/`--runtime-dir` nor
 /// `$XDG_RUNTIME_DIR` is set. Matches how the daemon is run on this Mac.
 const FALLBACK_RUNTIME_DIR: &str = "/tmp/doorman-run";
@@ -97,6 +104,47 @@ enum Command {
     },
     /// Show daemon status (version, uptime, camera, models, enrolled users).
     Status,
+    /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
+    Doctor,
+    /// Install doorman: daemon service, models, config, and (opt-in) PAM integration.
+    Install {
+        /// Print every planned action and mutate nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Auto-detect the execution provider (default).
+        #[arg(long, conflicts_with_all = ["cpu", "rocm"])]
+        auto: bool,
+        /// Force the CPU backend.
+        #[arg(long, conflicts_with_all = ["auto", "rocm"])]
+        cpu: bool,
+        /// Force the AMD ROCm backend (iGPU).
+        #[arg(long, conflicts_with_all = ["auto", "cpu"])]
+        rocm: bool,
+        /// Integrate with screen unlock only (default, safest).
+        #[arg(long, conflicts_with_all = ["login", "sudo", "no_pam"])]
+        screen_unlock: bool,
+        /// Also integrate with display-manager login (sddm). High-risk opt-in.
+        #[arg(long, conflicts_with_all = ["screen_unlock", "sudo", "no_pam"])]
+        login: bool,
+        /// Integrate with sudo authentication. High-risk opt-in.
+        #[arg(long, conflicts_with_all = ["screen_unlock", "login", "no_pam"])]
+        sudo: bool,
+        /// Do not touch PAM at all (service + enroll only).
+        #[arg(long, conflicts_with_all = ["screen_unlock", "login", "sudo"])]
+        no_pam: bool,
+    },
+    /// Uninstall doorman: remove PAM lines, service, and unit (idempotent).
+    Uninstall {
+        /// Print every planned action and mutate nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also remove /var/lib/doorman, /etc/doorman, and the system user.
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 /// Resolved socket locations for this invocation.
@@ -110,8 +158,25 @@ impl Sockets {
         // --runtime-dir wins for both sockets; --socket only overrides the command
         // socket (debug is still derived from the runtime dir so `enroll` progress
         // works). This mirrors the daemon's own derivation in `--user` mode.
-        let runtime = runtime_dir.unwrap_or_else(default_runtime_dir);
-        let command = socket.unwrap_or_else(|| runtime.join(COMMAND_SOCKET_NAME));
+        let runtime = runtime_dir.clone().unwrap_or_else(default_runtime_dir);
+        let command = match socket {
+            Some(s) => s,
+            None => {
+                let user_sock = runtime.join(COMMAND_SOCKET_NAME);
+                // Pure default (no --socket, no --runtime-dir): prefer the per-user
+                // (XDG) socket, but if it's absent and the installed SYSTEM daemon's
+                // socket exists, talk to that. Lets the CLI "just work" against a
+                // system-installed daemon without needing --socket.
+                if runtime_dir.is_none()
+                    && !user_sock.exists()
+                    && std::path::Path::new(doorman_shared::SOCKET_PATH).exists()
+                {
+                    PathBuf::from(doorman_shared::SOCKET_PATH)
+                } else {
+                    user_sock
+                }
+            }
+        };
         let debug = runtime.join(DEBUG_SOCKET_NAME);
         Sockets { command, debug }
     }
@@ -142,12 +207,74 @@ fn main() {
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
         Command::Test { username } => cmd_test(&sockets, username, cli.json),
         Command::Status => cmd_status(&sockets, cli.json),
+        Command::Doctor => cmd_doctor(),
+        Command::Install {
+            dry_run,
+            yes,
+            auto: _,
+            cpu,
+            rocm,
+            screen_unlock: _,
+            login,
+            sudo,
+            no_pam,
+        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *login, *sudo, *no_pam),
+        Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
     };
 
     if let Err(CliError(msg)) = result {
         eprintln!("error: {msg}");
         std::process::exit(1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// doctor / install / uninstall
+// ---------------------------------------------------------------------------
+
+fn cmd_doctor() -> Result<(), CliError> {
+    let d = install::diagnose(EpChoice::Auto, PamScope::ScreenUnlock);
+    install::print_diagnosis(&d);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_install(
+    dry_run: bool,
+    yes: bool,
+    cpu: bool,
+    rocm: bool,
+    login: bool,
+    sudo: bool,
+    no_pam: bool,
+) -> Result<(), CliError> {
+    let ep = if cpu {
+        EpChoice::Cpu
+    } else if rocm {
+        EpChoice::Rocm
+    } else {
+        EpChoice::Auto
+    };
+    let pam_scope = if no_pam {
+        PamScope::None
+    } else if login {
+        PamScope::Login
+    } else if sudo {
+        PamScope::Sudo
+    } else {
+        PamScope::ScreenUnlock
+    };
+    install::run_install(&InstallOpts {
+        dry_run,
+        assume_yes: yes,
+        ep,
+        pam_scope,
+    })
+    .map_err(CliError::new)
+}
+
+fn cmd_uninstall(dry_run: bool, purge: bool) -> Result<(), CliError> {
+    install::run_uninstall(&UninstallOpts { dry_run, purge }).map_err(CliError::new)
 }
 
 /// Connect, send one request line, read one response line. This is the exact

@@ -87,7 +87,14 @@ pub struct DaemonInfo {
 }
 
 /// Configuration paths
-pub const SOCKET_PATH: &str = "/run/doorman.sock";
+///
+/// SYSTEM-mode command socket. It lives UNDER `/run/doorman/` (the systemd
+/// `RuntimeDirectory=doorman`, owned by the sandboxed `doorman` user) — NOT at
+/// `/run/doorman.sock` in root-owned `/run`, which the daemon user cannot
+/// create under `ProtectSystem=strict`. This is the single source of truth
+/// shared by the daemon (system mode), the PAM module, and the `doorman` CLI.
+/// `--user` (dev) mode overrides this with `$XDG_RUNTIME_DIR/doorman.sock`.
+pub const SOCKET_PATH: &str = "/run/doorman/doorman.sock";
 pub const DATA_DIR: &str = "/var/lib/doorman";
 pub const EMBEDDINGS_FILE: &str = "embeddings.bin";
 

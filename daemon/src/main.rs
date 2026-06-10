@@ -276,13 +276,26 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start debug stream server (for preview clients)
-    let debug_socket_path = config.daemon.debug_socket.clone();
-    let debug_server_task = tokio::spawn(async move {
-        if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_broadcaster).await {
-            error!("Debug stream server error: {}", e);
-        }
-    });
+    // Start debug stream server (for preview/debug clients) ONLY when explicitly
+    // requested. A production SYSTEM face-auth daemon must NOT bind the debug
+    // socket: it is a preview/dev feature, and binding it on a read-only path
+    // (outside the RuntimeDirectory) is what produced the "Read-only file system"
+    // startup error. The recognition pipeline still drives `debug_broadcaster`
+    // (broadcasts are no-ops with zero subscribers), so gating only the server is
+    // safe. `--user`/dev mode paths the socket under XDG and is unaffected.
+    let debug_server_task = if config.daemon.debug_mode || config.daemon.preview_mode {
+        let debug_socket_path = config.daemon.debug_socket.clone();
+        info!("Starting debug stream server (debug/preview mode) on {}", debug_socket_path);
+        Some(tokio::spawn(async move {
+            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_broadcaster).await {
+                error!("Debug stream server error: {}", e);
+            }
+        }))
+    } else {
+        // Keep the broadcaster alive for the pipeline; just don't bind a socket.
+        drop(debug_broadcaster);
+        None
+    };
 
     // Start frame stream server (if preview mode enabled)
     let frame_server_task = if let Some(ref frame_bcast) = frame_broadcaster {
@@ -297,20 +310,27 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Start pipeline in production mode OR preview mode
-    // Only disabled in debug mode when NOT in preview mode (for testing without camera)
-    let pipeline_handles = if !config.daemon.debug_mode || config.daemon.preview_mode {
-        if config.daemon.preview_mode {
-            info!("Starting pipeline (preview mode - streaming frames)");
-        } else {
-            info!("Starting pipeline (production mode)");
-        }
+    // Start the always-on detection/recognition pipeline ONLY for the
+    // preview/debug developer flow.
+    //
+    // The detection_pipeline (YuNet) + recognition_pipeline (embedding) run ML
+    // inference on EVERY frame and exist solely to feed the preview overlay
+    // (doorman-preview) and the debug stream. They are NOT needed for PAM auth:
+    // `ipc::handle_authenticate` reads fresh frames from `state.latest_frame`
+    // (published by the always-running camera producer) and runs its OWN
+    // on-demand detect/liveness/embed. Running these pipelines 24/7 in a system
+    // service burned ~40% CPU continuously while idle. In production (no
+    // --preview, debug_mode=false) we skip them entirely; the camera producer
+    // still runs so auth has fresh frames, and its frame channel simply drops
+    // (try_send) since nothing consumes it.
+    let pipeline_handles = if config.daemon.preview_mode {
+        info!("Starting pipeline (preview mode - detection+recognition overlay)");
         let camera_rx = camera_rx.lock().await.take()
             .expect("camera_rx consumed exactly once by the pipeline");
         let handles = pipeline::start_pipeline(state.clone(), camera_rx).await;
         Some(handles)
     } else {
-        info!("Pipeline disabled (debug mode without preview)");
+        info!("Detection/recognition pipeline disabled (production mode - auth runs on-demand detection)");
         None
     };
 
@@ -339,7 +359,13 @@ async fn main() -> Result<()> {
         } => {
             info!("Pipeline stopped");
         }
-        _ = debug_server_task => {
+        _ = async {
+            if let Some(task) = debug_server_task {
+                let _ = task.await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
             info!("Debug stream server stopped");
         }
         _ = async {
