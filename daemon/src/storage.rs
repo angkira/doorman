@@ -17,7 +17,6 @@ pub struct UserEmbedding {
 pub struct Storage {
     embeddings: HashMap<String, UserEmbedding>,
     file_path: PathBuf,
-    data_dir: PathBuf,
 }
 
 impl Storage {
@@ -58,7 +57,6 @@ impl Storage {
         Ok(Self {
             embeddings,
             file_path,
-            data_dir,
         })
     }
 

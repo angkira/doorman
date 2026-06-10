@@ -1,7 +1,15 @@
-/// Model-specific configuration and output parsing
-///
-/// Different model architectures have different input/output formats.
-/// This module centralizes model-specific knowledge.
+//! Model-specific configuration and output parsing
+//!
+//! Different model architectures have different input/output formats.
+//! This module centralizes model-specific knowledge.
+//!
+//! This module is a self-documenting catalog of model metadata. Several entries
+//! (human-readable `name` fields, descriptive dimensions like `input_size`/
+//! `embedding_size`, and the back-compat aliases `STANDARD`/`ARCFACE`/
+//! `ARCFACE_TEMPLATE_112`/`ModelSet`/`DEFAULT`) are intentionally retained for
+//! documentation, logging, and alternate-model drop-in even when not read on the
+//! current active inference path.
+#![allow(dead_code)]
 
 /// Face detector configuration
 pub struct DetectorConfig {

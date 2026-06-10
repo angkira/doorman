@@ -1,3 +1,7 @@
+# macOS AppleDouble / resource-fork junk
+._*
+.DS_Store
+
 # Rust
 target/
 Cargo.lock

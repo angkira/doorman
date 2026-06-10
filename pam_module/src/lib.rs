@@ -70,7 +70,7 @@ enum AuthOutcome {
 /// to the password prompt instead of hard-failing.
 fn authenticate_ipc(username: &str) -> AuthOutcome {
     // System-mode socket path. PAM runs as root at the greeter, so the daemon
-    // (a system service) owns /run/doorman.sock. The user-mode XDG socket is
+    // (a system service) owns /run/doorman/doorman.sock. The user-mode XDG socket is
     // only used by the dev preview/CLI, never by the greeter.
     let mut stream = match UnixStream::connect(SOCKET_PATH) {
         Ok(s) => s,

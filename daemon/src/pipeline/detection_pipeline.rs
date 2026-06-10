@@ -78,7 +78,7 @@ pub async fn run_detection_pipeline(
                 warn!("spawn_blocking join error on frame {}: {}", sequence, e);
                 let (camera_width, camera_height) = camera_dimensions;
                 let _ = result_tx.try_send(DetectionResult {
-                    sequence, timestamp, face: None, embedding: None,
+                    sequence, face: None, embedding: None,
                     processing_time: start.elapsed(), frame_width: camera_width, frame_height: camera_height,
                 });
                 continue;
@@ -108,7 +108,6 @@ pub async fn run_detection_pipeline(
                 let (camera_width, camera_height) = camera_dimensions;
                 let _ = result_tx.try_send(DetectionResult {
                     sequence,
-                    timestamp,
                     face: None,
                     embedding: None,
                     processing_time: start.elapsed(),
@@ -122,7 +121,6 @@ pub async fn run_detection_pipeline(
                 let (camera_width, camera_height) = camera_dimensions;
                 let _ = result_tx.try_send(DetectionResult {
                     sequence,
-                    timestamp,
                     face: None,
                     embedding: None,
                     processing_time: start.elapsed(),
@@ -216,7 +214,6 @@ pub async fn run_detection_pipeline(
         let (camera_width, camera_height) = camera_dimensions;
         let _ = result_tx.try_send(DetectionResult {
             sequence,
-            timestamp,
             face: Some(Face {
                 bbox: face.bbox,
                 confidence: face.confidence,

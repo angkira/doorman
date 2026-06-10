@@ -11,7 +11,7 @@
 //!
 //! The result feeds straight into the recognizer preprocessing.
 
-use image::{DynamicImage, GenericImageView, RgbImage};
+use image::{DynamicImage, RgbImage};
 
 /// A 2x3 affine transform `[[a, b, tx], [c, d, ty]]` mapping source pixel
 /// coordinates to destination (template) coordinates: `dst = M * [x, y, 1]^T`.

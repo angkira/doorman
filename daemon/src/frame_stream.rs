@@ -1,6 +1,5 @@
 use anyhow::Result;
 use image::DynamicImage;
-use std::io::Cursor;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};

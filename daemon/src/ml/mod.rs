@@ -21,7 +21,7 @@ use anyhow::Result;
 pub use backend::Face;
 pub use backend::{BackendType, MLBackend};
 use doorman_shared::Config;
-use image::{DynamicImage, GenericImageView};
+use image::DynamicImage;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;

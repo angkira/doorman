@@ -1,7 +1,7 @@
 use crate::DaemonState;
 use anyhow::{Context, Result};
 use doorman_shared::{
-    Request, Response, ResponseData, DaemonInfo, SOCKET_PATH, StreamMessage, EnrollmentPhase,
+    Request, Response, ResponseData, DaemonInfo, StreamMessage, EnrollmentPhase,
     AUTH_FRAMES, ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
 };
 use image::GenericImageView;

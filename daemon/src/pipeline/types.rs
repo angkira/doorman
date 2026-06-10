@@ -11,15 +11,6 @@ pub struct RawFrame {
     pub sequence: u64,
 }
 
-/// Frame with detection metadata for preview
-#[derive(Clone)]
-pub struct AnnotatedFrame {
-    pub image: Arc<DynamicImage>,
-    pub timestamp: Instant,
-    pub sequence: u64,
-    pub face: Option<Face>,
-}
-
 /// Face bounding box from detection
 #[derive(Clone, Debug)]
 pub struct Face {
@@ -30,7 +21,6 @@ pub struct Face {
 /// Detection result from ML pipeline
 pub struct DetectionResult {
     pub sequence: u64,
-    pub timestamp: Instant,
     pub face: Option<Face>,
     pub embedding: Option<Vec<f32>>,
     pub processing_time: Duration,
