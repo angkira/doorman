@@ -252,6 +252,7 @@ high-assurance anti-spoof.
 
 ## License
 
-MIT (project code). Model weights carry their own licenses — see
+[PolyForm Noncommercial 1.0.0](LICENSE) (project code) — free for personal,
+research, and noncommercial use. Model weights carry their own licenses — see
 [MODELS.md](MODELS.md): YuNet **MIT**, MiniFASNetV2-SE **Apache-2.0**, EdgeFace-S
 **CC-BY-NC-SA 4.0 (non-commercial)**.
