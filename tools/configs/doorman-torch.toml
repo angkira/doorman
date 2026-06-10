@@ -4,7 +4,7 @@
 [ml]
 backend = "torch"
 device = "cuda"
-models_dir = "/home/angkira/.local/share/doorman/models"
+models_dir = "/home/<user>/.local/share/doorman/models"
 cpu_threads = 4
 confidence_threshold = 0.7
 liveness_threshold = 0.5
@@ -30,7 +30,7 @@ socket_path = "/tmp/doorman.sock"
 timeout_seconds = 30
 
 [storage]
-embeddings_path = "/home/angkira/.local/share/doorman/embeddings"
+embeddings_path = "/home/<user>/.local/share/doorman/embeddings"
 
 [logging]
 level = "info"

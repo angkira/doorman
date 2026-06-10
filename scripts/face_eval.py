@@ -12,8 +12,8 @@ Evaluation protocol: LFW 6000-pair verification (pairs.txt).
 
 Usage:
     python scripts/face_eval.py \\
-        --lfw-root /home/angkira/datasets/lfw/lfw_funneled \\
-        --pairs    /home/angkira/datasets/lfw/pairs.txt \\
+        --lfw-root ~/datasets/lfw/lfw_funneled \\
+        --pairs    ~/datasets/lfw/pairs.txt \\
         --models   ~/.local/share/doorman/models \\
         [--output  docs/face_eval_baseline.md] \\
         [--aggregation-k 5]
@@ -524,9 +524,9 @@ def build_identity_templates(
 
 def main():
     parser = argparse.ArgumentParser(description="Doorman face-recognition evaluator (LFW)")
-    parser.add_argument("--lfw-root", default="/home/angkira/datasets/lfw/lfw_funneled",
+    parser.add_argument("--lfw-root", default=os.path.expanduser("~/datasets/lfw/lfw_funneled"),
                         help="Path to LFW images root (contains one subdir per identity)")
-    parser.add_argument("--pairs", default="/home/angkira/datasets/lfw/pairs.txt",
+    parser.add_argument("--pairs", default=os.path.expanduser("~/datasets/lfw/pairs.txt"),
                         help="Path to LFW pairs.txt (standard 6000-pair protocol)")
     parser.add_argument("--models", default=os.path.expanduser("~/.local/share/doorman/models"),
                         help="Path to doorman models directory")
@@ -768,7 +768,7 @@ def main():
         f.write(f"**Model:** EdgeFace-S (`edgeface_s.onnx`, 512-d, CC-BY-NC-SA 4.0)  \n")
         f.write(f"**Dataset:** LFW-funneled 6000-pair protocol  \n")
         f.write(f"  Source: figshare mirror (https://ndownloader.figshare.com/files/5976015)  \n")
-        f.write(f"  Stored at: `/home/angkira/datasets/lfw/lfw_funneled` ({len(image_paths)} images)  \n")
+        f.write(f"  Stored at: `{lfw_root}` ({len(image_paths)} images)  \n")
         f.write(f"**Pipeline:** YuNet detector → Umeyama alignment → EdgeFace-S → L2-normalize → cosine  \n")
         f.write(f"**Harness:** Python/onnxruntime (lower fidelity than Rust; exact same models/preprocessing)  \n\n")
 

@@ -2,7 +2,8 @@
 set -e
 
 # Set library paths for ONNX Runtime ROCm
-export ORT_LIB_LOCATION="/home/angkira/Home/doorman/.venv/lib/python3.12/site-packages/onnxruntime/capi"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export ORT_LIB_LOCATION="${ORT_LIB_LOCATION:-$SCRIPT_DIR/.venv/lib/python3.12/site-packages/onnxruntime/capi}"
 export LD_LIBRARY_PATH="$ORT_LIB_LOCATION:/opt/rocm/lib:/opt/rocm-7.0.2/lib:$LD_LIBRARY_PATH"
 
 # Use CPU version for now (ROCm library has executable stack issues)

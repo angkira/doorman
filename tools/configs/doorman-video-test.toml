@@ -6,7 +6,7 @@ preview_mode = true
 
 [camera]
 # Use video file instead of camera device
-video_file = "/home/angkira/Home/doorman/2025-11-26-115723.webm"
+video_file = "/path/to/test_video.webm"
 # Output resolution
 width = 1024
 height = 720

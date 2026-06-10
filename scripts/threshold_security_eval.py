@@ -18,7 +18,7 @@ EdgeFace-S (x-127.5)/127.5 -> L2-normalize).
 
 Usage:
     python scripts/threshold_security_eval.py \\
-        --lfw-root /home/angkira/datasets/lfw/lfw_funneled \\
+        --lfw-root ~/datasets/lfw/lfw_funneled \\
         --models   ~/.local/share/doorman/models \\
         [--template-k 7] [--probe-window 5] [--min-images 15]
 """
@@ -574,7 +574,7 @@ def run_part_c(lfw_root: Path, models_eval_dir: Path, template_k: int,
 
 def main():
     ap = argparse.ArgumentParser(description="Threshold security evaluation — aggregated path")
-    ap.add_argument("--lfw-root",    default="/home/angkira/datasets/lfw/lfw_funneled")
+    ap.add_argument("--lfw-root",    default=os.path.expanduser("~/datasets/lfw/lfw_funneled"))
     ap.add_argument("--models",      default=os.path.expanduser("~/.local/share/doorman/models"))
     ap.add_argument("--models-eval", default=os.path.expanduser("~/datasets/models_eval"))
     ap.add_argument("--template-k",  type=int, default=7,

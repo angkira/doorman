@@ -6,7 +6,7 @@
 #   - ORT 1.22.2 = last release with both onnxruntime_USE_ROCM and ORT_API_VERSION=22.
 #   - ort-sys 2.0.0-rc.12 with api-22 feature calls GetApi(22), which ORT 1.22.2 satisfies.
 #
-# Base: hars-training-rocm:latest  (ROCm 7.2.4 / Ubuntu 24.04)
+# Base: a ROCm dev image with a working build toolchain (ROCm 7.2.4 / Ubuntu 24.04)
 # ABI target: ort crate 2.0.0-rc.12 / api-22 => ORT 1.22.x
 # GPU targets: gfx1100, gfx1101, gfx1102, gfx1103 (RDNA3, covers Radeon 780M)
 #
@@ -18,7 +18,8 @@
 #     | tar -C ~/.local/lib/onnxruntime-rocm-local -xf -
 
 # ─── Stage 1: build ──────────────────────────────────────────────────────────
-FROM hars-training-rocm:latest AS builder
+ARG BASE_IMAGE=rocm/dev-ubuntu-24.04:7.0
+FROM ${BASE_IMAGE} AS builder
 
 ARG ORT_VERSION=v1.22.2
 ARG GPU_TARGETS="gfx1100;gfx1101;gfx1102;gfx1103"

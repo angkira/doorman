@@ -31,8 +31,8 @@
 
 | Dataset | Location | Images | How obtained |
 |---|---|---|---|
-| **LFW-funneled** | `/home/angkira/datasets/lfw/lfw_funneled/` | 13 233 JPEG images | figshare mirror `https://ndownloader.figshare.com/files/5976015` |
-| **LFW pairs.txt** | `/home/angkira/datasets/lfw/pairs.txt` | 6000 pairs (10 splits × 300 genuine + 300 impostor) | facenet GitHub mirror: `https://raw.githubusercontent.com/davidsandberg/facenet/master/data/pairs.txt` |
+| **LFW-funneled** | `$DATASETS_DIR/lfw/lfw_funneled/` | 13 233 JPEG images | figshare mirror `https://ndownloader.figshare.com/files/5976015` |
+| **LFW pairs.txt** | `$DATASETS_DIR/lfw/pairs.txt` | 6000 pairs (10 splits × 300 genuine + 300 impostor) | facenet GitHub mirror: `https://raw.githubusercontent.com/davidsandberg/facenet/master/data/pairs.txt` |
 
 Primary LFW mirror (vis-www.cs.umass.edu) was unreachable at time of download.
 The figshare mirror provides the identical LFW-deepfunneled/funneled tarball.

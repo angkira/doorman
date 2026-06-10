@@ -2,10 +2,11 @@
 """Inspect BlazeFace ONNX model to understand output format"""
 
 import onnx
+import os
 import sys
 
 model_path = sys.argv[1] if len(sys.argv) > 1 else "~/.local/share/doorman/models/blazeface.onnx"
-model_path = model_path.replace("~", "/home/angkira")
+model_path = os.path.expanduser(model_path)
 
 print(f"Loading model: {model_path}")
 model = onnx.load(model_path)

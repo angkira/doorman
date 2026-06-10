@@ -918,7 +918,7 @@ def write_report(
         f.write(f"**ORT version:** 1.26.0  \n")
         f.write(f"**ORT threading:** {ort_threads}  \n")
         f.write(f"**Benchmark runs:** {N_BENCH} timed + {N_WARMUP} warmup per stage  \n")
-        f.write("**Input data:** In-situ 4K genuine frames (3840×2160 JPEG) from `/home/angkira/datasets/insitu/genuine/`  \n\n")
+        f.write("**Input data:** In-situ 4K genuine frames (3840×2160 JPEG) from `~/datasets/insitu/genuine/`  \n\n")
 
         f.write("## Measurement Caveats\n\n")
         f.write("- **ORT thread count**: Default (`intra_op_num_threads=0`) lets ORT use all available cores via OpenMP. "
@@ -1230,7 +1230,7 @@ def main():
     import multiprocessing
 
     parser = argparse.ArgumentParser(description="Doorman CPU performance profiling")
-    parser.add_argument("--output", default="/home/angkira/Home/doorman/docs/perf_profile.md")
+    parser.add_argument("--output", default="docs/perf_profile.md")
     parser.add_argument("--ort-threads", type=int, default=0,
                         help="ORT intra_op_num_threads (0=default/all cores)")
     args = parser.parse_args()
