@@ -40,13 +40,14 @@ pub async fn run_recognition_pipeline(
 
     while let Some(result) = result_rx.recv().await {
         let is_locked = *system_locked.read().await;
-        let debug_mode = config.daemon.debug_mode;
 
-        // Check if we should process (locked or debug mode)
-        if !is_locked && !debug_mode {
-            continue;
-        }
-
+        // NOTE: we no longer `continue` when the session is unlocked. The
+        // detection/recognition pipeline now runs subscriber-gated (only while a
+        // preview client is connected — see the supervisor in `main.rs`), so when
+        // it IS running we always want to emit per-frame metadata for the preview
+        // overlay regardless of lock state. The *unlock* side-effect below stays
+        // gated on `is_locked`, so PAM/auto-unlock semantics are unchanged: an
+        // already-unlocked session is never re-locked or otherwise mutated here.
         let processing_time_ms = result.processing_time.as_millis() as u32;
         let timestamp_ms = start_time.elapsed().as_millis() as u64;
 

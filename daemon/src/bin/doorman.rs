@@ -38,7 +38,7 @@ use doorman_shared::{
 // Self-contained installer (doctor / install / uninstall). Kept in a sibling
 // file so this bin stays a pure std+clap client that still builds with
 // --no-default-features.
-#[path = "doorman_install.rs"]
+#[path = "../install.rs"]
 mod install;
 use install::{EpChoice, InstallOpts, PamScope, UninstallOpts};
 

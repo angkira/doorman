@@ -1,11 +1,15 @@
 mod backend;
 mod model_config;
 
+/// Depth-sidecar wire protocol (pure std; shared by the daemon's GPU-EP depth
+/// routing and the `doorman-depthd` sidecar binary). Public so the bin can use it.
+pub mod depth_ipc;
+
 #[cfg(feature = "_ort")]
 mod align;
 
 #[cfg(feature = "_ort")]
-mod ort_backend;
+pub mod ort_backend;
 
 #[cfg(feature = "_ort")]
 mod yunet_decoder;

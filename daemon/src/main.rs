@@ -39,6 +39,114 @@ pub struct DaemonState {
 unsafe impl Send for DaemonState {}
 unsafe impl Sync for DaemonState {}
 
+/// Subscriber-gated preview supervisor (production / system-daemon path).
+///
+/// Owns the camera frame `Receiver` for the lifetime of the daemon and performs
+/// the frame fanout itself. It watches the frame + debug broadcasters' live
+/// subscriber counts and runs the expensive detection + recognition ML pipeline
+/// ONLY while at least one preview client (doorman-preview) is connected:
+///   - first client connects  -> spin up detection+recognition, start
+///     broadcasting JPEG frames + per-frame recognition metadata.
+///   - last client disconnects -> abort the ML tasks, stop encoding/broadcasting,
+///     drop the daemon back to ~0% CPU. The camera producer keeps running so PAM
+///     auth always has fresh frames.
+///
+/// PAM auth (`ipc::handle_authenticate`) is entirely independent of this task —
+/// it runs its own on-demand detection against `state.latest_frame` — so preview
+/// being on or off never affects authentication.
+async fn run_preview_supervisor(
+    state: DaemonState,
+    frame_broadcaster: Option<Arc<frame_stream::FrameStreamBroadcaster>>,
+    debug_broadcaster: Arc<debug_stream::DebugStreamBroadcaster>,
+    camera_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<pipeline::RawFrame>>>>,
+) {
+    use std::time::Instant;
+
+    let mut camera_rx = camera_rx
+        .lock()
+        .await
+        .take()
+        .expect("camera_rx consumed exactly once by the preview supervisor");
+
+    let processing_fps = state.config.daemon.processing_fps.max(1);
+    let detection_interval_ms = (1000 / processing_fps) as u128;
+    let preview_interval_ms: u128 = 66; // ~15fps JPEG preview
+
+    // Active-pipeline state. `None` => idle (no ML running).
+    let mut active: Option<(
+        tokio::sync::mpsc::Sender<pipeline::RawFrame>,
+        Vec<tokio::task::JoinHandle<()>>,
+    )> = None;
+
+    let mut last_detection = Instant::now();
+    let mut last_preview = Instant::now();
+
+    info!("Preview supervisor started (idle; pipeline starts on preview connect)");
+
+    while let Some(raw_frame) = camera_rx.recv().await {
+        // Combined live subscriber count across both preview sockets. A preview
+        // client connects to BOTH (frames + metadata), but counting either keeps
+        // us robust if only one is attached.
+        let subscribers = frame_broadcaster
+            .as_ref()
+            .map(|b| b.receiver_count())
+            .unwrap_or(0)
+            + debug_broadcaster.receiver_count();
+
+        match (subscribers > 0, active.is_some()) {
+            // First subscriber appeared -> start the ML pipeline.
+            (true, false) => {
+                info!(
+                    "Preview client connected ({} subscriber(s)) -> starting detection/recognition pipeline",
+                    subscribers
+                );
+                let (detection_tx, detection_rx) =
+                    tokio::sync::mpsc::channel::<pipeline::RawFrame>(10);
+                let handles = pipeline::start_detection_recognition(&state, detection_rx);
+                active = Some((detection_tx, handles));
+                last_detection = Instant::now() - std::time::Duration::from_millis(detection_interval_ms as u64);
+                last_preview = Instant::now() - std::time::Duration::from_millis(preview_interval_ms as u64);
+            }
+            // Last subscriber left -> tear the ML pipeline down (back to ~0% CPU).
+            (false, true) => {
+                info!("Last preview client disconnected -> stopping detection/recognition pipeline (idle)");
+                if let Some((detection_tx, handles)) = active.take() {
+                    drop(detection_tx); // closes detection channel
+                    for h in handles {
+                        h.abort();
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // While active, fan the frame out: broadcast JPEG previews (~15fps) and
+        // feed the detection stage at processing_fps. While idle we simply drop
+        // the frame here, so the camera channel never backs up.
+        if let Some((detection_tx, _)) = active.as_ref() {
+            if let Some(ref broadcaster) = frame_broadcaster {
+                if last_preview.elapsed().as_millis() >= preview_interval_ms {
+                    let broadcaster = broadcaster.clone();
+                    let image = raw_frame.image.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = broadcaster.broadcast_frame(&image) {
+                            tracing::debug!("Failed to broadcast preview frame: {}", e);
+                        }
+                    });
+                    last_preview = Instant::now();
+                }
+            }
+
+            if last_detection.elapsed().as_millis() >= detection_interval_ms {
+                let _ = detection_tx.try_send(raw_frame);
+                last_detection = Instant::now();
+            }
+        }
+    }
+
+    info!("Preview supervisor stopped (camera channel closed)");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Check for --user, --preview, --start-unlocked, --config and --video-file flags
@@ -233,13 +341,16 @@ async fn main() -> Result<()> {
     info!("Initializing debug stream broadcaster...");
     let debug_broadcaster = Arc::new(debug_stream::DebugStreamBroadcaster::new(100));
 
-    // Initialize frame broadcaster only in preview mode
-    let frame_broadcaster = if config.daemon.preview_mode {
-        info!("Initializing frame stream broadcaster (preview mode enabled)...");
-        Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30)))  // Buffer 30 frames
-    } else {
-        None
-    };
+    // Frame broadcaster is ALWAYS created now (system + preview modes alike).
+    //
+    // Binding the frame/debug sockets is cheap (a listener + an idle broadcast
+    // channel with zero subscribers is ~free), so the production system daemon
+    // exposes them too. The EXPENSIVE work — detection + recognition ML
+    // inference — is started on-demand by the subscriber-gated supervisor below,
+    // only while at least one preview client is connected. With nobody watching,
+    // these broadcasters sit idle and the daemon stays at ~0% CPU.
+    info!("Initializing frame stream broadcaster...");
+    let frame_broadcaster = Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30)));  // Buffer 30 frames
 
     let state = DaemonState {
         latest_frame: latest_frame_rx,
@@ -276,31 +387,29 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Start debug stream server (for preview/debug clients) ONLY when explicitly
-    // requested. A production SYSTEM face-auth daemon must NOT bind the debug
-    // socket: it is a preview/dev feature, and binding it on a read-only path
-    // (outside the RuntimeDirectory) is what produced the "Read-only file system"
-    // startup error. The recognition pipeline still drives `debug_broadcaster`
-    // (broadcasts are no-ops with zero subscribers), so gating only the server is
-    // safe. `--user`/dev mode paths the socket under XDG and is unaffected.
-    let debug_server_task = if config.daemon.debug_mode || config.daemon.preview_mode {
+    // Start the debug stream server. The production SYSTEM daemon now binds it
+    // too: its socket lives under the systemd `RuntimeDirectory=doorman`
+    // (`/run/doorman/`, writable via `ReadWritePaths=/run`), so the old
+    // "Read-only file system" failure (which came from a `/run/...`-root path
+    // outside the RuntimeDirectory) does not apply. Binding a listener + an idle
+    // broadcast channel is ~free; the costly ML pipeline is gated separately by
+    // the subscriber supervisor below. `--user` mode paths the socket under XDG.
+    let debug_server_task = {
         let debug_socket_path = config.daemon.debug_socket.clone();
-        info!("Starting debug stream server (debug/preview mode) on {}", debug_socket_path);
+        let debug_bcast = debug_broadcaster.clone();
+        info!("Starting debug stream server on {}", debug_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_broadcaster).await {
+            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_bcast).await {
                 error!("Debug stream server error: {}", e);
             }
         }))
-    } else {
-        // Keep the broadcaster alive for the pipeline; just don't bind a socket.
-        drop(debug_broadcaster);
-        None
     };
 
-    // Start frame stream server (if preview mode enabled)
+    // Start the frame stream server (always bound — see frame_broadcaster note).
     let frame_server_task = if let Some(ref frame_bcast) = frame_broadcaster {
         let frame_socket_path = config.daemon.frame_socket.clone();
         let frame_bcast_clone = frame_bcast.clone();
+        info!("Starting frame stream server on {}", frame_socket_path);
         Some(tokio::spawn(async move {
             if let Err(e) = frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone).await {
                 error!("Frame stream server error: {}", e);
@@ -310,27 +419,48 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Start the always-on detection/recognition pipeline ONLY for the
-    // preview/debug developer flow.
+    // SUBSCRIBER-GATED detection/recognition pipeline.
     //
     // The detection_pipeline (YuNet) + recognition_pipeline (embedding) run ML
     // inference on EVERY frame and exist solely to feed the preview overlay
-    // (doorman-preview) and the debug stream. They are NOT needed for PAM auth:
+    // (doorman-preview: bbox + recognized user + green/red box + confidence) via
+    // the frame & debug streams. They are NOT needed for PAM auth:
     // `ipc::handle_authenticate` reads fresh frames from `state.latest_frame`
     // (published by the always-running camera producer) and runs its OWN
-    // on-demand detect/liveness/embed. Running these pipelines 24/7 in a system
-    // service burned ~40% CPU continuously while idle. In production (no
-    // --preview, debug_mode=false) we skip them entirely; the camera producer
-    // still runs so auth has fresh frames, and its frame channel simply drops
-    // (try_send) since nothing consumes it.
+    // on-demand detect/liveness/embed. Running these pipelines 24/7 burned ~40%
+    // CPU continuously while idle.
+    //
+    // So instead of running them unconditionally, a lightweight supervisor task
+    // watches the frame + debug broadcasters' subscriber counts and:
+    //   - starts the pipeline when the FIRST preview client connects, and
+    //   - stops it (dropping back to ~0% CPU) when the LAST one disconnects.
+    // The camera producer keeps running either way (it is cheap and gives PAM
+    // auth fresh frames); only the ML work is gated.
+    //
+    // `--preview` keeps its eager always-on behavior: it sets preview_mode, which
+    // here means "start the pipeline immediately and never tear it down", so the
+    // developer flow is unchanged.
     let pipeline_handles = if config.daemon.preview_mode {
-        info!("Starting pipeline (preview mode - detection+recognition overlay)");
+        info!("Starting pipeline (preview mode - detection+recognition overlay, always-on)");
         let camera_rx = camera_rx.lock().await.take()
             .expect("camera_rx consumed exactly once by the pipeline");
         let handles = pipeline::start_pipeline(state.clone(), camera_rx).await;
         Some(handles)
     } else {
-        info!("Detection/recognition pipeline disabled (production mode - auth runs on-demand detection)");
+        info!("Detection/recognition pipeline idle (production mode - starts on preview connect, auth runs on-demand detection)");
+        let supervisor_state = state.clone();
+        let frame_bcast_for_sup = frame_broadcaster.clone();
+        let debug_bcast_for_sup = debug_broadcaster.clone();
+        let camera_rx_for_sup = camera_rx.clone();
+        tokio::spawn(async move {
+            run_preview_supervisor(
+                supervisor_state,
+                frame_bcast_for_sup,
+                debug_bcast_for_sup,
+                camera_rx_for_sup,
+            )
+            .await;
+        });
         None
     };
 

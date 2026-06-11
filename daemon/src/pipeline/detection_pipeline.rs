@@ -58,8 +58,19 @@ pub async fn run_detection_pipeline(
         let result = tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(async {
                 if need_embedding {
-                    // Full processing with embedding
-                    ml.process_frame(&*frame).await
+                    // Detect + embed for the live preview overlay. This deliberately
+                    // does NOT run the depth-liveness gate: that gate is ~0.5s on CPU
+                    // and is the AUTH-only anti-spoofing check (ipc::handle_authenticate).
+                    // Preview is a display overlay, not an unlock decision — running
+                    // depth here made it crawl (~2 fps) with rare recognition.
+                    match ml.detect_face(&*frame).await {
+                        Ok(Some(face)) => match ml.extract_embedding(&*frame, &face).await {
+                            Ok(emb) => Ok(Some((face, emb))),
+                            Err(e) => Err(e),
+                        },
+                        Ok(None) => Ok(None),
+                        Err(e) => Err(e),
+                    }
                 } else {
                     // Fast detection only (no embedding)
                     match ml.detect_only(&*frame).await {

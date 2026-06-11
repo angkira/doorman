@@ -22,6 +22,17 @@ required-features = ["preview"]
 name = "doorman"
 path = "src/bin/doorman.rs"
 
+# Depth-liveness SIDECAR. Loads ONLY the Depth-Anything-V2 model on the CPU EP and
+# serves depth-relief scores over a Unix socket, so the daemon can run on a GPU EP
+# (ROCm/CUDA) WITHOUT co-loading a CPU depth session in-process (that mix SEGVs in
+# ORT's global OrtEnv). Built with the CPU `backend-ort` feature; requires `_ort`.
+#   cargo build --release --no-default-features \
+#     --features backend-ort,camera-v4l2,camera-ffmpeg --bin doorman-depthd
+[[bin]]
+name = "doorman-depthd"
+path = "src/bin/doorman_depthd.rs"
+required-features = ["_ort"]
+
 [lib]
 name = "doormand"
 path = "src/lib.rs"

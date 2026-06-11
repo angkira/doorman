@@ -1,0 +1,226 @@
+//! doorman-depthd — depth-liveness SIDECAR.
+//!
+//! WHY THIS EXISTS: loading the Depth-Anything-V2 model on the ONNX Runtime CPU
+//! EP inside the SAME process as the daemon's ROCm/CUDA-EP sessions SEGVs (ORT's
+//! global `OrtEnv` cannot mix a CPU session with GPU sessions). So when the
+//! `doormand` daemon runs on a GPU EP it does NOT load the depth model; instead
+//! it forwards each frame+bbox to THIS process over a Unix socket. This binary
+//! loads ONLY the Depth-Anything-V2 model on the CPU EP, computes the SAME
+//! depth-relief PAD score the in-process gate uses (via the shared
+//! `compute_depth_relief`), and replies with the relief.
+//!
+//! It is built with the CPU `backend-ort` feature regardless of the daemon's EP:
+//!   cargo build --release --no-default-features \
+//!     --features backend-ort,camera-v4l2,camera-ffmpeg --bin doorman-depthd
+//!
+//! USAGE:
+//!   doorman-depthd [--socket <path>] [--models-dir <dir>] [--user] [--config <f>]
+//!
+//! Socket path resolution (first wins):
+//!   --socket arg  >  DOORMAN_DEPTH_SOCKET env  >  runtime-dir default
+//!   (`<dir of daemon command socket>/doorman-depth.sock`, i.e.
+//!    /run/doorman/doorman-depth.sock in system mode, or XDG_RUNTIME_DIR in
+//!    --user mode).
+
+use std::io::{Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use doorman_shared::Config;
+use doormand::ml::depth_ipc;
+
+#[cfg(feature = "_ort")]
+use doormand::ml::ort_backend::{self, DepthSession};
+
+fn arg_value(flag: &str) -> Option<String> {
+    std::env::args().skip_while(|a| a != flag).nth(1)
+}
+
+fn main() -> Result<()> {
+    // Minimal logging (mirrors the daemon's default targets so EP registration
+    // and load errors are visible).
+    let log_level = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "doorman_depthd=info,doormand=info,ort=info".to_string());
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+                .unwrap_or_else(|_| log_level.into()),
+        )
+        .init();
+
+    let user_mode = std::env::args().any(|a| a == "--user");
+    let config_file = arg_value("--config").map(PathBuf::from);
+
+    // Load config (same precedence as the daemon: --config > DOORMAN_CONFIG >
+    // standard locations), so models_dir / socket dir match the daemon.
+    let mut config = if let Some(p) = config_file {
+        Config::load_from(&p).unwrap_or_else(|e| {
+            tracing::warn!("Failed to load --config: {} — using defaults", e);
+            Config::default()
+        })
+    } else if let Ok(p) = std::env::var("DOORMAN_CONFIG") {
+        Config::load_from(&PathBuf::from(p)).unwrap_or_else(|e| {
+            tracing::warn!("Failed to load DOORMAN_CONFIG: {} — using defaults", e);
+            Config::default()
+        })
+    } else {
+        Config::load().unwrap_or_default()
+    };
+
+    // Mirror the daemon's --user path rewriting so the sidecar's socket + models
+    // dir land in the SAME place the daemon expects.
+    if user_mode {
+        if let Some(rt) = std::env::var_os("XDG_RUNTIME_DIR") {
+            config.daemon.socket_path = PathBuf::from(rt)
+                .join("doorman.sock")
+                .to_string_lossy()
+                .to_string();
+        }
+        if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+            config.daemon.data_dir =
+                PathBuf::from(data).join("doorman").to_string_lossy().to_string();
+        } else if let Some(home) = std::env::var_os("HOME") {
+            config.daemon.data_dir = PathBuf::from(home)
+                .join(".local/share/doorman")
+                .to_string_lossy()
+                .to_string();
+        }
+        config.ml.models_dir = PathBuf::from(&config.daemon.data_dir)
+            .join("models")
+            .to_string_lossy()
+            .to_string();
+    }
+
+    if let Some(dir) = arg_value("--models-dir") {
+        config.ml.models_dir = dir;
+    }
+
+    // Resolve the socket path: --socket > DOORMAN_DEPTH_SOCKET > runtime-dir
+    // default derived from the daemon command socket's directory.
+    let default_sock = {
+        let cmd = std::path::Path::new(&config.daemon.socket_path);
+        match cmd.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir
+                .join("doorman-depth.sock")
+                .to_string_lossy()
+                .to_string(),
+            _ => depth_ipc::DEFAULT_DEPTH_SOCKET.to_string(),
+        }
+    };
+    let socket_path = arg_value("--socket")
+        .unwrap_or_else(|| depth_ipc::resolve_socket_path(&default_sock));
+
+    run(&config, &socket_path)
+}
+
+#[cfg(feature = "_ort")]
+fn run(config: &Config, socket_path: &str) -> Result<()> {
+    let models_dir = PathBuf::from(&config.ml.models_dir);
+
+    tracing::info!("doorman-depthd starting (CPU depth sidecar)");
+    tracing::info!("  models_dir: {}", models_dir.display());
+    tracing::info!("  socket:     {}", socket_path);
+
+    // Load ONLY the depth model on the CPU EP. A missing model is NOT fatal: the
+    // sidecar still serves and replies RESP_NONE so the daemon applies its
+    // fail-safe reject (rather than the sidecar silently dying).
+    let depth: Option<DepthSession> = match ort_backend::load_depth_session_cpu(&models_dir, config) {
+        Ok(sess) => {
+            tracing::info!("✓ Loaded Depth-Anything-V2 (CPU EP)");
+            Some(sess)
+        }
+        Err(e) => {
+            tracing::error!("✗ Depth model not loaded: {} — will reply RESP_NONE", e);
+            None
+        }
+    };
+
+    // Bind the socket (remove a stale one first).
+    let _ = std::fs::remove_file(socket_path);
+    if let Some(parent) = std::path::Path::new(socket_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("failed to bind depth socket {}", socket_path))?;
+    tracing::info!("doorman-depthd listening on {}", socket_path);
+
+    for conn in listener.incoming() {
+        match conn {
+            Ok(stream) => {
+                if let Err(e) = handle_conn(stream, depth.as_ref()) {
+                    tracing::warn!("connection error: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("accept error: {}", e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "_ort")]
+fn handle_conn(
+    mut stream: UnixStream,
+    depth: Option<&DepthSession>,
+) -> Result<()> {
+    use doormand::ml::Face;
+
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+
+    // Read the fixed header.
+    let mut hdr = [0u8; depth_ipc::REQ_HEADER_LEN];
+    stream.read_exact(&mut hdr).context("read header")?;
+    let req = match depth_ipc::decode_req_header(&hdr) {
+        Some(r) => r,
+        None => {
+            let _ = stream.write_all(&depth_ipc::encode_resp(depth_ipc::RESP_ERR, 0.0));
+            anyhow::bail!("bad request magic");
+        }
+    };
+
+    // Read the RGB8 body.
+    let n_bytes = (req.width as usize) * (req.height as usize) * 3;
+    let mut pixels = vec![0u8; n_bytes];
+    stream.read_exact(&mut pixels).context("read pixels")?;
+
+    // Reconstruct the image.
+    let img = match image::RgbImage::from_raw(req.width, req.height, pixels) {
+        Some(rgb) => image::DynamicImage::ImageRgb8(rgb),
+        None => {
+            let _ = stream.write_all(&depth_ipc::encode_resp(depth_ipc::RESP_ERR, 0.0));
+            anyhow::bail!("pixel buffer size mismatch");
+        }
+    };
+
+    let face = Face {
+        bbox: req.bbox,
+        confidence: 1.0,
+        frame_dimensions: (req.width, req.height),
+        landmarks: None,
+    };
+
+    let resp = match depth {
+        None => depth_ipc::encode_resp(depth_ipc::RESP_NONE, 0.0),
+        Some(session) => match ort_backend::compute_depth_relief(session, &img, &face) {
+            Ok(relief) => {
+                tracing::debug!("relief={:.4} for bbox={:?}", relief, req.bbox);
+                depth_ipc::encode_resp(depth_ipc::RESP_OK, relief)
+            }
+            Err(e) => {
+                tracing::warn!("depth inference error: {}", e);
+                depth_ipc::encode_resp(depth_ipc::RESP_ERR, 0.0)
+            }
+        },
+    };
+    stream.write_all(&resp).context("write response")?;
+    stream.flush().ok();
+    Ok(())
+}
+
+#[cfg(not(feature = "_ort"))]
+fn run(_config: &Config, _socket_path: &str) -> Result<()> {
+    anyhow::bail!(
+        "doorman-depthd built without an ORT backend. Build with --features backend-ort"
+    )
+}

@@ -74,3 +74,42 @@ pub async fn start_pipeline(
     info!("All pipeline stages started");
     handles
 }
+
+/// Start ONLY the detection + recognition stages, consuming frames from a
+/// caller-owned `detection_rx`.
+///
+/// This is the subscriber-gated entry point: the preview supervisor in `main.rs`
+/// permanently owns the camera receiver and performs the frame fanout itself
+/// (so the camera `Receiver` is never consumed and can be reused across
+/// activate/deactivate cycles). On each activation it calls this to spin up the
+/// ML stages; on deactivation it aborts the returned handles, returning the
+/// daemon to ~0% CPU. The camera producer keeps running throughout.
+pub fn start_detection_recognition(
+    state: &DaemonState,
+    detection_rx: mpsc::Receiver<RawFrame>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::new();
+    let (result_tx, result_rx) = mpsc::channel::<DetectionResult>(30);
+
+    let detection_handle = tokio::spawn(run_detection_pipeline(
+        detection_rx,
+        result_tx,
+        state.ml_pipeline.clone(),
+        Some(state.debug_broadcaster.clone()),
+        state.config.recognition.min_sharpness,
+        state.config.recognition.min_face_area_frac,
+    ));
+    handles.push(detection_handle);
+
+    let recognition_handle = tokio::spawn(run_recognition_pipeline(
+        result_rx,
+        state.storage.clone(),
+        state.debug_broadcaster.clone(),
+        state.system_locked.clone(),
+        state.config.clone(),
+        state.start_time,
+    ));
+    handles.push(recognition_handle);
+
+    handles
+}

@@ -36,12 +36,25 @@ pub struct OrtBackend {
     /// Single MiniFASNetV2-SE liveness model session pool (may be empty: liveness
     /// is NON-FATAL and short-circuits to "pass" when unavailable).
     liveness_pool: Vec<Mutex<Session>>,
-    /// Depth-Anything-V2 session pool for the FATAL depth-relief PAD gate (may be
-    /// empty: when unavailable `depth_relief` returns `Ok(None)` and the auth
-    /// path decides how to treat a missing gate).
-    depth_pool: Vec<Mutex<Session>>,
+    /// Where the FATAL depth-relief PAD gate gets its depth pass from. On a CPU
+    /// device the model is loaded in-process (`InProcess` pool); on a GPU EP
+    /// (rocm/cuda) it would SEGV co-loaded with the GPU sessions, so it is run by
+    /// the out-of-process `doorman-depthd` sidecar over `Sidecar(socket_path)`.
+    depth_source: DepthSource,
     recognizer_pool: Vec<Mutex<Session>>,
     pool_index: AtomicUsize,
+}
+
+/// Source of the depth-relief PAD pass. See `OrtBackend::depth_source`.
+#[cfg(feature = "_ort")]
+enum DepthSource {
+    /// In-process CPU depth sessions (CPU-device daemon). May be empty if the
+    /// model file is missing → `depth_relief` returns `Ok(None)`.
+    InProcess(Vec<Mutex<Session>>),
+    /// Query the out-of-process depth sidecar at this Unix socket path (GPU-device
+    /// daemon). A connect/IO/`RESP_ERR` failure surfaces as `Err`; `RESP_NONE`
+    /// (sidecar has no model) surfaces as `Ok(None)` — same fail-safe semantics.
+    Sidecar(String),
 }
 
 #[cfg(feature = "_ort")]
@@ -98,36 +111,52 @@ impl OrtBackend {
             warn!("✗ Liveness model {} unavailable — liveness will be skipped", liveness_cfg.model_file);
         }
 
-        // Load the Depth-Anything-V2 PAD model pool for the FATAL depth-relief
-        // liveness gate. An empty pool => depth_relief returns Ok(None).
-        let depth_cfg = super::model_config::DepthPadConfig::DEPTH_ANYTHING_V2;
-        let depth_path = models_dir.join(depth_cfg.model_file);
+        // Resolve the FATAL depth-relief PAD source.
+        //
         // The depth transformer is run on the CPU EP even when ml.device=rocm:
         // on the gfx1103 iGPU (ROCm EP, ORT 1.22.x, HSA gfx-version override) the
         // Depth-Anything-V2 graph produces a numerically COMPRESSED depth range
         // (~2.6 vs ~4.9 on CPU), which collapses the genuine-vs-spoof relief
-        // separation and makes the PAD gate unreliable. On the CPU EP the relief
-        // signal separates cleanly (genuine >> spoof). The detector/recognizer
-        // still run on the iGPU; the depth pass (~518x518, embedding frames only)
-        // is the only CPU model. To move it back to the iGPU, validate the depth
-        // numerics on the target ROCm/EP first.
-        let depth_cpu_config = {
-            let mut c = config.clone();
-            c.ml.device = "cpu".to_string();
-            c
-        };
-        let mut depth_pool = Vec::new();
-        for i in 0..pool_size {
-            match Self::load_model(&depth_path, &depth_cpu_config) {
-                Ok(model) => depth_pool.push(Mutex::new(model)),
-                Err(e) => warn!("✗ Failed to load depth-PAD {} session {}: {}", depth_cfg.model_file, i, e),
-            }
-        }
-        if !depth_pool.is_empty() {
-            info!("✓ Loaded {} sessions for depth-PAD model {}", depth_pool.len(), depth_cfg.model_file);
+        // separation. WORSE: co-loading a CPU depth session into the SAME process
+        // as the ROCm-EP sessions SEGVs (ORT's global OrtEnv can't mix CPU + GPU
+        // sessions). So:
+        //   - GPU device (rocm/cuda/gpu): run depth OUT of process via the
+        //     `doorman-depthd` sidecar over a Unix socket (`Sidecar`). The
+        //     detector/recognizer keep running on the iGPU here.
+        //   - CPU device: load depth in-process on the CPU EP as before
+        //     (`InProcess`) — the working, validated path; no sidecar needed.
+        let is_gpu = matches!(config.ml.device.as_str(), "rocm" | "cuda" | "gpu");
+        let depth_source = if is_gpu {
+            let sock = super::depth_ipc::resolve_socket_path(
+                &Self::default_depth_socket_for(config),
+            );
+            info!(
+                "Depth-PAD: GPU device '{}' → using out-of-process depth sidecar at {} (in-process CPU depth co-load would SEGV under the GPU EP)",
+                config.ml.device, sock
+            );
+            DepthSource::Sidecar(sock)
         } else {
-            warn!("✗ Depth-PAD model {} unavailable — depth liveness gate will be skipped", depth_cfg.model_file);
-        }
+            let depth_cfg = super::model_config::DepthPadConfig::DEPTH_ANYTHING_V2;
+            let depth_path = models_dir.join(depth_cfg.model_file);
+            let depth_cpu_config = {
+                let mut c = config.clone();
+                c.ml.device = "cpu".to_string();
+                c
+            };
+            let mut depth_pool = Vec::new();
+            for i in 0..pool_size {
+                match Self::load_model(&depth_path, &depth_cpu_config) {
+                    Ok(model) => depth_pool.push(Mutex::new(model)),
+                    Err(e) => warn!("✗ Failed to load depth-PAD {} session {}: {}", depth_cfg.model_file, i, e),
+                }
+            }
+            if !depth_pool.is_empty() {
+                info!("✓ Loaded {} in-process CPU sessions for depth-PAD model {}", depth_pool.len(), depth_cfg.model_file);
+            } else {
+                warn!("✗ Depth-PAD model {} unavailable — depth liveness gate will be skipped", depth_cfg.model_file);
+            }
+            DepthSource::InProcess(depth_pool)
+        };
 
         // Load recognizer pool
         let recognizer_path = models_dir.join(super::model_config::RecognizerConfig::EDGEFACE.model_file);
@@ -156,12 +185,77 @@ impl OrtBackend {
         Ok(Self {
             detector_pool,
             liveness_pool,
-            depth_pool,
+            depth_source,
             recognizer_pool,
             pool_index: AtomicUsize::new(0),
         })
     }
+
+    /// Compiled-default depth sidecar socket path for this config, used when the
+    /// `DOORMAN_DEPTH_SOCKET` env override is unset. In `--user` mode the daemon
+    /// rewrites socket paths under `XDG_RUNTIME_DIR`; mirror that for the depth
+    /// socket by deriving it from the command socket's directory so both live in
+    /// the same runtime dir. Falls back to the system default otherwise.
+    fn default_depth_socket_for(config: &Config) -> String {
+        let cmd_sock = std::path::Path::new(&config.daemon.socket_path);
+        if let Some(dir) = cmd_sock.parent() {
+            if !dir.as_os_str().is_empty() {
+                return dir
+                    .join("doorman-depth.sock")
+                    .to_string_lossy()
+                    .to_string();
+            }
+        }
+        super::depth_ipc::DEFAULT_DEPTH_SOCKET.to_string()
+    }
     
+    /// Query the depth sidecar for one frame+bbox over its Unix socket.
+    ///
+    /// Returns `Ok(Some(relief))` on `RESP_OK`, `Ok(None)` on `RESP_NONE` (sidecar
+    /// has no model loaded → same as the in-process missing-model case), and
+    /// `Err` on connect/IO/protocol/`RESP_ERR` failures. The caller
+    /// (`MLPipeline::liveness_gate`) treats both `Ok(None)` and `Err` as a
+    /// fail-safe REJECT when liveness is enabled, so an unreachable sidecar can
+    /// never silently bypass the PAD gate.
+    fn query_depth_sidecar(
+        sock: &str,
+        image: &DynamicImage,
+        face: &Face,
+    ) -> Result<Option<f32>> {
+        use super::depth_ipc;
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let (w, h) = image.dimensions();
+        let rgb = image.to_rgb8();
+
+        let mut stream = UnixStream::connect(sock)
+            .with_context(|| format!("depth sidecar unreachable at {}", sock))?;
+        // Bound the round-trip so a wedged sidecar can't hang an auth attempt.
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+
+        let header = depth_ipc::encode_req_header(w, h, face.bbox);
+        stream
+            .write_all(&header)
+            .context("depth sidecar: write header failed")?;
+        stream
+            .write_all(rgb.as_raw())
+            .context("depth sidecar: write pixels failed")?;
+        stream.flush().ok();
+
+        let mut resp = [0u8; depth_ipc::RESP_LEN];
+        stream
+            .read_exact(&mut resp)
+            .context("depth sidecar: read response failed")?;
+        let (status, relief) = depth_ipc::decode_resp(&resp);
+        match status {
+            depth_ipc::RESP_OK => Ok(Some(relief)),
+            depth_ipc::RESP_NONE => Ok(None),
+            _ => Err(anyhow!("depth sidecar reported an inference error (status={})", status)),
+        }
+    }
+
     fn get_next_session<'a>(&'a self, pool: &'a [Mutex<Session>]) -> Option<&'a Mutex<Session>> {
         if pool.is_empty() {
             return None;
@@ -303,6 +397,147 @@ impl OrtBackend {
 
         Ok(session)
     }
+}
+
+/// A loaded depth session, mutex-guarded for `&self` use. Exposed so the depth
+/// sidecar binary can hold one without naming the `ort` crate directly.
+/// (Consumed by the `doorman-depthd` bin, not the lib — hence `allow(dead_code)`.)
+#[cfg(feature = "_ort")]
+#[allow(dead_code)]
+pub type DepthSession = Mutex<Session>;
+
+/// Run the Depth-Anything-V2 depth pass on `session` for `image` and compute the
+/// face-region depth-relief PAD score for `face`.
+///
+/// This is the SINGLE source of truth for the depth-relief computation, shared by
+/// the in-process `OrtBackend::depth_relief` (CPU-device daemon) and the
+/// out-of-process depth sidecar (`doorman-depthd`, used when the daemon runs on a
+/// GPU EP so the CPU depth model is never co-loaded with ROCm/CUDA sessions in the
+/// same `OrtEnv` — that mix SEGVs).
+///
+/// Preprocessing + relief math MUST match `DepthPadConfig::DEPTH_ANYTHING_V2`:
+/// stretch-resize to `input_size`², ImageNet-normalize, NCHW `pixel_values`,
+/// `relief = std(face_depth) / (depth_range + eps)` clamped to `[0,1]`.
+#[cfg(feature = "_ort")]
+pub fn compute_depth_relief(
+    session: &Mutex<Session>,
+    image: &DynamicImage,
+    face: &Face,
+) -> Result<f32> {
+    use super::model_config::DepthPadConfig;
+
+    let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
+    let size = cfg.input_size;
+
+    // Stretch-resize the whole frame to the square network input (RGB).
+    let resized = image.resize_exact(size, size, image::imageops::FilterType::Triangle);
+    let rgb = resized.to_rgb8();
+
+    // ImageNet-normalized NCHW planar float32.
+    let n = (size * size) as usize;
+    let mut input = vec![0.0f32; 3 * n];
+    let (r_off, g_off, b_off) = (0, n, 2 * n);
+    for (i, px) in rgb.pixels().enumerate() {
+        input[r_off + i] = ((px[0] as f32 / 255.0) - cfg.norm_mean[0]) / cfg.norm_std[0];
+        input[g_off + i] = ((px[1] as f32 / 255.0) - cfg.norm_mean[1]) / cfg.norm_std[1];
+        input[b_off + i] = ((px[2] as f32 / 255.0) - cfg.norm_mean[2]) / cfg.norm_std[2];
+    }
+
+    let input_tensor = Value::from_array((
+        [1usize, 3, size as usize, size as usize],
+        input,
+    ))
+    .map_err(|e| anyhow!("ORT error: {}", e))?;
+
+    let mut lock = session.lock().unwrap();
+    // The model's input is named `pixel_values`.
+    let outputs = lock
+        .run(ort::inputs!["pixel_values" => input_tensor])
+        .map_err(|e| anyhow!("ORT error: {}", e))?;
+    let (shape, depth_view) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| anyhow!("ORT error: {}", e))?;
+    // Copy out before releasing the session lock (the view borrows `outputs`).
+    let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+    let depth: Vec<f32> = depth_view.to_vec();
+    drop(outputs);
+    drop(lock);
+
+    let (d_h, d_w) = match dims.as_slice() {
+        [_, h, w] => (*h, *w),
+        [h, w] => (*h, *w),
+        _ => return Err(anyhow!("Unexpected depth output shape {:?}", dims)),
+    };
+    if d_h == 0 || d_w == 0 || depth.len() < d_h * d_w {
+        return Err(anyhow!("Depth output too small: shape {:?} len {}", dims, depth.len()));
+    }
+
+    // Global depth range over the whole map.
+    let mut gmin = f32::INFINITY;
+    let mut gmax = f32::NEG_INFINITY;
+    for &v in depth.iter() {
+        if v < gmin { gmin = v; }
+        if v > gmax { gmax = v; }
+    }
+    let global_range = (gmax - gmin) + 1e-8;
+
+    // Map the normalized face bbox into depth-map pixel coordinates. The depth
+    // map and the source frame have the same aspect (both stretched independently
+    // to a square), so normalized coords map linearly.
+    let (nx, ny, nw, nh) = face.bbox;
+    let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
+    let y0 = ((ny.clamp(0.0, 1.0)) * d_h as f32) as usize;
+    let x1 = (((nx + nw).clamp(0.0, 1.0)) * d_w as f32).ceil() as usize;
+    let y1 = (((ny + nh).clamp(0.0, 1.0)) * d_h as f32).ceil() as usize;
+    let x1 = x1.min(d_w);
+    let y1 = y1.min(d_h);
+
+    // Collect the face-region depth values; fall back to whole map if empty.
+    let mut face_vals: Vec<f32> = Vec::new();
+    if x1 > x0 && y1 > y0 {
+        for y in y0..y1 {
+            let row = y * d_w;
+            for x in x0..x1 {
+                face_vals.push(depth[row + x]);
+            }
+        }
+    }
+    let face_vals = if face_vals.is_empty() {
+        depth.iter().copied().collect::<Vec<f32>>()
+    } else {
+        face_vals
+    };
+
+    // std(face_depth).
+    let count = face_vals.len() as f32;
+    let mean = face_vals.iter().sum::<f32>() / count;
+    let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
+    let std = var.sqrt();
+
+    let relief = (std / global_range).clamp(0.0, 1.0);
+    tracing::debug!(
+        "Depth-PAD relief={:.4} (face_std={:.4} global_range={:.4} bbox_px=({},{},{},{}) depth_grid={}x{})",
+        relief, std, global_range, x0, y0, x1, y1, d_w, d_h
+    );
+    Ok(relief)
+}
+
+/// Build a single CPU-EP Depth-Anything-V2 session from `models_dir`.
+///
+/// Used by the depth sidecar (`doorman-depthd`): it loads ONLY the depth model on
+/// the CPU EP, so it never co-loads a CPU session into the same process as the
+/// daemon's ROCm/CUDA sessions. Returns the model path that was attempted in the
+/// error so the operator can see what was missing.
+#[cfg(feature = "_ort")]
+#[allow(dead_code)] // used by the doorman-depthd bin, not the daemon lib path
+pub fn load_depth_session_cpu(models_dir: &Path, config: &Config) -> Result<DepthSession> {
+    let depth_cfg = super::model_config::DepthPadConfig::DEPTH_ANYTHING_V2;
+    let depth_path = models_dir.join(depth_cfg.model_file);
+    let mut cpu_config = config.clone();
+    cpu_config.ml.device = "cpu".to_string();
+    let session = OrtBackend::load_model(&depth_path, &cpu_config)
+        .with_context(|| format!("Failed to load depth model {:?}", depth_path))?;
+    Ok(Mutex::new(session))
 }
 
 #[cfg(feature = "_ort")]
@@ -580,101 +815,19 @@ impl MLBackend for OrtBackend {
     ///
     /// Returns `Ok(None)` if no depth model is loaded.
     async fn depth_relief(&self, image: &DynamicImage, face: &Face) -> Result<Option<f32>> {
-        use super::model_config::DepthPadConfig;
-
-        let session = match self.get_next_session(&self.depth_pool) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
-        let size = cfg.input_size;
-
-        // Stretch-resize the whole frame to the square network input (RGB).
-        let resized = image.resize_exact(size, size, image::imageops::FilterType::Triangle);
-        let rgb = resized.to_rgb8();
-
-        // ImageNet-normalized NCHW planar float32.
-        let n = (size * size) as usize;
-        let mut input = vec![0.0f32; 3 * n];
-        let (r_off, g_off, b_off) = (0, n, 2 * n);
-        for (i, px) in rgb.pixels().enumerate() {
-            input[r_off + i] = ((px[0] as f32 / 255.0) - cfg.norm_mean[0]) / cfg.norm_std[0];
-            input[g_off + i] = ((px[1] as f32 / 255.0) - cfg.norm_mean[1]) / cfg.norm_std[1];
-            input[b_off + i] = ((px[2] as f32 / 255.0) - cfg.norm_mean[2]) / cfg.norm_std[2];
-        }
-
-        let input_tensor = ort_try!(Value::from_array((
-            [1usize, 3, size as usize, size as usize],
-            input
-        )));
-        let mut lock = session.lock().unwrap();
-        // The model's input is named `pixel_values`.
-        let outputs = ort_try!(lock.run(ort::inputs!["pixel_values" => input_tensor]));
-        let (shape, depth_view) = ort_try!(outputs[0].try_extract_tensor::<f32>());
-        // Copy out before releasing the session lock (the view borrows `outputs`).
-        let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
-        let depth: Vec<f32> = depth_view.to_vec();
-        drop(outputs);
-        drop(lock);
-
-        let (d_h, d_w) = match dims.as_slice() {
-            [_, h, w] => (*h, *w),
-            [h, w] => (*h, *w),
-            _ => return Err(anyhow!("Unexpected depth output shape {:?}", dims)),
-        };
-        if d_h == 0 || d_w == 0 || depth.len() < d_h * d_w {
-            return Err(anyhow!("Depth output too small: shape {:?} len {}", dims, depth.len()));
-        }
-
-        // Global depth range over the whole map.
-        let mut gmin = f32::INFINITY;
-        let mut gmax = f32::NEG_INFINITY;
-        for &v in depth.iter() {
-            if v < gmin { gmin = v; }
-            if v > gmax { gmax = v; }
-        }
-        let global_range = (gmax - gmin) + 1e-8;
-
-        // Map the normalized face bbox into depth-map pixel coordinates. The
-        // depth map and the source frame have the same aspect (both stretched
-        // independently to a square), so normalized coords map linearly.
-        let (nx, ny, nw, nh) = face.bbox;
-        let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
-        let y0 = ((ny.clamp(0.0, 1.0)) * d_h as f32) as usize;
-        let x1 = (((nx + nw).clamp(0.0, 1.0)) * d_w as f32).ceil() as usize;
-        let y1 = (((ny + nh).clamp(0.0, 1.0)) * d_h as f32).ceil() as usize;
-        let x1 = x1.min(d_w);
-        let y1 = y1.min(d_h);
-
-        // Collect the face-region depth values; fall back to whole map if empty.
-        let mut face_vals: Vec<f32> = Vec::new();
-        if x1 > x0 && y1 > y0 {
-            for y in y0..y1 {
-                let row = y * d_w;
-                for x in x0..x1 {
-                    face_vals.push(depth[row + x]);
-                }
+        match &self.depth_source {
+            // CPU device: run the shared depth-relief computation in-process.
+            DepthSource::InProcess(pool) => {
+                let session = match self.get_next_session(pool) {
+                    Some(s) => s,
+                    None => return Ok(None),
+                };
+                let relief = compute_depth_relief(session, image, face)?;
+                Ok(Some(relief))
             }
+            // GPU device: delegate the depth pass to the out-of-process sidecar.
+            DepthSource::Sidecar(sock) => Self::query_depth_sidecar(sock, image, face),
         }
-        let face_vals = if face_vals.is_empty() {
-            depth.iter().copied().collect::<Vec<f32>>()
-        } else {
-            face_vals
-        };
-
-        // std(face_depth).
-        let count = face_vals.len() as f32;
-        let mean = face_vals.iter().sum::<f32>() / count;
-        let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
-        let std = var.sqrt();
-
-        let relief = (std / global_range).clamp(0.0, 1.0);
-        tracing::debug!(
-            "Depth-PAD relief={:.4} (face_std={:.4} global_range={:.4} bbox_px=({},{},{},{}) depth_grid={}x{})",
-            relief, std, global_range, x0, y0, x1, y1, d_w, d_h
-        );
-        Ok(Some(relief))
     }
 
     /// Extract a 512-d face embedding using the EdgeFace-S recognizer.
