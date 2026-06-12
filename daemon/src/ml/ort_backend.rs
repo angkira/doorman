@@ -531,12 +531,41 @@ pub fn compute_depth_relief(
 #[cfg(feature = "_ort")]
 #[allow(dead_code)] // used by the doorman-depthd bin, not the daemon lib path
 pub fn load_depth_session_cpu(models_dir: &Path, config: &Config) -> Result<DepthSession> {
+    load_depth_session_for_ep(models_dir, config, "cpu")
+}
+
+/// Build a single ROCm-EP Depth-Anything-V2 session from `models_dir`.
+///
+/// Used by the depth sidecar (`doorman-depthd`) on ROCm installs so the depth
+/// pass runs on the iGPU instead of the CPU, keeping the CPU light during auth.
+///
+/// SAFETY (the whole reason a SIDECAR exists): this loads the depth model on the
+/// ROCm EP in a SEPARATE PROCESS from the daemon. The known SEGV was mixing a CPU
+/// depth session with ROCm sessions in ONE `OrtEnv`; a pure-ROCm process (this
+/// one) is fine, as is the daemon's pure-ROCm process. Two distinct processes
+/// each with their own ROCm sessions share the iGPU at the HIP/driver level.
+///
+/// Requires the `backend-ort-rocm` feature (else `load_model` never registers the
+/// ROCm EP and ORT silently falls back to CPU — which would defeat the purpose).
+#[cfg(feature = "_ort")]
+#[allow(dead_code)] // used by the doorman-depthd bin, not the daemon lib path
+pub fn load_depth_session_rocm(models_dir: &Path, config: &Config) -> Result<DepthSession> {
+    load_depth_session_for_ep(models_dir, config, "rocm")
+}
+
+/// Shared depth-session loader: load ONLY the depth model with `config` rewritten
+/// to target `device`. The EP is actually registered inside `load_model` (gated on
+/// the compiled `backend-ort-*` feature), so passing `device="rocm"` only has an
+/// effect when the binary was built with `backend-ort-rocm`.
+#[cfg(feature = "_ort")]
+#[allow(dead_code)]
+fn load_depth_session_for_ep(models_dir: &Path, config: &Config, device: &str) -> Result<DepthSession> {
     let depth_cfg = super::model_config::DepthPadConfig::DEPTH_ANYTHING_V2;
     let depth_path = models_dir.join(depth_cfg.model_file);
-    let mut cpu_config = config.clone();
-    cpu_config.ml.device = "cpu".to_string();
-    let session = OrtBackend::load_model(&depth_path, &cpu_config)
-        .with_context(|| format!("Failed to load depth model {:?}", depth_path))?;
+    let mut ep_config = config.clone();
+    ep_config.ml.device = device.to_string();
+    let session = OrtBackend::load_model(&depth_path, &ep_config)
+        .with_context(|| format!("Failed to load depth model {:?} on {} EP", depth_path, device))?;
     Ok(Mutex::new(session))
 }
 

@@ -9,9 +9,26 @@
 //! depth-relief PAD score the in-process gate uses (via the shared
 //! `compute_depth_relief`), and replies with the relief.
 //!
-//! It is built with the CPU `backend-ort` feature regardless of the daemon's EP:
-//!   cargo build --release --no-default-features \
-//!     --features backend-ort,camera-v4l2,camera-ffmpeg --bin doorman-depthd
+//! EXECUTION PROVIDER (depth EP):
+//!   The depth session runs on the CPU EP by DEFAULT (portable, zero system deps).
+//!   On a ROCm install it can instead run on the iGPU (ROCm EP) so the CPU stays
+//!   light during auth. The EP is chosen at RUNTIME by the `DOORMAN_DEPTH_EP` env
+//!   var (or `--depth-ep <ep>` CLI flag): `cpu` (default) | `rocm`.
+//!
+//!   A separate ROCm process for depth is SAFE: the SEGV the sidecar exists to
+//!   avoid was a CPU depth session co-loaded with the daemon's ROCm sessions in
+//!   ONE `OrtEnv`. This sidecar is a DISTINCT process loading ONLY ROCm sessions;
+//!   the daemon is a distinct process loading ONLY ROCm sessions — two pure-ROCm
+//!   processes share the iGPU at the HIP/driver level. ROCm depth requires a build
+//!   WITH the ROCm EP compiled in:
+//!     cargo build --release --no-default-features \
+//!       --features backend-ort-rocm,camera-v4l2,camera-ffmpeg --bin doorman-depthd
+//!   Default CPU build (any platform):
+//!     cargo build --release --no-default-features \
+//!       --features backend-ort,camera-v4l2,camera-ffmpeg --bin doorman-depthd
+//!   If `DOORMAN_DEPTH_EP=rocm` but the binary was built without `backend-ort-rocm`,
+//!   the ROCm EP is never registered and the session silently falls back to CPU —
+//!   so set the EP env AND build with the matching feature.
 //!
 //! USAGE:
 //!   doorman-depthd [--socket <path>] [--models-dir <dir>] [--user] [--config <f>]
@@ -111,23 +128,41 @@ fn main() -> Result<()> {
     let socket_path = arg_value("--socket")
         .unwrap_or_else(|| depth_ipc::resolve_socket_path(&default_sock));
 
-    run(&config, &socket_path)
+    // Depth EP: --depth-ep flag > DOORMAN_DEPTH_EP env > "cpu" default.
+    let depth_ep = arg_value("--depth-ep")
+        .or_else(|| std::env::var("DOORMAN_DEPTH_EP").ok())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "cpu".to_string());
+
+    run(&config, &socket_path, &depth_ep)
 }
 
 #[cfg(feature = "_ort")]
-fn run(config: &Config, socket_path: &str) -> Result<()> {
+fn run(config: &Config, socket_path: &str, depth_ep: &str) -> Result<()> {
     let models_dir = PathBuf::from(&config.ml.models_dir);
 
-    tracing::info!("doorman-depthd starting (CPU depth sidecar)");
+    let want_rocm = matches!(depth_ep, "rocm" | "gpu");
+    tracing::info!(
+        "doorman-depthd starting (depth EP: {})",
+        if want_rocm { "rocm/iGPU" } else { "cpu" }
+    );
     tracing::info!("  models_dir: {}", models_dir.display());
     tracing::info!("  socket:     {}", socket_path);
 
-    // Load ONLY the depth model on the CPU EP. A missing model is NOT fatal: the
-    // sidecar still serves and replies RESP_NONE so the daemon applies its
+    // Load ONLY the depth model on the selected EP. A missing model is NOT fatal:
+    // the sidecar still serves and replies RESP_NONE so the daemon applies its
     // fail-safe reject (rather than the sidecar silently dying).
-    let depth: Option<DepthSession> = match ort_backend::load_depth_session_cpu(&models_dir, config) {
+    let load_result = if want_rocm {
+        ort_backend::load_depth_session_rocm(&models_dir, config)
+    } else {
+        ort_backend::load_depth_session_cpu(&models_dir, config)
+    };
+    let depth: Option<DepthSession> = match load_result {
         Ok(sess) => {
-            tracing::info!("✓ Loaded Depth-Anything-V2 (CPU EP)");
+            tracing::info!(
+                "✓ Loaded Depth-Anything-V2 ({} EP)",
+                if want_rocm { "ROCm" } else { "CPU" }
+            );
             Some(sess)
         }
         Err(e) => {
@@ -219,7 +254,7 @@ fn handle_conn(
 }
 
 #[cfg(not(feature = "_ort"))]
-fn run(_config: &Config, _socket_path: &str) -> Result<()> {
+fn run(_config: &Config, _socket_path: &str, _depth_ep: &str) -> Result<()> {
     anyhow::bail!(
         "doorman-depthd built without an ORT backend. Build with --features backend-ort"
     )

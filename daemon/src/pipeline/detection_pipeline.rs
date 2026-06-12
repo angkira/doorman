@@ -91,6 +91,7 @@ pub async fn run_detection_pipeline(
                 let _ = result_tx.try_send(DetectionResult {
                     sequence, face: None, embedding: None,
                     processing_time: start.elapsed(), frame_width: camera_width, frame_height: camera_height,
+                    frame: None, ml_face: None,
                 });
                 continue;
             }
@@ -124,6 +125,8 @@ pub async fn run_detection_pipeline(
                     processing_time: start.elapsed(),
                     frame_width: camera_width,
                     frame_height: camera_height,
+                    frame: None,
+                    ml_face: None,
                 });
                 continue;
             }
@@ -137,6 +140,8 @@ pub async fn run_detection_pipeline(
                     processing_time: start.elapsed(),
                     frame_width: camera_width,
                     frame_height: camera_height,
+                    frame: None,
+                    ml_face: None,
                 });
                 continue;
             }
@@ -222,6 +227,11 @@ pub async fn run_detection_pipeline(
         }
 
         // We have a face bbox (and possibly a quality-passed embedding).
+        // Carry the source frame + full ML face (landmarks) ONLY on quality-passed
+        // embedding frames, so the recognition stage can run the FATAL depth
+        // liveness gate before a proactive unlock (Stage B). Detect-only / dropped
+        // frames carry neither and can never trigger an unlock.
+        let carry_liveness = embedding.as_ref().map_or(false, |e| !e.is_empty());
         let (camera_width, camera_height) = camera_dimensions;
         let _ = result_tx.try_send(DetectionResult {
             sequence,
@@ -233,6 +243,8 @@ pub async fn run_detection_pipeline(
             processing_time,
             frame_width: camera_width,
             frame_height: camera_height,
+            frame: if carry_liveness { Some(frame_for_quality.clone()) } else { None },
+            ml_face: if carry_liveness { Some(face.clone()) } else { None },
         });
     }
 

@@ -165,6 +165,21 @@ pub struct AuthConfig {
     /// (no spoof passes) with margin. Only used when `liveness_enabled = true`.
     #[serde(default = "default_liveness_depth_threshold")]
     pub liveness_depth_threshold: f32,
+
+    /// Proactive auto-unlock: when `true`, the lock-gated recognition pipeline
+    /// (which runs only while the screen is locked and the display is on) will
+    /// call logind `Session.Unlock()` itself once a face is RECOGNIZED at or
+    /// above `similarity_threshold` AND passes the FATAL depth-liveness gate —
+    /// no button press required. After a successful unlock it disarms until the
+    /// next `Lock` signal (one-shot, no repeat-unlock spam).
+    ///
+    /// Default: `false` (safe for the public repo). When `false`, the lock
+    /// supervisor still GATES the pipeline on lock/idle but never unlocks; the
+    /// password / PAM path remains the only unlock trigger. Enabling it also
+    /// requires a polkit rule granting the daemon user the
+    /// `org.freedesktop.login1.unlock-sessions` action (installed separately).
+    #[serde(default = "default_proactive_unlock")]
+    pub proactive_unlock: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +297,7 @@ fn default_device() -> String { "cpu".to_string() }
 fn default_similarity_threshold() -> f32 { 0.4 }
 fn default_auth_frames() -> usize { 10 }
 fn default_liveness_enabled() -> bool { true }
+fn default_proactive_unlock() -> bool { false }
 // Calibrated through the daemon at 1024x720 on in-situ genuine vs screen-replay
 // captures (see .session/2026-06-08_liveness-wired.md). On the working
 // (CPU-EP) depth path the relief separates cleanly: genuine 0.068..0.245
@@ -367,6 +383,7 @@ impl Default for AuthConfig {
             timeout_secs: default_timeout_secs(),
             liveness_enabled: default_liveness_enabled(),
             liveness_depth_threshold: default_liveness_depth_threshold(),
+            proactive_unlock: default_proactive_unlock(),
         }
     }
 }

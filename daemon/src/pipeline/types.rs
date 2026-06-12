@@ -26,4 +26,12 @@ pub struct DetectionResult {
     pub processing_time: Duration,
     pub frame_width: u32,
     pub frame_height: u32,
+    /// The source frame, carried through ONLY on quality-passed embedding frames
+    /// so the recognition stage can re-run the FATAL depth-liveness gate before a
+    /// proactive unlock (Stage B). `None` on detect-only / no-face frames. Kept
+    /// Arc-cheap; not used by the preview overlay path.
+    pub frame: Option<Arc<DynamicImage>>,
+    /// The full ML-backend face (with landmarks) for the same frame, needed by
+    /// `liveness_gate` / depth relief. `None` unless `frame` is `Some`.
+    pub ml_face: Option<crate::ml::Face>,
 }

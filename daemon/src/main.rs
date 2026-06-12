@@ -5,6 +5,7 @@ use doormand::camera;
 mod debug_stream;
 mod frame_stream;
 mod ipc;
+mod lock_supervisor;
 mod ml;
 mod pipeline;
 mod storage;
@@ -59,6 +60,12 @@ async fn run_preview_supervisor(
     frame_broadcaster: Option<Arc<frame_stream::FrameStreamBroadcaster>>,
     debug_broadcaster: Arc<debug_stream::DebugStreamBroadcaster>,
     camera_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<pipeline::RawFrame>>>>,
+    // Lock-supervisor gate: `armed = LockedHint && !IdleHint`. The pipeline runs
+    // when a preview client is connected OR the session is armed (screen locked,
+    // display on). `None` in --user/dev mode (no lock-gating there).
+    armed_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    // Stage B proactive-unlock plumbing, forwarded to the recognition pipeline.
+    unlock_ctx: Option<pipeline::UnlockContext>,
 ) {
     use std::time::Instant;
 
@@ -81,7 +88,7 @@ async fn run_preview_supervisor(
     let mut last_detection = Instant::now();
     let mut last_preview = Instant::now();
 
-    info!("Preview supervisor started (idle; pipeline starts on preview connect)");
+    info!("Preview supervisor started (idle; pipeline starts on preview connect or screen lock)");
 
     while let Some(raw_frame) = camera_rx.recv().await {
         // Combined live subscriber count across both preview sockets. A preview
@@ -93,23 +100,31 @@ async fn run_preview_supervisor(
             .unwrap_or(0)
             + debug_broadcaster.receiver_count();
 
-        match (subscribers > 0, active.is_some()) {
-            // First subscriber appeared -> start the ML pipeline.
+        // Lock-supervisor gate (system mode only). The pipeline must run if a
+        // preview client is connected OR the session is armed (locked && !idle),
+        // and stop only when BOTH are false. The preview gate is unchanged; this
+        // ORs the lock gate on top of it.
+        let armed = armed_rx.as_ref().map(|rx| *rx.borrow()).unwrap_or(false);
+        let want_pipeline = subscribers > 0 || armed;
+
+        match (want_pipeline, active.is_some()) {
+            // Either gate just opened -> start the ML pipeline.
             (true, false) => {
                 info!(
-                    "Preview client connected ({} subscriber(s)) -> starting detection/recognition pipeline",
-                    subscribers
+                    "Pipeline gate opened (preview subscribers={}, armed={}) -> starting detection/recognition pipeline",
+                    subscribers, armed
                 );
                 let (detection_tx, detection_rx) =
                     tokio::sync::mpsc::channel::<pipeline::RawFrame>(10);
-                let handles = pipeline::start_detection_recognition(&state, detection_rx);
+                let handles =
+                    pipeline::start_detection_recognition(&state, detection_rx, unlock_ctx.clone());
                 active = Some((detection_tx, handles));
                 last_detection = Instant::now() - std::time::Duration::from_millis(detection_interval_ms as u64);
                 last_preview = Instant::now() - std::time::Duration::from_millis(preview_interval_ms as u64);
             }
-            // Last subscriber left -> tear the ML pipeline down (back to ~0% CPU).
+            // Both gates closed -> tear the ML pipeline down (back to ~0% CPU).
             (false, true) => {
-                info!("Last preview client disconnected -> stopping detection/recognition pipeline (idle)");
+                info!("Pipeline gate closed (no preview clients, disarmed) -> stopping detection/recognition pipeline (idle)");
                 if let Some((detection_tx, handles)) = active.take() {
                     drop(detection_tx); // closes detection channel
                     for h in handles {
@@ -448,6 +463,35 @@ async fn main() -> Result<()> {
         Some(handles)
     } else {
         info!("Detection/recognition pipeline idle (production mode - starts on preview connect, auth runs on-demand detection)");
+
+        // Lock supervisor (SYSTEM-daemon mode only). Connects to logind on the
+        // system bus, resolves the active graphical seat0 session, and exposes
+        // `armed = LockedHint && !IdleHint` plus a lock-generation counter and an
+        // `Unlocker` handle. Robust by construction: any failure (no bus, no
+        // session) yields `armed=false` and `unlocker=None` without crashing.
+        //
+        // We skip it in `--user`/dev mode: that path targets a developer's own
+        // session and has no need to lock-gate or proactively unlock.
+        let (armed_rx, unlock_ctx) = if config.daemon.user_mode {
+            (None, None)
+        } else {
+            let sup = lock_supervisor::spawn().await;
+            // Build the Stage-B unlock context only when proactive unlock is
+            // enabled AND a session was actually resolved (so we have an Unlocker).
+            // When disabled, the pipeline is still lock-GATED via `armed_rx`; it
+            // just never calls Unlock (PAM remains the unlock path).
+            let unlock_ctx = if config.authentication.proactive_unlock {
+                sup.unlocker.clone().map(|unlocker| pipeline::UnlockContext {
+                    unlocker,
+                    armed_rx: sup.armed_rx.clone(),
+                    lock_gen_rx: sup.lock_gen_rx.clone(),
+                })
+            } else {
+                None
+            };
+            (Some(sup.armed_rx.clone()), unlock_ctx)
+        };
+
         let supervisor_state = state.clone();
         let frame_bcast_for_sup = frame_broadcaster.clone();
         let debug_bcast_for_sup = debug_broadcaster.clone();
@@ -458,6 +502,8 @@ async fn main() -> Result<()> {
                 frame_bcast_for_sup,
                 debug_bcast_for_sup,
                 camera_rx_for_sup,
+                armed_rx,
+                unlock_ctx,
             )
             .await;
         });

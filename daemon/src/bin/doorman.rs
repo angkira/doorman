@@ -135,6 +135,12 @@ enum Command {
         /// Do not touch PAM at all (service + enroll only).
         #[arg(long, conflicts_with_all = ["screen_unlock", "login", "sudo"])]
         no_pam: bool,
+        /// HIGH-TRUST opt-in: grant the `doorman` user the logind unlock-sessions
+        /// polkit action AND set proactive_unlock=true, so a recognized face (with
+        /// liveness PASS) unlocks the session WITHOUT a keypress. Password remains a
+        /// fallback. Default OFF (proactive unlock off; PAM is the unlock path).
+        #[arg(long)]
+        auto_unlock: bool,
     },
     /// Uninstall doorman: remove PAM lines, service, and unit (idempotent).
     Uninstall {
@@ -218,7 +224,8 @@ fn main() {
             login,
             sudo,
             no_pam,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *login, *sudo, *no_pam),
+            auto_unlock,
+        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *login, *sudo, *no_pam, *auto_unlock),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
     };
 
@@ -247,6 +254,7 @@ fn cmd_install(
     login: bool,
     sudo: bool,
     no_pam: bool,
+    auto_unlock: bool,
 ) -> Result<(), CliError> {
     let ep = if cpu {
         EpChoice::Cpu
@@ -269,6 +277,7 @@ fn cmd_install(
         assume_yes: yes,
         ep,
         pam_scope,
+        auto_unlock,
     })
     .map_err(CliError::new)
 }

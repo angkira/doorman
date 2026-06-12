@@ -20,8 +20,29 @@ pub use recognition_pipeline::run_recognition_pipeline;
 pub use types::{RawFrame, DetectionResult};
 
 use crate::DaemonState;
-use tokio::sync::mpsc;
+use crate::lock_supervisor::Unlocker;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
+
+/// Plumbing handed from the lock supervisor (system mode) to the recognition
+/// stage so it can drive the Stage-B proactive unlock. `None` in --user/dev mode
+/// (no lock-gating / no proactive unlock there).
+///
+/// Cheap to clone: `Unlocker` holds a shared zbus connection + the session path,
+/// and the two watch receivers are cheap handles. A fresh clone is handed to the
+/// recognition task on every pipeline (re)start.
+#[derive(Clone)]
+pub struct UnlockContext {
+    /// Calls logind `Session.Unlock()` on the resolved session.
+    pub unlocker: Unlocker,
+    /// `armed = LockedHint && !IdleHint`. The unlock side-effect only fires
+    /// while armed.
+    pub armed_rx: watch::Receiver<bool>,
+    /// Monotonic lock generation, bumped on every `Lock` signal. The recognition
+    /// one-shot uses it to re-arm after a fresh lock (so a single lock yields at
+    /// most one unlock attempt sequence).
+    pub lock_gen_rx: watch::Receiver<u64>,
+}
 
 /// Start all pipeline stages
 /// Returns handles to all spawned tasks for graceful shutdown
@@ -68,6 +89,9 @@ pub async fn start_pipeline(
         state.system_locked.clone(),
         state.config.clone(),
         state.start_time,
+        state.ml_pipeline.clone(),
+        // --preview / dev path: no lock supervisor, so never proactively unlock.
+        None,
     ));
     handles.push(recognition_handle);
 
@@ -87,6 +111,7 @@ pub async fn start_pipeline(
 pub fn start_detection_recognition(
     state: &DaemonState,
     detection_rx: mpsc::Receiver<RawFrame>,
+    unlock_ctx: Option<UnlockContext>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
     let (result_tx, result_rx) = mpsc::channel::<DetectionResult>(30);
@@ -108,6 +133,8 @@ pub fn start_detection_recognition(
         state.system_locked.clone(),
         state.config.clone(),
         state.start_time,
+        state.ml_pipeline.clone(),
+        unlock_ctx,
     ));
     handles.push(recognition_handle);
 

@@ -1,12 +1,11 @@
 use doorman_shared::Config;
 use tempfile::TempDir;
-use std::fs;
 
 #[test]
 fn test_default_config() {
     let config = Config::default();
     
-    assert_eq!(config.daemon.socket_path, "/run/doorman.sock");
+    assert_eq!(config.daemon.socket_path, "/run/doorman/doorman.sock");
     assert_eq!(config.daemon.data_dir, "/var/lib/doorman");
     assert_eq!(config.daemon.log_level, "info");
     
@@ -132,7 +131,30 @@ fn test_config_partial() {
     
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.ml.device, "cuda");
-    assert_eq!(config.daemon.socket_path, "/run/doorman.sock"); // Should use default
+    assert_eq!(config.daemon.socket_path, "/run/doorman/doorman.sock"); // Should use default
     assert_eq!(config.authentication.auth_frames, 10); // Should use default
+}
+
+#[test]
+fn test_proactive_unlock_defaults_to_false() {
+    // Safety requirement: proactive_unlock MUST default to false so a fresh
+    // install never auto-unlocks without explicit opt-in (--auto-unlock).
+    let config = Config::default();
+    assert!(!config.authentication.proactive_unlock,
+        "proactive_unlock must default to false (safe default for public repo)");
+}
+
+#[test]
+fn test_proactive_unlock_can_be_set_true() {
+    // Verify the config key round-trips when the user enables it.
+    let toml_str = r#"
+        [authentication]
+        proactive_unlock = true
+    "#;
+    let config: Config = toml::from_str(toml_str).unwrap();
+    assert!(config.authentication.proactive_unlock);
+    // Remaining auth fields should keep their defaults.
+    assert_eq!(config.authentication.similarity_threshold, 0.4);
+    assert!(config.authentication.liveness_enabled);
 }
 

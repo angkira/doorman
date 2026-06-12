@@ -1,13 +1,15 @@
 use super::aggregate::aggregate_embeddings;
 use super::types::DetectionResult;
+use super::UnlockContext;
 use crate::debug_stream::DebugStreamBroadcaster;
+use crate::ml::MLPipeline;
 use crate::storage::Storage;
 use doorman_shared::{StreamMessage, Config, DetectionInfo};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Recognition pipeline task
 /// Receives detection results
@@ -21,8 +23,23 @@ pub async fn run_recognition_pipeline(
     system_locked: Arc<RwLock<bool>>,
     config: Arc<Config>,
     start_time: Instant,
+    // Used for the Stage-B proactive-unlock liveness gate (depth-relief). Same
+    // model session the PAM auth path uses; `liveness_gate` runs ONCE per unlock
+    // attempt, never per frame.
+    ml_pipeline: Arc<MLPipeline>,
+    // `Some` only in system mode with a resolved logind session: carries the
+    // `Unlocker` + armed/lock-generation watches. `None` in --user/--preview/dev.
+    unlock_ctx: Option<UnlockContext>,
 ) {
     info!("Recognition pipeline started");
+
+    // Stage-B proactive-unlock one-shot guard. `armed_for_gen` is the lock
+    // generation we last consumed an unlock for; while it equals the current
+    // `lock_gen` we are "spent" and won't try to unlock again until the next
+    // `Lock` signal bumps the generation (re-arming us). Starts unset so the
+    // very first locked session is eligible.
+    let proactive_enabled = config.authentication.proactive_unlock && unlock_ctx.is_some();
+    let mut spent_for_gen: Option<u64> = None;
 
     // Phase 1: rolling window of recent quality-passed embeddings for the
     // tracked face. Single-user/single-face preview, so one window is enough.
@@ -38,8 +55,16 @@ pub async fn run_recognition_pipeline(
     let mut pending_recognized: Option<bool> = None; // candidate state being confirmed
     let mut pending_count: u32 = 0;
 
-    while let Some(result) = result_rx.recv().await {
+    while let Some(mut result) = result_rx.recv().await {
         let is_locked = *system_locked.read().await;
+
+        // Pull the (optional) liveness inputs off the result up front, before the
+        // `result.face` / `result.embedding` matches move pieces of it. These are
+        // `Some` only on quality-passed embedding frames (set by the detection
+        // stage); detect-only / no-face frames carry neither and can never drive
+        // a proactive unlock.
+        let liveness_frame = result.frame.take();
+        let liveness_face = result.ml_face.take();
 
         // NOTE: we no longer `continue` when the session is unlocked. The
         // detection/recognition pipeline now runs subscriber-gated (only while a
@@ -176,6 +201,67 @@ pub async fn run_recognition_pipeline(
                 info!("System unlocked for user: {}", username);
             }
 
+            // ---- Stage B: proactive logind unlock -------------------------------
+            // Decision path: gate on (a) proactive_unlock enabled + a resolved
+            // session, (b) the lock supervisor reports `armed` (LockedHint &&
+            // !IdleHint), (c) this lock generation hasn't already been spent by a
+            // prior unlock (one-shot), (d) the FATAL depth-liveness gate PASSES.
+            // Only then do we call `Session.Unlock()`. Liveness missing/errored =>
+            // NO unlock (fail-safe reject), identical semantics to the PAM path.
+            if proactive_enabled {
+                let ctx = unlock_ctx.as_ref().expect("proactive_enabled implies unlock_ctx");
+                let armed = *ctx.armed_rx.borrow();
+                let cur_gen = *ctx.lock_gen_rx.borrow();
+                let already_spent = spent_for_gen == Some(cur_gen);
+
+                if should_attempt_unlock(proactive_enabled, armed, already_spent) {
+                    // similarity is already >= similarity_threshold (best_match was
+                    // only set on that condition), so we only need the liveness gate.
+                    match (liveness_frame.as_ref(), liveness_face.as_ref()) {
+                        (Some(frame), Some(face)) => {
+                            match ml_pipeline.liveness_gate(frame, face).await {
+                                Ok(true) => {
+                                    // One-shot: mark this generation spent BEFORE the
+                                    // call so a slow/failed Unlock can't be retried in a
+                                    // tight loop within the same lock.
+                                    spent_for_gen = Some(cur_gen);
+                                    info!(
+                                        "Proactive unlock: {} recognized (cosine {:.4} >= {:.2}) + liveness PASS, armed (gen={}) -> calling Session.Unlock()",
+                                        username, similarity, config.authentication.similarity_threshold, cur_gen
+                                    );
+                                    match ctx.unlocker.unlock().await {
+                                        Ok(()) => info!("Proactive unlock: Session.Unlock() succeeded"),
+                                        Err(e) => warn!(
+                                            "Proactive unlock: Session.Unlock() failed ({e}). \
+                                             If 'not authorized', the polkit rule granting \
+                                             'org.freedesktop.login1.unlock-sessions' to the daemon \
+                                             user is not installed yet (installer stage)."
+                                        ),
+                                    }
+                                }
+                                Ok(false) => warn!(
+                                    "Proactive unlock REJECTED: liveness/anti-spoof gate failed for {} — NOT unlocking",
+                                    username
+                                ),
+                                Err(e) => warn!(
+                                    "Proactive unlock REJECTED: liveness error for {} ({e}) — NOT unlocking (fail-safe)",
+                                    username
+                                ),
+                            }
+                        }
+                        _ => {
+                            // Recognized on a frame that carried no liveness inputs
+                            // (shouldn't happen for quality-passed embeddings). Fail
+                            // safe: no inputs -> no unlock.
+                            debug!("Proactive unlock: no liveness inputs on this frame — skipping unlock");
+                        }
+                    }
+                } else if already_spent {
+                    debug!("Proactive unlock: lock generation {} already spent — skipping (one-shot)", cur_gen);
+                }
+            }
+            // ---------------------------------------------------------------------
+
             // Broadcast success to debug stream
             // Convert normalized bbox [0,1] to pixel coords
             let bbox_px = (
@@ -249,4 +335,47 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 
     dot_product / (norm_a * norm_b)
+}
+
+/// Pure Stage-B gate: should the recognition path even ATTEMPT a proactive
+/// unlock for this (already recognized + above-threshold) frame? This is the
+/// gate that runs BEFORE the FATAL liveness check; liveness PASS is the final
+/// condition the caller enforces separately. Decision = proactive_unlock
+/// enabled AND a resolved session present (`enabled`) AND the lock supervisor
+/// reports the session armed (locked && !idle) AND the current lock generation
+/// has not already been spent by a prior unlock (one-shot re-arm on next Lock).
+fn should_attempt_unlock(enabled: bool, armed: bool, already_spent: bool) -> bool {
+    enabled && armed && !already_spent
+}
+
+#[cfg(test)]
+mod proactive_unlock_tests {
+    use super::should_attempt_unlock;
+
+    #[test]
+    fn unlocks_only_when_enabled_armed_and_fresh() {
+        // recognized + live is implied (caller only reaches this after a match
+        // and runs liveness AFTER this gate). Here we assert the pre-liveness gate.
+        assert!(should_attempt_unlock(true, true, false), "enabled + armed + fresh -> attempt");
+    }
+
+    #[test]
+    fn disabled_never_unlocks() {
+        // proactive_unlock=false (or no session) -> pipeline still gates/recognizes
+        // but PAM stays the unlock path.
+        assert!(!should_attempt_unlock(false, true, false));
+    }
+
+    #[test]
+    fn disarmed_never_unlocks() {
+        // not locked, or display idle -> not armed -> no unlock.
+        assert!(!should_attempt_unlock(true, false, false));
+    }
+
+    #[test]
+    fn one_shot_spent_generation_blocks_repeat() {
+        // after a successful unlock the generation is spent until the next Lock
+        // signal bumps it -> no repeat-unlock spam.
+        assert!(!should_attempt_unlock(true, true, true));
+    }
 }

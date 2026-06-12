@@ -76,8 +76,12 @@ mod tests {
         );
         
         // Result should be approximately center of 1024x720 with 100x70 size
-        assert_relative_eq!(tight_bbox.0, 537.0, epsilon = 5.0); // ~512 + 25
-        assert_relative_eq!(tight_bbox.1, 377.8, epsilon = 5.0); // ~360 + 18
+        // Derivation: camera_bbox.0 = 256*2 = 512, camera_bbox.2 = 100*2 = 200
+        //   tight_bbox.0 = 512 + 200*0.25 = 512 + 50 = 562
+        // Derivation: camera_bbox.1 = 256*(720/512) = 360, camera_bbox.3 = 100*(720/512) = 140.625
+        //   tight_bbox.1 = 360 + 140.625*0.25 ≈ 395.16
+        assert_relative_eq!(tight_bbox.0, 562.0, epsilon = 5.0); // 512 + 50
+        assert_relative_eq!(tight_bbox.1, 395.15625, epsilon = 5.0); // 360 + 35.16
         assert_relative_eq!(tight_bbox.2, 100.0, epsilon = 2.0);
         assert_relative_eq!(tight_bbox.3, 70.3, epsilon = 2.0);
     }

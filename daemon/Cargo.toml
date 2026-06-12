@@ -93,6 +93,13 @@ nix = { version = "0.31", features = ["user", "fs"] }
 # Timestamps
 chrono = "0.4"
 
+# Async D-Bus client (systemd-logind lock supervisor + proactive unlock).
+# Pinned to 4.4 to reuse the version already in the lockfile (pulled transitively
+# by eframe/accesskit in the default build). `default-features = false` + `tokio`
+# routes zbus onto the existing tokio reactor instead of its async-io default, so
+# it shares the daemon's runtime in the --no-default-features ROCm build too.
+zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+
 [features]
 # Default dev/preview build: CPU ONNX Runtime + cross-platform mock camera +
 # the dependency-free ffmpeg live-webcam path. Works on macOS and inside an
