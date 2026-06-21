@@ -89,3 +89,11 @@ benchmark_results/
 
 # Environment files
 .env*
+
+# Stray local artifacts — NOT part of the project (NPU XRT overlay with prebuilt
+# blobs, ad-hoc service/config files left in the worktree). Ignored so tooling
+# (e.g. `git add -A`) can never sweep them into history.
+.npu_xrt_overlay/
+/doormand.service
+/doormand-user.service
+/doorman-lightweight.toml

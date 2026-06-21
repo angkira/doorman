@@ -20,6 +20,12 @@ mod yunet_decoder;
 #[cfg(feature = "backend-ncnn")]
 pub mod ncnn_backend;
 
+/// ncnn-Vulkan hybrid backend (PHASE 2): delegates detect/embed/liveness to the
+/// CPU `OrtBackend` and overrides depth_relief to run on the iGPU via ncnn.
+/// Requires both the `_ort` and `backend-ncnn` features.
+#[cfg(all(feature = "_ort", feature = "backend-ncnn"))]
+pub mod ncnn_hybrid;
+
 #[cfg(test)]
 mod tests;
 
@@ -45,6 +51,19 @@ pub struct MLPipeline {
 impl MLPipeline {
     pub async fn new(config: &Config) -> Result<Self> {
         let models_dir = PathBuf::from(&config.ml.models_dir);
+
+        // ncnn hybrid backend: must be checked before the generic BackendType
+        // match because `config.ml.backend == "ncnn"` is not a BackendType variant.
+        #[cfg(all(feature = "_ort", feature = "backend-ncnn"))]
+        if config.ml.backend == "ncnn" {
+            let backend: std::sync::Arc<dyn backend::MLBackend> =
+                std::sync::Arc::new(ncnn_hybrid::NcnnHybridBackend::new(&models_dir, config)?);
+            info!("Using ML backend: {}", backend.name());
+            return Ok(Self {
+                backend,
+                config: config.clone(),
+            });
+        }
 
         // Select backend based on config
         let backend_type = BackendType::from_str(&config.ml.backend);

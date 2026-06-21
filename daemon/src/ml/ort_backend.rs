@@ -540,6 +540,86 @@ impl OrtBackend {
 #[allow(dead_code)]
 pub type DepthSession = Mutex<Session>;
 
+/// Stretch-resize `image` to `size`×`size` RGB, then apply ImageNet normalization
+/// `((x/255) - mean) / std` with mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+/// and pack into a planar CHW f32 buffer (RGB order, length 3×size×size).
+///
+/// Matches `DepthPadConfig::DEPTH_ANYTHING_V2` preprocessing exactly.
+#[cfg(feature = "_ort")]
+pub fn depth_preprocess(image: &DynamicImage, size: u32) -> Vec<f32> {
+    use super::model_config::DepthPadConfig;
+    let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
+
+    let resized = image.resize_exact(size, size, image::imageops::FilterType::Triangle);
+    let rgb = resized.to_rgb8();
+
+    let n = (size * size) as usize;
+    let mut input = vec![0.0f32; 3 * n];
+    for (i, px) in rgb.pixels().enumerate() {
+        input[i] = ((px[0] as f32 / 255.0) - cfg.norm_mean[0]) / cfg.norm_std[0];
+        input[n + i] = ((px[1] as f32 / 255.0) - cfg.norm_mean[1]) / cfg.norm_std[1];
+        input[2 * n + i] = ((px[2] as f32 / 255.0) - cfg.norm_mean[2]) / cfg.norm_std[2];
+    }
+    input
+}
+
+/// Compute the depth-relief PAD score from a depth map and a normalized face bbox.
+///
+/// `depth` is the per-pixel inverse-depth vector (length ≥ d_h × d_w) in row-major
+/// order. Maps the face bbox into depth-map coordinates, computes
+/// `relief = std(face_depth) / (depth_range + eps)` clamped to `[0, 1]`.
+///
+/// When the face-region crop is empty (degenerate bbox) the whole-map depth values
+/// are used, producing a near-zero relief.
+#[cfg(feature = "_ort")]
+pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face) -> f32 {
+    // Global depth range over the whole map.
+    let mut gmin = f32::INFINITY;
+    let mut gmax = f32::NEG_INFINITY;
+    for &v in depth.iter() {
+        if v < gmin {
+            gmin = v;
+        }
+        if v > gmax {
+            gmax = v;
+        }
+    }
+    let global_range = (gmax - gmin) + 1e-8;
+
+    // Map the normalized face bbox into depth-map pixel coordinates.
+    let (nx, ny, nw, nh) = face.bbox;
+    let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
+    let y0 = ((ny.clamp(0.0, 1.0)) * d_h as f32) as usize;
+    let x1 = (((nx + nw).clamp(0.0, 1.0)) * d_w as f32).ceil() as usize;
+    let y1 = (((ny + nh).clamp(0.0, 1.0)) * d_h as f32).ceil() as usize;
+    let x1 = x1.min(d_w);
+    let y1 = y1.min(d_h);
+
+    // Collect the face-region depth values; fall back to whole map if empty.
+    let mut face_vals: Vec<f32> = Vec::new();
+    if x1 > x0 && y1 > y0 {
+        for y in y0..y1 {
+            let row = y * d_w;
+            for x in x0..x1 {
+                face_vals.push(depth[row + x]);
+            }
+        }
+    }
+    let face_vals = if face_vals.is_empty() {
+        depth.to_vec()
+    } else {
+        face_vals
+    };
+
+    // std(face_depth).
+    let count = face_vals.len() as f32;
+    let mean = face_vals.iter().sum::<f32>() / count;
+    let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
+    let std = var.sqrt();
+
+    (std / global_range).clamp(0.0, 1.0)
+}
+
 /// Run the Depth-Anything-V2 depth pass on `session` for `image` and compute the
 /// face-region depth-relief PAD score for `face`.
 ///
@@ -563,19 +643,7 @@ pub fn compute_depth_relief(
     let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
     let size = cfg.input_size;
 
-    // Stretch-resize the whole frame to the square network input (RGB).
-    let resized = image.resize_exact(size, size, image::imageops::FilterType::Triangle);
-    let rgb = resized.to_rgb8();
-
-    // ImageNet-normalized NCHW planar float32.
-    let n = (size * size) as usize;
-    let mut input = vec![0.0f32; 3 * n];
-    let (r_off, g_off, b_off) = (0, n, 2 * n);
-    for (i, px) in rgb.pixels().enumerate() {
-        input[r_off + i] = ((px[0] as f32 / 255.0) - cfg.norm_mean[0]) / cfg.norm_std[0];
-        input[g_off + i] = ((px[1] as f32 / 255.0) - cfg.norm_mean[1]) / cfg.norm_std[1];
-        input[b_off + i] = ((px[2] as f32 / 255.0) - cfg.norm_mean[2]) / cfg.norm_std[2];
-    }
+    let input = depth_preprocess(image, size);
 
     let input_tensor = Value::from_array((
         [1usize, 3, size as usize, size as usize],
@@ -606,52 +674,10 @@ pub fn compute_depth_relief(
         return Err(anyhow!("Depth output too small: shape {:?} len {}", dims, depth.len()));
     }
 
-    // Global depth range over the whole map.
-    let mut gmin = f32::INFINITY;
-    let mut gmax = f32::NEG_INFINITY;
-    for &v in depth.iter() {
-        if v < gmin { gmin = v; }
-        if v > gmax { gmax = v; }
-    }
-    let global_range = (gmax - gmin) + 1e-8;
-
-    // Map the normalized face bbox into depth-map pixel coordinates. The depth
-    // map and the source frame have the same aspect (both stretched independently
-    // to a square), so normalized coords map linearly.
-    let (nx, ny, nw, nh) = face.bbox;
-    let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
-    let y0 = ((ny.clamp(0.0, 1.0)) * d_h as f32) as usize;
-    let x1 = (((nx + nw).clamp(0.0, 1.0)) * d_w as f32).ceil() as usize;
-    let y1 = (((ny + nh).clamp(0.0, 1.0)) * d_h as f32).ceil() as usize;
-    let x1 = x1.min(d_w);
-    let y1 = y1.min(d_h);
-
-    // Collect the face-region depth values; fall back to whole map if empty.
-    let mut face_vals: Vec<f32> = Vec::new();
-    if x1 > x0 && y1 > y0 {
-        for y in y0..y1 {
-            let row = y * d_w;
-            for x in x0..x1 {
-                face_vals.push(depth[row + x]);
-            }
-        }
-    }
-    let face_vals = if face_vals.is_empty() {
-        depth.iter().copied().collect::<Vec<f32>>()
-    } else {
-        face_vals
-    };
-
-    // std(face_depth).
-    let count = face_vals.len() as f32;
-    let mean = face_vals.iter().sum::<f32>() / count;
-    let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
-    let std = var.sqrt();
-
-    let relief = (std / global_range).clamp(0.0, 1.0);
+    let relief = relief_from_depth_map(&depth, d_h, d_w, face);
     tracing::debug!(
-        "Depth-PAD relief={:.4} (face_std={:.4} global_range={:.4} bbox_px=({},{},{},{}) depth_grid={}x{})",
-        relief, std, global_range, x0, y0, x1, y1, d_w, d_h
+        "Depth-PAD relief={:.4} depth_grid={}x{}",
+        relief, d_w, d_h
     );
     Ok(relief)
 }

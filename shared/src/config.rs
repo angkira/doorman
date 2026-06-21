@@ -152,6 +152,11 @@ pub struct MLConfig {
     /// environment value (set by systemd) or the built-in best-effort default.
     #[serde(default)]
     pub hsa_gfx_version: Option<String>,
+
+    /// ncnn/Vulkan device name substring (e.g. "RADV PHOENIX") to bind the iGPU
+    /// depth backend to; empty = first integrated GPU (never the discrete dGPU).
+    #[serde(default)]
+    pub vulkan_device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,6 +395,7 @@ impl Default for MLConfig {
             socket_path: None,
             gpu_uuid: None,
             hsa_gfx_version: None,
+            vulkan_device: None,
         }
     }
 }
