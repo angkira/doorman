@@ -274,17 +274,39 @@ fn binary_on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn rocm_so_path() -> Option<PathBuf> {
-    // Source (dev) location from run_rocm.sh, then the system install location.
-    let home = std::env::var("HOME").unwrap_or_default();
+/// Resolve the ROCm ONNX Runtime `.so` SOURCE candidates against a specific home
+/// directory, in precedence order. Pure (no env / no probing) so it is unit-testable.
+///
+/// The dev build path is `~/.local/lib/onnxruntime-rocm-local/lib/libonnxruntime.so`
+/// (where `build_onnxruntime_rocm.sh` lands it, ALONGSIDE the EP companions
+/// `libonnxruntime_providers_shared.so` + `libonnxruntime_providers_rocm.so`).
+/// The system install path (`/usr/lib/doorman/libonnxruntime.so`) is the fallback
+/// for a re-diagnose AFTER a successful install.
+///
+/// CRITICAL (BUG-1): `home` MUST be the INVOKING user's home, not the process
+/// `$HOME`. Under `sudo doorman install`, `$HOME` is `/root`, so the dev path
+/// never resolves and we fall back to the already-installed base `.so` in
+/// `/usr/lib/doorman` — whose sibling dir has NO companions, so the companion
+/// copy is silently skipped and the daemon SEGVs on the ABI-mismatched system
+/// providers. Resolving against `$SUDO_USER`'s home finds the real source dir
+/// (e.g. `/home/<user>/.local/lib/onnxruntime-rocm-local/lib/`) that holds all
+/// three `.so`, so the companion copy emits real `cp -L` actions.
+fn resolve_rocm_so_src(home: &Path) -> Option<PathBuf> {
     let candidates = [
-        format!("{home}/.local/lib/onnxruntime-rocm-local/lib/libonnxruntime.so"),
-        "/usr/lib/doorman/libonnxruntime.so".to_string(),
+        home.join(".local/lib/onnxruntime-rocm-local/lib/libonnxruntime.so"),
+        PathBuf::from("/usr/lib/doorman/libonnxruntime.so"),
     ];
-    candidates
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn rocm_so_path() -> Option<PathBuf> {
+    // Resolve the dev source against the INVOKING (non-root) user's home so it is
+    // correct under `sudo` (where the process $HOME is /root). Reuses the same
+    // getent-passwd SUDO_USER resolution as the de-escalated cargo build step.
+    // Falls back to the process $HOME only when there is no distinct invoking user.
+    let home = invoking_user_home()
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()));
+    resolve_rocm_so_src(&home)
 }
 
 fn list_cameras() -> Vec<PathBuf> {
@@ -604,9 +626,14 @@ fn render_unit(ep: Ep) -> String {
     match ep {
         Ep::Rocm => {
             device_arg = "--device rocm";
-            // System-relocated mirror of run_rocm.sh's VERIFIED iGPU env.
-            env.push_str("Environment=ROCR_VISIBLE_DEVICES=1\n");
-            env.push_str("Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0\n");
+            // Device selection is CONFIG-DRIVEN: the daemon exports
+            // ROCR_VISIBLE_DEVICES itself from `ml.gpu_uuid` in doorman.toml (bind
+            // by stable UUID, never a fragile index that could hit an off-limits
+            // GPU). We deliberately do NOT hardcode ROCR_VISIBLE_DEVICES here.
+            // gfx1103 (Phoenix/Hawk Point iGPU) maps to the gfx1100 ISA family;
+            // 11.0.3 is the value verified to bring up the ROCm EP on this part
+            // (11.0.0 also works, but 11.0.3 matches the gfx1103 recon note).
+            env.push_str("Environment=HSA_OVERRIDE_GFX_VERSION=11.0.3\n");
             env.push_str("Environment=HIP_PATH=/opt/rocm-7.2.2\n");
             env.push_str("Environment=ROCM_PATH=/opt/rocm-7.2.2\n");
             env.push_str(&format!(
@@ -650,6 +677,12 @@ fn render_unit(ep: Ep) -> String {
          After=systemd-udev-settle.service local-fs.target\n\
          Wants=systemd-udev-settle.service\n\
          {depth_dep}\
+         # CRASH CAP (BUG-3): after 5 failed starts within 60s systemd gives up and\n\
+         # marks the unit `failed` instead of restarting forever, so a crashing EP\n\
+         # cannot crash-loop and flood coredumps (the 4.2GB-core incident).\n\
+         StartLimitIntervalSec=60\n\
+         StartLimitBurst=5\n\
+         \n\
          [Service]\n\
          Type=simple\n\
          User=doorman\n\
@@ -659,6 +692,10 @@ fn render_unit(ep: Ep) -> String {
          ExecStart={SYS_BIN} --config {ETC_CONFIG} {device_arg}\n\
          Restart=on-failure\n\
          RestartSec=2s\n\
+         # CRASH CAP (BUG-3): disable core dumps entirely — a SEGV must not write a\n\
+         # 250MB+ core; thousands of them flooded the disk with 4.2GB. LimitCORE=0\n\
+         # guarantees a crash leaves NO core.\n\
+         LimitCORE=0\n\
          StandardOutput=journal\n\
          StandardError=journal\n\
          SyslogIdentifier=doormand\n\
@@ -697,10 +734,11 @@ fn render_depthd_unit() -> String {
     env.push_str("Environment=RUST_LOG=info\n");
     env.push_str("Environment=DOORMAN_DEPTH_EP=rocm\n");
     env.push_str(&format!("Environment=DOORMAN_DEPTH_SOCKET={SYS_DEPTH_SOCKET}\n"));
-    // System-relocated mirror of run_rocm.sh's VERIFIED iGPU env (identical to the
-    // daemon unit so both processes target the same isolated iGPU the same way).
-    env.push_str("Environment=ROCR_VISIBLE_DEVICES=1\n");
-    env.push_str("Environment=HSA_OVERRIDE_GFX_VERSION=11.0.0\n");
+    // Device selection is CONFIG-DRIVEN (same as the daemon unit): the sidecar
+    // exports ROCR_VISIBLE_DEVICES from `ml.gpu_uuid` in doorman.toml. No hardcoded
+    // index here — an index could bind an off-limits GPU.
+    // Same verified gfx1103 override as the daemon unit (see render_unit).
+    env.push_str("Environment=HSA_OVERRIDE_GFX_VERSION=11.0.3\n");
     env.push_str("Environment=HIP_PATH=/opt/rocm-7.2.2\n");
     env.push_str("Environment=ROCM_PATH=/opt/rocm-7.2.2\n");
     env.push_str(&format!(
@@ -727,6 +765,12 @@ fn render_depthd_unit() -> String {
          After=systemd-udev-settle.service local-fs.target\n\
          Wants=systemd-udev-settle.service\n\
          Before=doormand.service\n\
+         # CRASH CAP (BUG-3): after 5 failed starts within 60s systemd gives up and\n\
+         # marks the unit `failed` instead of restarting forever. A crashing ROCm EP\n\
+         # (e.g. an ABI-mismatched provider SEGV) must NOT crash-loop — that is what\n\
+         # flooded /var/lib/systemd/coredump to 4.2GB. Bounds the blast radius.\n\
+         StartLimitIntervalSec=60\n\
+         StartLimitBurst=5\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -737,6 +781,11 @@ fn render_depthd_unit() -> String {
          ExecStart={SYS_DEPTHD_BIN} --config {ETC_CONFIG}\n\
          Restart=on-failure\n\
          RestartSec=2s\n\
+         # CRASH CAP (BUG-3): disable core dumps from this service entirely. A SEGV\n\
+         # in the ROCm/ORT stack writes a 250MB+ core; thousands of restarts flooded\n\
+         # the disk with 4.2GB of cores. LimitCORE=0 makes a crash leave NO core, so\n\
+         # the flood class of incident cannot recur even if a future EP crashes.\n\
+         LimitCORE=0\n\
          StandardOutput=journal\n\
          StandardError=journal\n\
          SyslogIdentifier=doorman-depthd\n\
@@ -784,16 +833,65 @@ fn render_polkit_unlock_rule() -> String {
         .to_string()
 }
 
-/// Render the installed `doorman.toml`, optionally forcing
-/// `proactive_unlock = true` under `[authentication]` (for `--auto-unlock`).
+/// Render the installed `doorman.toml` for the chosen execution provider.
 ///
-/// When `enable` is false the source is returned verbatim (default install:
-/// proactive unlock OFF — lock-gating still works, PAM is the unlock path).
-/// When true, an existing `proactive_unlock = ...` line is rewritten to `true`;
-/// if absent, the key is inserted as the first line of the `[authentication]`
-/// section. Idempotent and order-preserving.
-fn render_config(src: &str, enable: bool) -> String {
-    if !enable {
+/// Two transforms are applied (order-preserving, idempotent):
+///
+/// 1. **backend/device for the EP.** The repo's `doorman.toml` ships
+///    `backend = "tract"` / `device = "cpu"` (the portable default). A GPU install
+///    MUST run on the ORT backend with the matching device or the daemon stays on
+///    the CPU tract path regardless of the unit's `--device` flag. For `Ep::Rocm`
+///    this rewrites `backend = "ort"` / `device = "rocm"` (and `cuda` for CUDA);
+///    for `Ep::Cpu` the CPU default is preserved unchanged.
+///
+/// 2. **proactive_unlock** (only when `enable_proactive`, i.e. `--auto-unlock`): an
+///    existing `proactive_unlock = ...` line is rewritten to `true`; if absent the
+///    key is inserted as the first line of the `[authentication]` section.
+fn render_config(src: &str, ep: Ep, enable_proactive: bool) -> String {
+    // --- Transform 1: backend/device for the EP. ---
+    // CPU keeps the shipped default (tract/cpu); GPU EPs require the ort backend.
+    let src = if ep == Ep::Cpu {
+        src.to_string()
+    } else {
+        let device = ep.label(); // "rocm" | "cuda"
+        let is_rocm = ep == Ep::Rocm;
+        // Don't duplicate knobs the shipped template may already carry.
+        let has_gpu_uuid = src.contains("gpu_uuid");
+        let has_hsa = src.contains("hsa_gfx_version");
+        let mut out = String::with_capacity(src.len() + 256);
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("backend") && t.contains('=') {
+                out.push_str(&format!(
+                    "backend = \"ort\"  # set by `doorman install --{device}`\n"
+                ));
+            } else if t.starts_with("device") && t.contains('=') {
+                out.push_str(&format!(
+                    "device = \"{device}\"  # set by `doorman install --{device}`\n"
+                ));
+                // Insert the config-driven GPU-selection knobs right after `device`
+                // (they live in the same [ml] section). ROCm only — CUDA scopes by
+                // CUDA_VISIBLE_DEVICES, not these keys.
+                if is_rocm && !has_gpu_uuid {
+                    out.push_str("# Bind ROCm to ONE GPU by its STABLE UUID (see `rocminfo` / `rocm-smi --showuniqueid`).\n");
+                    out.push_str("# Empty = ROCm stays OFF and the daemon runs on CPU (so no card is ever auto-picked\n");
+                    out.push_str("# by a fragile index). Fill in your intended GPU's UUID to enable ROCm on exactly it.\n");
+                    out.push_str("gpu_uuid = \"\"  # e.g. \"GPU-xxxxxxxxxxxxxxxx\" — set to enable ROCm\n");
+                }
+                if is_rocm && !has_hsa {
+                    out.push_str("hsa_gfx_version = \"11.0.3\"  # HSA_OVERRIDE_GFX_VERSION (gfx1103 iGPU); adjust per GPU\n");
+                }
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    };
+    let src = src.as_str();
+
+    // --- Transform 2: proactive_unlock (--auto-unlock only). ---
+    if !enable_proactive {
         return src.to_string();
     }
     let kv = "proactive_unlock = true  # set by `doorman install --auto-unlock`";
@@ -1033,29 +1131,34 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
               Box::leak(format!("{ETC_CONFIG}.doorman-bak").into_boxed_str())],
         ));
     }
-    if opts.auto_unlock {
-        // --auto-unlock: render the config with proactive_unlock=true and write it
-        // via tee (the source file is unchanged on disk; only the installed copy
-        // gets the flag flipped). 0644 to match the `install -m 0644` default.
-        let rendered = render_config(&std::fs::read_to_string(&cfg_src).unwrap_or_default(), true);
-        plan.push(
-            Action::priv_(
-                format!("Install config -> {ETC_CONFIG} (backend=ort, device={}, proactive_unlock=true)", d.ep.label()),
-                &["tee", ETC_CONFIG],
-            )
-            .with_stdin(rendered),
-        );
-        plan.push(Action::priv_(
-            format!("Set {ETC_CONFIG} mode 0644"),
-            &["chmod", "0644", ETC_CONFIG],
-        ));
+    // Render the installed config from the repo source with the EP-appropriate
+    // backend/device baked in (and proactive_unlock=true under --auto-unlock), then
+    // write via `tee`. ALWAYS render (never copy verbatim): the repo file ships
+    // backend="tract"/device="cpu", so a GPU install MUST be transformed to
+    // backend="ort"/device=<ep> or the daemon stays on CPU regardless of the unit's
+    // --device flag. CPU installs render to an unchanged (tract/cpu) config.
+    let backend_label = if d.ep == Ep::Cpu { "tract" } else { "ort" };
+    let cfg_summary = if opts.auto_unlock {
+        format!("backend={backend_label}, device={}, proactive_unlock=true", d.ep.label())
     } else {
-        plan.push(Action::priv_(
-            format!("Install config -> {ETC_CONFIG} (backend=ort, device={})", d.ep.label()),
-            &["install", "-m", "0644",
-              Box::leak(cfg_src.display().to_string().into_boxed_str()), ETC_CONFIG],
-        ));
-    }
+        format!("backend={backend_label}, device={}", d.ep.label())
+    };
+    let rendered = render_config(
+        &std::fs::read_to_string(&cfg_src).unwrap_or_default(),
+        d.ep,
+        opts.auto_unlock,
+    );
+    plan.push(
+        Action::priv_(
+            format!("Install config -> {ETC_CONFIG} ({cfg_summary})"),
+            &["tee", ETC_CONFIG],
+        )
+        .with_stdin(rendered),
+    );
+    plan.push(Action::priv_(
+        format!("Set {ETC_CONFIG} mode 0644"),
+        &["chmod", "0644", ETC_CONFIG],
+    ));
 
     // --auto-unlock: install the scoped polkit rule that lets the `doorman` user
     // call logind Session.Unlock() (the daemon's proactive-unlock path). Without
@@ -1142,6 +1245,59 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
                           Box::leak(so.display().to_string().into_boxed_str()),
                           Box::leak(dest.display().to_string().into_boxed_str())],
                     ));
+                    plan.push(Action::priv_(
+                        format!("Set {SYS_LIBDIR}/libonnxruntime.so mode 0644"),
+                        &["chmod", "0644",
+                          Box::leak(dest.display().to_string().into_boxed_str())],
+                    ));
+                }
+
+                // CRITICAL: copy the ROCm EP COMPANION libraries too. ORT 1.22.x's
+                // base libonnxruntime.so dlopen()s libonnxruntime_providers_shared.so
+                // and libonnxruntime_providers_rocm.so from its OWN directory
+                // (RUNPATH=$ORIGIN). If only the base .so is relocated to
+                // /usr/lib/doorman, the loader falls back to the SYSTEM providers_shared
+                // (1.21.0) → ABI mismatch → SEGV in PreferNpuEpPolicy::
+                // SelectProvidersForDevices. Copy all three from the SAME source dir
+                // (the dir holding the resolved base .so) so the version set is coherent.
+                let src_dir = so.parent().map(Path::to_path_buf);
+                for companion in ["libonnxruntime_providers_shared.so",
+                                  "libonnxruntime_providers_rocm.so"] {
+                    let src = src_dir.as_ref().map(|d| d.join(companion));
+                    let cdest = PathBuf::from(format!("{SYS_LIBDIR}/{companion}"));
+                    match src {
+                        Some(s) if s.exists() && !same_file(&s, &cdest) => {
+                            plan.push(Action::priv_(
+                                format!("Copy ROCm EP companion {companion} -> {SYS_LIBDIR}/{companion}"),
+                                &["cp", "-L",
+                                  Box::leak(s.display().to_string().into_boxed_str()),
+                                  Box::leak(cdest.display().to_string().into_boxed_str())],
+                            ));
+                            plan.push(Action::priv_(
+                                format!("Set {SYS_LIBDIR}/{companion} mode 0644"),
+                                &["chmod", "0644",
+                                  Box::leak(cdest.display().to_string().into_boxed_str())],
+                            ));
+                        }
+                        Some(s) if s.exists() => {
+                            // Already in place (source IS the installed dest).
+                            plan.push(Action::user(
+                                format!("ROCm EP companion {companion} already in place at {SYS_LIBDIR} — skipping copy"),
+                                &["true"],
+                            ));
+                        }
+                        _ => {
+                            // Missing companion: do NOT silently skip — without it the
+                            // installed daemon will SEGV on the ABI-mismatched system .so.
+                            plan.push(Action::user(
+                                format!("WARNING: ROCm EP companion {companion} NOT found next to {} — \
+                                         the installed ROCm daemon WILL SEGV without it. Rebuild ONNX Runtime \
+                                         (build_onnxruntime_rocm.sh) so all three .so are present, then re-run install.",
+                                        so.display()),
+                                &["true"],
+                            ));
+                        }
+                    }
                 }
             }
             None => {
@@ -1213,16 +1369,31 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
             .with_stdin(render_unit(d.ep)),
     );
     plan.push(Action::priv_("systemctl daemon-reload", &["systemctl", "daemon-reload"]));
-    // ROCm: enable + start the depth sidecar BEFORE the daemon so its socket is up.
+    // ROCm: enable (boot) + RESTART the depth sidecar BEFORE the daemon so its
+    // socket is up. RESTART (not start/--now) is critical on a RE-INSTALL: an
+    // already-running unit ignores the new binary/config under `start`/`enable
+    // --now` and keeps serving the STALE process (the exact bug that left a 22h
+    // tract/cpu daemon running after a fresh ROCm config landed). `enable` is for
+    // boot persistence only; `restart` is the apply that always picks up the new
+    // binary + config. `restart` safely STARTS a stopped unit, so fresh installs
+    // work too.
     if build_depthd {
         plan.push(Action::priv_(
-            "Enable + start doorman-depthd.service (ROCm iGPU depth sidecar)",
-            &["systemctl", "enable", "--now", "doorman-depthd.service"],
+            "Enable doorman-depthd.service at boot (ROCm iGPU depth sidecar)",
+            &["systemctl", "enable", "doorman-depthd.service"],
+        ));
+        plan.push(Action::priv_(
+            "Restart doorman-depthd.service (apply new binary/config; starts it if stopped)",
+            &["systemctl", "restart", "doorman-depthd.service"],
         ));
     }
     plan.push(Action::priv_(
-        "Enable + start doormand.service",
-        &["systemctl", "enable", "--now", "doormand.service"],
+        "Enable doormand.service at boot",
+        &["systemctl", "enable", "doormand.service"],
+    ));
+    plan.push(Action::priv_(
+        "Restart doormand.service (apply new binary/config; starts it if stopped)",
+        &["systemctl", "restart", "doormand.service"],
     ));
     // HEALTH-CHECK: poll up to ~30s for socket + is-active + a successful status
     // query. On failure: stop the service (kill any crash loop), dump the journal,
@@ -2128,8 +2299,10 @@ mod tests {
     #[test]
     fn unit_rocm_has_isolation_env() {
         let u = render_unit(Ep::Rocm);
-        assert!(u.contains("ROCR_VISIBLE_DEVICES=1"));
-        assert!(u.contains("HSA_OVERRIDE_GFX_VERSION=11.0.0"));
+        // Device selection is config-driven (ml.gpu_uuid → ROCR_VISIBLE_DEVICES at
+        // runtime), so the unit must NOT hardcode a (fragile, possibly off-limits) index.
+        assert!(!u.contains("ROCR_VISIBLE_DEVICES"));
+        assert!(u.contains("HSA_OVERRIDE_GFX_VERSION=11.0.3"));
         assert!(u.contains("/usr/lib/doorman/libonnxruntime.so"));
         assert!(u.contains("--device rocm"));
         // System service must NOT reference the user's HOME path.
@@ -2163,8 +2336,10 @@ mod tests {
         assert!(u.contains("Environment=DOORMAN_DEPTH_EP=rocm"));
         assert!(u.contains("Environment=DOORMAN_DEPTH_SOCKET=/run/doorman/doorman-depth.sock"));
         // Carries the same verified iGPU isolation + cache env as the daemon.
-        assert!(u.contains("ROCR_VISIBLE_DEVICES=1"));
-        assert!(u.contains("HSA_OVERRIDE_GFX_VERSION=11.0.0"));
+        // Device selection is config-driven (ml.gpu_uuid → ROCR_VISIBLE_DEVICES at
+        // runtime), so the unit must NOT hardcode a (fragile, possibly off-limits) index.
+        assert!(!u.contains("ROCR_VISIBLE_DEVICES"));
+        assert!(u.contains("HSA_OVERRIDE_GFX_VERSION=11.0.3"));
         assert!(u.contains("/usr/lib/doorman/libonnxruntime.so"));
         assert!(u.contains("Environment=HOME=/var/lib/doorman"));
         assert!(u.contains("MIOPEN_USER_DB_PATH=/var/lib/doorman/miopen"));
@@ -2187,6 +2362,113 @@ mod tests {
         // CPU runs depth in-process; no sidecar ordering should be emitted.
         let u = render_unit(Ep::Cpu);
         assert!(!u.contains("doorman-depthd"));
+    }
+
+    // --- BUG-1: ROCm .so source resolves under the INVOKING user's home ---
+
+    #[test]
+    fn resolve_rocm_so_src_uses_given_home_dev_path() {
+        // Stage the dev build layout under a fake "invoking user" home; the resolver
+        // must find the base .so there (NOT under /root or the process $HOME). This
+        // is the BUG-1 fix: under sudo the source must resolve against $SUDO_USER's
+        // home (e.g. /home/angkira/.local/...), where the companions also live.
+        let home = std::env::temp_dir().join(format!("doorman_home_test_{}", std::process::id()));
+        let libdir = home.join(".local/lib/onnxruntime-rocm-local/lib");
+        std::fs::create_dir_all(&libdir).unwrap();
+        for f in ["libonnxruntime.so",
+                  "libonnxruntime_providers_shared.so",
+                  "libonnxruntime_providers_rocm.so"] {
+            std::fs::write(libdir.join(f), b"x").unwrap();
+        }
+
+        let resolved = resolve_rocm_so_src(&home).expect("dev .so must resolve under the given home");
+        assert_eq!(resolved, libdir.join("libonnxruntime.so"));
+        // The companions live in the SAME dir as the resolved base .so, so the
+        // companion-copy step finds them (the missing-companion SEGV is fixed).
+        let parent = resolved.parent().unwrap();
+        assert!(parent.join("libonnxruntime_providers_shared.so").exists());
+        assert!(parent.join("libonnxruntime_providers_rocm.so").exists());
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_rocm_so_src_empty_home_does_not_pick_dev_path() {
+        // A bogus home with no dev .so must NOT resolve to the dev path; it may only
+        // fall back to the system path if that happens to exist on the test box.
+        let home = std::env::temp_dir().join(format!("doorman_empty_home_{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let resolved = resolve_rocm_so_src(&home);
+        // Must never return a path under our fake (empty) home.
+        if let Some(p) = &resolved {
+            assert!(!p.starts_with(&home), "must not resolve under a home with no dev .so");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // --- BUG-2: the service apply uses `restart`, not `start`/`--now` ---
+
+    #[test]
+    fn plan_applies_services_with_restart_not_start() {
+        let d = test_diag(Ep::Rocm);
+        let plan = build_install_plan(&d, &opts(false));
+
+        // The daemon (and the ROCm depth sidecar) must be RESTARTED so a re-install
+        // always picks up the new binary/config; a stale running unit ignores `start`.
+        let restarts: Vec<&Vec<String>> = plan
+            .iter()
+            .map(|a| &a.argv)
+            .filter(|argv| argv.first().map(|s| s == "systemctl").unwrap_or(false)
+                && argv.get(1).map(|s| s == "restart").unwrap_or(false))
+            .collect();
+        let restart_targets: Vec<&str> = restarts
+            .iter()
+            .filter_map(|argv| argv.get(2).map(String::as_str))
+            .collect();
+        assert!(restart_targets.contains(&"doormand.service"),
+            "doormand.service must be applied via `systemctl restart`");
+        assert!(restart_targets.contains(&"doorman-depthd.service"),
+            "the ROCm depth sidecar must be applied via `systemctl restart`");
+
+        // And NOTHING must use the stale `enable --now` / `start` apply for these.
+        assert!(!plan.iter().any(|a| {
+            let argv = &a.argv;
+            argv.first().map(|s| s == "systemctl").unwrap_or(false)
+                && (argv.iter().any(|s| s == "--now") || argv.get(1).map(|s| s == "start").unwrap_or(false))
+        }), "no systemctl `start`/`--now` apply may remain (it leaves a stale daemon on re-install)");
+
+        // `enable` (boot persistence) is still present and is fine to keep.
+        assert!(plan.iter().any(|a| {
+            let argv = &a.argv;
+            argv.first().map(|s| s == "systemctl").unwrap_or(false)
+                && argv.get(1).map(|s| s == "enable").unwrap_or(false)
+                && argv.get(2).map(|s| s == "doormand.service").unwrap_or(false)
+        }), "doormand.service should still be `enable`d for boot");
+    }
+
+    // --- BUG-3: crash cap (StartLimit + LimitCORE=0) on the units ---
+
+    #[test]
+    fn depthd_unit_has_crash_cap() {
+        let u = render_depthd_unit();
+        // StartLimit cap: bounded restarts so a crashing EP cannot crash-loop.
+        assert!(u.contains("StartLimitIntervalSec=60"));
+        assert!(u.contains("StartLimitBurst=5"));
+        // LimitCORE=0 disables core dumps so a SEGV can never flood the disk.
+        assert!(u.contains("LimitCORE=0"));
+        // Restart policy stays sane (bounded by the StartLimit above).
+        assert!(u.contains("Restart=on-failure"));
+        assert!(u.contains("RestartSec=2s"));
+    }
+
+    #[test]
+    fn daemon_unit_has_crash_cap() {
+        for ep in [Ep::Rocm, Ep::Cpu] {
+            let u = render_unit(ep);
+            assert!(u.contains("StartLimitIntervalSec=60"), "{ep:?} missing StartLimitIntervalSec");
+            assert!(u.contains("StartLimitBurst=5"), "{ep:?} missing StartLimitBurst");
+            assert!(u.contains("LimitCORE=0"), "{ep:?} missing LimitCORE=0");
+        }
     }
 
     #[test]
@@ -2212,17 +2494,66 @@ mod tests {
     }
 
     #[test]
-    fn render_config_default_is_verbatim() {
+    fn render_config_cpu_no_proactive_is_verbatim() {
+        // CPU EP + no auto-unlock = the shipped config, unchanged.
         let src = "[authentication]\nsimilarity_threshold = 0.75\n";
-        assert_eq!(render_config(src, false), src);
+        assert_eq!(render_config(src, Ep::Cpu, false), src);
         // Default must NOT enable proactive unlock.
-        assert!(!render_config(src, false).contains("proactive_unlock = true"));
+        assert!(!render_config(src, Ep::Cpu, false).contains("proactive_unlock = true"));
+    }
+
+    #[test]
+    fn render_config_cpu_keeps_tract_cpu_backend() {
+        // A CPU install must NOT rewrite the shipped tract/cpu backend.
+        let src = "[ml]\nbackend = \"tract\"\ndevice = \"cpu\"\n";
+        let out = render_config(src, Ep::Cpu, false);
+        assert!(out.contains("backend = \"tract\""));
+        assert!(out.contains("device = \"cpu\""));
+        assert!(!out.contains("\"ort\""));
+        assert!(!out.contains("\"rocm\""));
+    }
+
+    #[test]
+    fn render_config_rocm_sets_ort_and_rocm() {
+        // A ROCm install MUST flip backend->ort and device->rocm, else the daemon
+        // stays on the CPU tract path regardless of the unit's --device flag.
+        let src = "[ml]\nmodels_dir = \"/x\"\nbackend = \"tract\"\ndevice = \"cpu\"\ncpu_threads = 0\n";
+        let out = render_config(src, Ep::Rocm, false);
+        assert!(out.contains("backend = \"ort\""), "got:\n{out}");
+        assert!(out.contains("device = \"rocm\""), "got:\n{out}");
+        assert!(!out.contains("backend = \"tract\""));
+        assert!(!out.contains("device = \"cpu\""));
+        // Unrelated keys preserved.
+        assert!(out.contains("models_dir = \"/x\""));
+        assert!(out.contains("cpu_threads = 0"));
+        // Exactly one backend and one device line (no duplication).
+        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("backend")).count(), 1);
+        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("device")).count(), 1);
+    }
+
+    #[test]
+    fn render_config_rocm_adds_empty_gpu_uuid_and_hsa() {
+        // ROCm install exposes the config-driven GPU-selection knobs in [ml]:
+        // gpu_uuid defaults EMPTY (so ROCm stays off / CPU until the operator picks
+        // a specific GPU by UUID — never a hardcoded index), plus an hsa override.
+        let src = "[ml]\nbackend = \"tract\"\ndevice = \"cpu\"\ncpu_threads = 0\n";
+        let out = render_config(src, Ep::Rocm, false);
+        assert!(out.contains("gpu_uuid = \"\""), "rocm config must seed an empty gpu_uuid:\n{out}");
+        assert!(out.contains("hsa_gfx_version = \"11.0.3\""), "rocm config must seed hsa_gfx_version:\n{out}");
+        // The knobs land inside [ml] (right after device), not in another section.
+        let ml_idx = out.find("device = \"rocm\"").unwrap();
+        let uuid_idx = out.find("gpu_uuid").unwrap();
+        assert!(uuid_idx > ml_idx, "gpu_uuid must follow the device line in [ml]");
+        // CPU install must NOT carry these GPU knobs.
+        let cpu = render_config(src, Ep::Cpu, false);
+        assert!(!cpu.contains("gpu_uuid"));
+        assert!(!cpu.contains("hsa_gfx_version"));
     }
 
     #[test]
     fn render_config_auto_unlock_inserts_key_under_authentication() {
         let src = "[detector]\nx = 1\n\n[authentication]\nsimilarity_threshold = 0.75\nauth_frames = 10\n";
-        let out = render_config(src, true);
+        let out = render_config(src, Ep::Cpu, true);
         assert!(out.contains("proactive_unlock = true"));
         // Inserted inside [authentication], before the existing keys.
         let auth_idx = out.find("[authentication]").unwrap();
@@ -2237,7 +2568,7 @@ mod tests {
     #[test]
     fn render_config_auto_unlock_rewrites_existing_false() {
         let src = "[authentication]\nproactive_unlock = false\nauth_frames = 10\n";
-        let out = render_config(src, true);
+        let out = render_config(src, Ep::Cpu, true);
         assert!(out.contains("proactive_unlock = true"));
         assert!(!out.contains("proactive_unlock = false"));
         // Exactly one proactive_unlock line (no duplication).
@@ -2297,6 +2628,77 @@ mod tests {
         );
         assert!(!without.iter().any(|a| a.argv.iter().any(|s| s == POLKIT_RULE_PATH)));
         assert!(!without.iter().any(|a| a.desc.contains("proactive_unlock=true")));
+    }
+
+    #[test]
+    fn plan_rocm_copies_all_three_so() {
+        // Stage a source dir holding the base .so + both EP companions, like the
+        // dev/build output. The plan must copy ALL THREE into /usr/lib/doorman
+        // (missing companions are the root cause of the installed-daemon SEGV).
+        let dir = std::env::temp_dir().join(format!("doorman_so_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for f in ["libonnxruntime.so",
+                  "libonnxruntime_providers_shared.so",
+                  "libonnxruntime_providers_rocm.so"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let mut d = test_diag(Ep::Rocm);
+        d.rocm_so = Some(dir.join("libonnxruntime.so"));
+
+        let plan = build_install_plan(&d, &opts(false));
+        let has = |needle: &str| plan.iter().any(|a| a.desc.contains(needle));
+        assert!(has("Copy ROCm ONNX Runtime .so -> /usr/lib/doorman/libonnxruntime.so"),
+            "base .so copy missing");
+        assert!(has("Copy ROCm EP companion libonnxruntime_providers_shared.so"),
+            "providers_shared companion copy missing");
+        assert!(has("Copy ROCm EP companion libonnxruntime_providers_rocm.so"),
+            "providers_rocm companion copy missing (this is the SEGV root cause)");
+        // No spurious missing-companion warning when all three are present.
+        assert!(!plan.iter().any(|a| a.desc.contains("WARNING: ROCm EP companion")),
+            "must not warn when companions exist");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_rocm_warns_on_missing_companion() {
+        // rocm_so resolves but its dir has NO companions: the plan must emit a clear
+        // WARNING (not silently skip), because the installed daemon SEGVs without them.
+        let dir = std::env::temp_dir().join(format!("doorman_so_warn_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("libonnxruntime.so"), b"x").unwrap();
+        let mut d = test_diag(Ep::Rocm);
+        d.rocm_so = Some(dir.join("libonnxruntime.so"));
+
+        let plan = build_install_plan(&d, &opts(false));
+        assert!(plan.iter().any(|a| a.desc.contains("WARNING: ROCm EP companion")
+                                     && a.desc.contains("WILL SEGV")),
+            "missing companions must produce a SEGV warning, not a silent skip");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_rocm_config_sets_ort_rocm_in_description() {
+        // The config-install action must advertise the ROCm backend/device that
+        // render_config bakes in (so dry-run shows the user what gets written).
+        let d = test_diag(Ep::Rocm);
+        let plan = build_install_plan(&d, &opts(false));
+        assert!(plan.iter().any(|a| a.desc.contains("Install config")
+                                     && a.desc.contains("backend=ort")
+                                     && a.desc.contains("device=rocm")),
+            "rocm config action must advertise backend=ort, device=rocm");
+    }
+
+    #[test]
+    fn plan_cpu_config_keeps_tract_cpu_in_description() {
+        let d = test_diag(Ep::Cpu);
+        let cpu_opts = InstallOpts { ep: EpChoice::Cpu, ..opts(false) };
+        let plan = build_install_plan(&d, &cpu_opts);
+        assert!(plan.iter().any(|a| a.desc.contains("Install config")
+                                     && a.desc.contains("backend=tract")
+                                     && a.desc.contains("device=cpu")),
+            "cpu config action must advertise backend=tract, device=cpu");
     }
 
     #[test]

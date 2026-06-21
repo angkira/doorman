@@ -58,6 +58,12 @@ clap = { workspace = true }
 # (which would download a CPU dylib that the ROCm dynamic-load path then ignores).
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false }
 
+# ROCm pre-flight only: dlopen libamdhip64 to ask hipGetDeviceCount whether HIP
+# sees a usable GPU BEFORE registering the ROCm EP (ORT's ROCm init does an
+# uncatchable C++ terminate() when no device is visible). Pulled in by
+# backend-ort-rocm; not linked on CPU/CUDA/CoreML builds.
+libloading = { version = "0.8", optional = true }
+
 # CPU array/parallel helpers used by preprocessing
 rayon = "1.10"
 # 0.17 matches what ort 2.0.0-rc.12 depends on (it re-exports ndarray tensor
@@ -128,7 +134,7 @@ backend-ort = ["_ort", "ort", "ort/download-binaries", "ort/tls-rustls"]        
 # (the last version with the ROCm EP) which implements up to api-22. Using api-24
 # would call GetApi(24) which returns NULL on a 1.22.x .so, causing a crash.
 # api-22 is cumulative (includes api-18..api-21) so it satisfies all compile requirements.
-backend-ort-rocm = ["_ort", "ort", "ort/load-dynamic", "ort/api-22"]           # AMD ROCm EP (dlopen libonnxruntime.so); api-22 targets ORT 1.22.x (ROCm EP was removed in ORT 1.23.0; api-24 would crash against a 1.22.x .so)
+backend-ort-rocm = ["_ort", "ort", "ort/load-dynamic", "ort/api-22", "dep:libloading"]           # AMD ROCm EP (dlopen libonnxruntime.so); api-22 targets ORT 1.22.x (ROCm EP was removed in ORT 1.23.0; api-24 would crash against a 1.22.x .so)
 backend-ort-cuda = ["_ort", "ort", "ort/cuda", "ort/download-binaries", "ort/tls-rustls", "ort/api-24"] # NVIDIA CUDA EP, Linux only
 # Apple-Silicon acceleration: CoreML EP (Neural Engine / GPU / CPU). macOS only.
 # The bundled ONNX Runtime from `download-binaries` ships with CoreML support, so

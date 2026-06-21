@@ -135,6 +135,23 @@ pub struct MLConfig {
     /// Unix socket path for ML inference (for backend = "socket")
     #[serde(default)]
     pub socket_path: Option<String>,
+
+    /// ROCm/HIP GPU to bind to, selected by its STABLE UUID (e.g.
+    /// "GPU-31119c444c4c0950" as printed by `rocminfo`/`rocm-smi`). When set, the
+    /// daemon exports `ROCR_VISIBLE_DEVICES=<uuid>` before any HIP init so ONLY
+    /// that GPU is ever visible — index-independent, so it can never accidentally
+    /// select a different card than you intend (e.g. a dGPU you keep off-limits).
+    /// Leave empty to use whatever `ROCR_VISIBLE_DEVICES`/default ordering the
+    /// environment provides. Only meaningful when `device` is a GPU backend.
+    #[serde(default)]
+    pub gpu_uuid: Option<String>,
+
+    /// Optional `HSA_OVERRIDE_GFX_VERSION` value (e.g. "11.0.3" for the Radeon
+    /// 780M / gfx1103). When set, the daemon exports it before HIP init so an
+    /// unsupported gfx target reports as a supported one. Leave empty to use the
+    /// environment value (set by systemd) or the built-in best-effort default.
+    #[serde(default)]
+    pub hsa_gfx_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,6 +388,8 @@ impl Default for MLConfig {
             gpu_device_id: 0,
             docker_endpoint: None,
             socket_path: None,
+            gpu_uuid: None,
+            hsa_gfx_version: None,
         }
     }
 }

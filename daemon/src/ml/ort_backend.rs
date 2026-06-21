@@ -60,6 +60,113 @@ enum DepthSource {
 #[cfg(feature = "_ort")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// ROCm/HIP pre-flight: does the HIP runtime see at least one usable GPU under the
+/// CURRENT device scoping (ROCR_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES)?
+///
+/// WHY this exists: ORT's ROCm EP calls `hipGetDeviceProperties(.., 0)` during
+/// session init; when no device is visible (e.g. the gfx1103 iGPU whose KFD node
+/// has `local_mem_size=0`, or a ROCR_VISIBLE_DEVICES filter pointing at a
+/// non-existent index) it THROWS a C++ exception that surfaces as
+/// `std::terminate()` → SIGABRT and kills the whole daemon before any Rust-side
+/// fallback can run. A C++ terminate cannot be caught from Rust, so the decision
+/// must be made BEFORE the EP is registered. `hipGetDeviceCount` only ever returns
+/// an error code (it never aborts) and honours the same env scoping ORT uses, so
+/// dlopen'ing libamdhip64 and calling it is a safe, accurate probe. Result cached.
+#[cfg(feature = "backend-ort-rocm")]
+fn rocm_runtime_has_device() -> bool {
+    use std::sync::OnceLock;
+    static USABLE: OnceLock<bool> = OnceLock::new();
+    *USABLE.get_or_init(|| {
+        let rocm_path = std::env::var("ROCM_PATH").unwrap_or_else(|_| "/opt/rocm".to_string());
+        let candidates = [
+            format!("{rocm_path}/lib/libamdhip64.so"),
+            "libamdhip64.so".to_string(),
+        ];
+        for path in &candidates {
+            unsafe {
+                let lib = match libloading::Library::new(path) {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                let hip_get_device_count: libloading::Symbol<
+                    unsafe extern "C" fn(*mut i32) -> i32,
+                > = match lib.get(b"hipGetDeviceCount\0") {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let mut count: i32 = 0;
+                let err = hip_get_device_count(&mut count as *mut i32);
+                // Keep libamdhip64 resident for the process lifetime (ORT loads it
+                // again anyway); avoids churning HIP runtime state on unload.
+                std::mem::forget(lib);
+                let ok = err == 0 && count > 0;
+                if ok {
+                    info!("ROCm pre-flight: HIP reports {} visible GPU device(s)", count);
+                } else {
+                    warn!(
+                        "ROCm pre-flight: no usable GPU (hipGetDeviceCount err={}, count={}) — falling back to CPU instead of crashing the daemon",
+                        err, count
+                    );
+                }
+                return ok;
+            }
+        }
+        warn!("ROCm pre-flight: could not load libamdhip64 from ROCM_PATH or the linker path — treating ROCm as unavailable (CPU fallback)");
+        false
+    })
+}
+
+/// Whether the ROCm execution provider should be used, decided from config (no
+/// hardcoded device list). ROCm is selected ONLY when ALL hold:
+///   1. `ml.device` is a GPU backend (`rocm`/`gpu`),
+///   2. `ml.gpu_uuid` names a specific GPU — we never auto-pick by index, so the
+///      daemon can't bind an off-limits card (e.g. a dGPU) it wasn't told to use,
+///   3. the HIP runtime actually sees that device (pre-flight).
+/// Otherwise the daemon runs on CPU (logging the reason once). The decision is
+/// cached so the per-model calls don't re-log.
+/// Export the config-driven GPU binding env vars BEFORE any HIP init: select the
+/// ROCm GPU by its STABLE UUID (`ml.gpu_uuid` → `ROCR_VISIBLE_DEVICES`) and apply
+/// an optional `ml.hsa_gfx_version` override. Index-independent and operator-owned
+/// (purely doorman.toml) — the daemon never guesses or hardcodes a device, so it
+/// cannot bind a card you keep off-limits. Called by both the daemon backend ctor
+/// and the depth sidecar's session loader. Idempotent; no-op for non-GPU devices.
+#[cfg(feature = "backend-ort-rocm")]
+fn apply_gpu_env(config: &Config) {
+    if !matches!(config.ml.device.as_str(), "rocm" | "gpu") {
+        return;
+    }
+    if let Some(uuid) = config.ml.gpu_uuid.as_deref().filter(|s| !s.is_empty()) {
+        std::env::set_var("ROCR_VISIBLE_DEVICES", uuid);
+        info!("Config gpu_uuid → ROCR_VISIBLE_DEVICES={} (ROCm bound to this GPU only)", uuid);
+    }
+    if let Some(v) = config.ml.hsa_gfx_version.as_deref().filter(|s| !s.is_empty()) {
+        std::env::set_var("HSA_OVERRIDE_GFX_VERSION", v);
+        info!("Config hsa_gfx_version → HSA_OVERRIDE_GFX_VERSION={}", v);
+    }
+}
+
+#[cfg(feature = "backend-ort-rocm")]
+fn rocm_ep_selected(config: &Config) -> bool {
+    use std::sync::OnceLock;
+    static DECISION: OnceLock<bool> = OnceLock::new();
+    *DECISION.get_or_init(|| {
+        if !matches!(config.ml.device.as_str(), "rocm" | "gpu") {
+            return false;
+        }
+        match config.ml.gpu_uuid.as_deref() {
+            Some(u) if !u.is_empty() => {}
+            _ => {
+                warn!(
+                    "ml.device='{}' but ml.gpu_uuid is empty — refusing to auto-pick a GPU (could bind a card you keep off-limits); using CPU. Set ml.gpu_uuid to a UUID from `rocminfo` to enable ROCm.",
+                    config.ml.device
+                );
+                return false;
+            }
+        }
+        rocm_runtime_has_device()
+    })
+}
+
 #[cfg(feature = "_ort")]
 impl OrtBackend {
         pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
@@ -75,6 +182,12 @@ impl OrtBackend {
             "ML device requested: {} (device_id={}) — check ort logs for EP registration result",
             config.ml.device, config.ml.gpu_device_id
         );
+
+        // Config-driven GPU binding — must run before the first HIP init (the
+        // model loads / ROCm pre-flight below). See apply_gpu_env: binds ROCm to
+        // exactly the configured GPU by stable UUID, no hardcoded device list.
+        #[cfg(feature = "backend-ort-rocm")]
+        apply_gpu_env(config);
 
         // Load detector pool (YuNet)
         let detector_path = models_dir.join(super::model_config::DetectorConfig::YUNET.model_file);
@@ -125,7 +238,23 @@ impl OrtBackend {
         //     detector/recognizer keep running on the iGPU here.
         //   - CPU device: load depth in-process on the CPU EP as before
         //     (`InProcess`) — the working, validated path; no sidecar needed.
-        let is_gpu = matches!(config.ml.device.as_str(), "rocm" | "cuda" | "gpu");
+        let is_gpu = {
+            let dev = config.ml.device.as_str();
+            // `mut` is only used under backend-ort-rocm (the downgrade below); on
+            // other builds the reassignment is cfg'd out.
+            #[allow(unused_mut)]
+            let mut gpu = matches!(dev, "rocm" | "cuda" | "gpu");
+            // If ROCm was requested but its runtime sees no GPU, load_model falls
+            // back to the CPU EP for detector/recognizer — so depth must ALSO run
+            // in-process on CPU, NOT via the ROCm sidecar (which would be down for
+            // the same reason). Without this the daemon would survive but every
+            // auth's liveness gate would fail (sidecar unreachable).
+            #[cfg(feature = "backend-ort-rocm")]
+            if matches!(dev, "rocm" | "gpu") && !rocm_ep_selected(config) {
+                gpu = false;
+            }
+            gpu
+        };
         let depth_source = if is_gpu {
             let sock = super::depth_ipc::resolve_socket_path(
                 &Self::default_depth_socket_for(config),
@@ -324,17 +453,20 @@ impl OrtBackend {
             builder
         };
 
+        // ROCm EP is registered only when config selects it AND HIP sees the
+        // configured GPU (rocm_ep_selected). This is the FATAL-crash guard: ORT's
+        // ROCm init does an uncatchable C++ terminate() ("no ROCm-capable device")
+        // if registered with no visible device, which SIGABRTs the whole daemon.
+        // Falling through to the CPU EP keeps the daemon alive (password/PAM still
+        // work; CPU inference still authenticates) instead of crash-looping.
         #[cfg(feature = "backend-ort-rocm")]
-        let builder = if config.ml.device == "rocm" || config.ml.device == "gpu" {
-            // Set HSA_OVERRIDE_GFX_VERSION as early as possible (before any
-            // HIP/session init) so unsupported gfx targets like gfx1103
-            // (Radeon 780M) report as a supported version (11.0.0). BEST-EFFORT:
-            // only set it if not already exported — run_rocm.sh / systemd is the
-            // preferred place to set this, and we must not clobber the operator's
-            // value.
+        let builder = if rocm_ep_selected(config) {
+            // HSA override precedence: config `ml.hsa_gfx_version` (applied in
+            // new()) > operator env (systemd) > this best-effort default for the
+            // gfx1103 iGPU. Only set if still unset so we never clobber the above.
             if std::env::var("HSA_OVERRIDE_GFX_VERSION").is_err() {
-                std::env::set_var("HSA_OVERRIDE_GFX_VERSION", "11.0.0");
-                info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.0 for gfx1103 support (set it in run_rocm.sh / systemd to override)");
+                std::env::set_var("HSA_OVERRIDE_GFX_VERSION", "11.0.3");
+                info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.3 for gfx1103 support (override via ml.hsa_gfx_version or systemd)");
             }
             info!("Configuring ROCm execution provider for {:?}", path);
             builder.with_execution_providers([
@@ -344,6 +476,8 @@ impl OrtBackend {
             ])
             .map_err(|e| anyhow!("Failed to set ROCm EP: {}", e))?
         } else {
+            // device=cpu, or a GPU device whose configured card isn't usable —
+            // rocm_ep_selected() already logged the reason once. Run on CPU.
             builder
         };
 
@@ -564,6 +698,9 @@ fn load_depth_session_for_ep(models_dir: &Path, config: &Config, device: &str) -
     let depth_path = models_dir.join(depth_cfg.model_file);
     let mut ep_config = config.clone();
     ep_config.ml.device = device.to_string();
+    // Bind ROCm to the configured GPU by UUID before HIP init (sidecar path).
+    #[cfg(feature = "backend-ort-rocm")]
+    apply_gpu_env(&ep_config);
     let session = OrtBackend::load_model(&depth_path, &ep_config)
         .with_context(|| format!("Failed to load depth model {:?} on {} EP", depth_path, device))?;
     Ok(Mutex::new(session))

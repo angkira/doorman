@@ -3,7 +3,7 @@ use crate::camera::Camera;
 use doorman_shared::Config;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Describes how the producer thread should open the camera.
 ///
@@ -66,14 +66,32 @@ pub fn spawn_camera_producer(
                 Camera::from_video_file(path.clone(), *width, *height, *fps, *loop_playback)
             }
             CameraSource::Config => {
-                match futures::executor::block_on(Camera::new_with_config(&config)) {
-                    Ok(cam) => {
-                        info!("Camera opened in producer thread");
-                        cam
-                    }
-                    Err(e) => {
-                        error!("Camera not available and could not be opened: {}", e);
+                // Retry opening the camera with backoff instead of killing the
+                // producer thread. A missing/disconnected camera at startup must
+                // leave the daemon idling and re-probing (so it recovers when the
+                // camera reappears) rather than permanently dying — auth is
+                // on-demand and the pipeline is lifecycle-gated, so "no camera"
+                // is a transient not-ready state, not a fatal condition.
+                const REPROBE_SECS: u64 = 3;
+                loop {
+                    // Bail out if nobody wants frames anymore (pipeline stopped /
+                    // shutdown) so a cameraless box doesn't spin a zombie thread.
+                    if frame_tx.is_closed() && latest_frame_tx.is_closed() {
+                        debug!("All frame receivers gone before a camera could be opened; producer exiting");
                         return;
+                    }
+                    match futures::executor::block_on(Camera::new_with_config(&config)) {
+                        Ok(cam) => {
+                            info!("Camera opened in producer thread");
+                            break cam;
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Camera not available ({}); idling, will re-probe in {}s",
+                                e, REPROBE_SECS
+                            );
+                            std::thread::sleep(std::time::Duration::from_secs(REPROBE_SECS));
+                        }
                     }
                 }
             }
