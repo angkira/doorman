@@ -14,6 +14,12 @@ pub mod ort_backend;
 #[cfg(feature = "_ort")]
 mod yunet_decoder;
 
+/// ncnn-Vulkan iGPU backend FFI wrapper (PHASE 1 foundation). Gated on
+/// `backend-ncnn`; not wired into `MLBackend` yet (that is PHASE 2). Public so
+/// the gated `ncnn_igpu` example/test can exercise the FFI directly.
+#[cfg(feature = "backend-ncnn")]
+pub mod ncnn_backend;
+
 #[cfg(test)]
 mod tests;
 

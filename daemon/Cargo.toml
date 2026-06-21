@@ -149,6 +149,15 @@ backend-ort-cuda = ["_ort", "ort", "ort/cuda", "ort/download-binaries", "ort/tls
 # pure add-on with CPU fallback baked in.
 backend-ort-coreml = ["backend-ort", "ort/coreml"] # CoreML EP (ANE/GPU/CPU), macOS only
 
+# ncnn + Vulkan iGPU backend (Linux only). PHASE 1 = FFI foundation: compiles
+# the C++ shim (ncnn_shim/) in build.rs and links a static libncnn built with
+# -DNCNN_VULKAN=ON (prefix via DOORMAN_NCNN_DIR, default /tmp/ncnn_install).
+# Additive + standalone: it does NOT pull any ort/backend-ort* feature, so the
+# default and ROCm builds are untouched when this is off. Wiring into MLBackend
+# (the hybrid that keeps EdgeFace on ORT-CPU) is PHASE 2.
+#   cargo build --no-default-features --features backend-ncnn,camera-v4l2,camera-ffmpeg
+backend-ncnn = []
+
 # --- Camera backends ---
 camera-mock = []                                         # video-file / synthetic frames, all platforms
 camera-ffmpeg = []                                       # live webcam via ffmpeg CLI (macOS AVFoundation / Linux V4L2)
@@ -168,6 +177,19 @@ required-features = ["camera-nokhwa"]
 [[example]]
 name = "coreml_bench"
 required-features = ["backend-ort-coreml"]
+
+# ncnn-Vulkan iGPU FFI proof (PHASE 1): loads converted YuNet + Depth-Anything
+# .param/.bin, runs them on the integrated RADV PHOENIX device, and prints the
+# selected device + output stats. Only builds with backend-ncnn.
+[[example]]
+name = "ncnn_igpu"
+required-features = ["backend-ncnn"]
+
+# `cc` compiles the ncnn C++ shim — but ONLY when backend-ncnn is enabled (the
+# build.rs gates all native work behind that feature, so this dep is inert for
+# the default / ORT / ROCm builds even though it is always present here).
+[build-dependencies]
+cc = "1.2"
 
 [dev-dependencies]
 tempfile = "3.13"
