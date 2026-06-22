@@ -234,7 +234,7 @@ pub async fn run_recognition_pipeline(
                                         Err(e) => warn!(
                                             "Proactive unlock: Session.Unlock() failed ({e}). \
                                              If 'not authorized', the polkit rule granting \
-                                             'org.freedesktop.login1.unlock-sessions' to the daemon \
+                                             'org.freedesktop.login1.lock-sessions' to the daemon \
                                              user is not installed yet (installer stage)."
                                         ),
                                     }

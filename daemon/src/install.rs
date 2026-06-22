@@ -59,7 +59,7 @@ pub struct InstallOpts {
     pub ep: EpChoice,
     pub pam_scope: PamScope,
     /// Opt-in: grant the `doorman` system user the logind
-    /// `org.freedesktop.login1.unlock-sessions` polkit action AND flip
+    /// `org.freedesktop.login1.lock-sessions` polkit action AND flip
     /// `proactive_unlock = true` in the installed config, so a recognized face
     /// (with liveness PASS) can unlock the session WITHOUT a keypress. Default
     /// OFF — high-trust convenience. Password/PAM remain the fallback path.
@@ -621,7 +621,7 @@ const MODELS_DIR: &str = "/var/lib/doorman/models";
 const UNIT_PATH: &str = "/etc/systemd/system/doormand.service";
 const DEPTHD_UNIT_PATH: &str = "/etc/systemd/system/doorman-depthd.service";
 /// Modern polkit JS rule that authorizes ONLY the `doorman` system user for ONLY
-/// the logind `unlock-sessions` action. Written ONLY with `--auto-unlock`; the
+/// the logind `lock-sessions` action. Written ONLY with `--auto-unlock`; the
 /// proactive-unlock path in the daemon needs it to call `Session.Unlock()`.
 const POLKIT_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-doorman-unlock.rules";
 /// Sidecar depth socket the daemon's `DepthSource::Sidecar` connects to on GPU
@@ -830,21 +830,21 @@ fn render_depthd_unit() -> String {
 
 /// The modern polkit JS rule (`/etc/polkit-1/rules.d/49-doorman-unlock.rules`)
 /// granting ONLY the `doorman` system user ONLY the logind
-/// `org.freedesktop.login1.unlock-sessions` action. Tightly scoped: no other
+/// `org.freedesktop.login1.lock-sessions` action. Tightly scoped: no other
 /// user, no other action. Returns `polkit.Result.YES` for that exact pair and
 /// falls through (undefined) otherwise so every other check uses system policy.
 ///
 /// The daemon's proactive-unlock path (`Session.Unlock()`, run as `doorman`)
-/// is rejected by polkit's default `auth_admin` for `unlock-sessions` without
+/// is rejected by polkit's default `auth_admin` for `lock-sessions` without
 /// this rule. Installed ONLY under the opt-in `--auto-unlock` flag.
 fn render_polkit_unlock_rule() -> String {
     "// doorman face-unlock — managed by `doorman install --auto-unlock`.\n\
      // Authorizes ONLY the `doorman` system user for ONLY the logind\n\
-     // unlock-sessions action, so the daemon's proactive-unlock path can call\n\
+     // lock-sessions action, so the daemon's proactive-unlock path can call\n\
      // Session.Unlock() after a recognized face + liveness PASS. No other user\n\
      // or action is affected. Remove via `doorman uninstall`.\n\
      polkit.addRule(function(action, subject) {\n\
-     \x20   if (action.id == \"org.freedesktop.login1.unlock-sessions\" &&\n\
+     \x20   if (action.id == \"org.freedesktop.login1.lock-sessions\" &&\n\
      \x20       subject.user == \"doorman\") {\n\
      \x20       return polkit.Result.YES;\n\
      \x20   }\n\
@@ -1223,7 +1223,7 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         ));
         plan.push(
             Action::priv_(
-                format!("Write polkit unlock rule -> {POLKIT_RULE_PATH} (grants doorman org.freedesktop.login1.unlock-sessions)"),
+                format!("Write polkit unlock rule -> {POLKIT_RULE_PATH} (grants doorman org.freedesktop.login1.lock-sessions)"),
                 &["tee", POLKIT_RULE_PATH],
             )
             .with_stdin(render_polkit_unlock_rule()),
@@ -1653,7 +1653,7 @@ pub fn run_install(opts: &InstallOpts) -> Result<(), String> {
     if opts.auto_unlock {
         eprintln!(
             "\n  !!  --auto-unlock is a HIGH-TRUST CONVENIENCE opt-in.\n      \
-             It grants the `doorman` user the logind unlock-sessions polkit action\n      \
+             It grants the `doorman` user the logind lock-sessions polkit action\n      \
              and sets proactive_unlock=true, so a RECOGNIZED face (with liveness PASS)\n      \
              unlocks your session WITHOUT a keypress. Your password remains a fallback;\n      \
              the liveness gate still runs before any unlock. Omit the flag to keep\n      \
@@ -2161,7 +2161,7 @@ fn print_next_steps(d: &Diagnosis, opts: &InstallOpts) {
     }
     if opts.auto_unlock {
         println!("\n  Proactive auto-unlock is ENABLED (--auto-unlock): proactive_unlock=true and the");
-        println!("  polkit rule granting `doorman` logind unlock-sessions are installed. After enrolling,");
+        println!("  polkit rule granting `doorman` logind lock-sessions are installed. After enrolling,");
         println!("  LOCK YOUR SCREEN and present your face — a recognized face + liveness PASS unlocks");
         println!("  the session with NO keypress. Your password remains a fallback. Disable by re-running");
         println!("  install without --auto-unlock (then `doorman uninstall` removes the polkit rule).");
@@ -2559,11 +2559,11 @@ mod tests {
         // Modern polkit JS API surface.
         assert!(r.contains("polkit.addRule(function(action, subject)"));
         assert!(r.contains("return polkit.Result.YES;"));
-        // Tightly scoped: exactly the doorman user + the unlock-sessions action.
-        assert!(r.contains("action.id == \"org.freedesktop.login1.unlock-sessions\""));
+        // Tightly scoped: exactly the doorman user + the lock-sessions action.
+        assert!(r.contains("action.id == \"org.freedesktop.login1.lock-sessions\""));
         assert!(r.contains("subject.user == \"doorman\""));
         // No other action or user is granted.
-        assert!(!r.contains("unlock-session\""), "must target unlock-sessions, not a different id");
+        assert!(!r.contains("unlock-session\""), "must target lock-sessions, not a different id");
         assert!(!r.contains("\"root\""));
         // Balanced braces (well-formed JS block structure).
         assert_eq!(r.matches('{').count(), r.matches('}').count());

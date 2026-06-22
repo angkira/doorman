@@ -74,7 +74,7 @@ trait LoginSession {
 /// Cheap clonable handle that performs `Session.Unlock()` on the resolved
 /// session. Holds the shared zbus connection + the session object path. Calling
 /// `unlock()` when the daemon's `doorman` user lacks the
-/// `org.freedesktop.login1.unlock-sessions` polkit grant returns an
+/// `org.freedesktop.login1.lock-sessions` polkit grant returns an
 /// "not authorized" error, which is logged and otherwise harmless (the polkit
 /// rule is installed by the separate installer stage).
 #[derive(Clone)]
