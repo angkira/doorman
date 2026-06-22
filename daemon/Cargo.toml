@@ -185,6 +185,13 @@ required-features = ["backend-ort-coreml"]
 name = "ncnn_igpu"
 required-features = ["backend-ncnn"]
 
+# THROWAWAY Phase-4 security validation: compares ncnn-iGPU depth_relief vs
+# ORT-CPU depth_relief on genuine/spoof images for the FATAL anti-spoof gate.
+# Needs both the ORT (inner backend + reference) and ncnn (iGPU depth) features.
+[[example]]
+name = "ncnn_hybrid_validate"
+required-features = ["backend-ort", "backend-ncnn"]
+
 # `cc` compiles the ncnn C++ shim — but ONLY when backend-ncnn is enabled (the
 # build.rs gates all native work behind that feature, so this dep is inert for
 # the default / ORT / ROCm builds even though it is always present here).
