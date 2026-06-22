@@ -221,10 +221,10 @@ pub struct AuthConfig {
     /// FATAL depth-liveness gate, fold that embedding into the user's template so
     /// recognition adapts to changing lighting/angle over time.
     ///
-    /// Default `false`. This is a biometric template-update feature and carries an
-    /// AUTHENTICATION-DRIFT risk: repeatedly adapting on borderline matches can walk
-    /// the stored identity over time (toward a persistent look-alike). It is hardened
-    /// so the risk is bounded — adaptation ONLY happens on a HIGH-confidence match
+    /// Default `true` — the AUTHENTICATION-DRIFT risk (repeatedly adapting on
+    /// borderline matches walking the stored identity toward a persistent look-alike)
+    /// is BOUNDED by the hardening below; set `false` to disable adaptation entirely.
+    /// Hardening — adaptation ONLY happens on a HIGH-confidence match
     /// (cosine >= max(0.85, similarity_threshold + 0.05), well above the auth
     /// threshold), the original enrolled embeddings are APPEND-only-anchored (never
     /// evicted by adaptation), the gallery is hard-capped, near-duplicates are
@@ -350,7 +350,7 @@ fn default_similarity_threshold() -> f32 { 0.4 }
 fn default_auth_frames() -> usize { 10 }
 fn default_liveness_enabled() -> bool { true }
 fn default_proactive_unlock() -> bool { false }
-fn default_adaptive_enroll() -> bool { false }
+fn default_adaptive_enroll() -> bool { true }
 // Calibrated through the daemon at 1024x720 on in-situ genuine vs screen-replay
 // captures (see .session/2026-06-08_liveness-wired.md). On the working
 // (CPU-EP) depth path the relief separates cleanly: genuine 0.068..0.245
