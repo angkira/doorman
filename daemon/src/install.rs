@@ -722,6 +722,12 @@ fn render_unit(ep: Ep) -> String {
          ReadWritePaths={STATE_DIR}\n\
          DevicePolicy=closed\n\
          DeviceAllow=char-video4linux rw\n\
+         # char-drm (DRM major 226) grants the /dev/dri/renderD*/card* nodes. A bare\n\
+         # `DeviceAllow=/dev/dri rw` does NOT cover those char devices under\n\
+         # DevicePolicy=closed, so the ncnn/Vulkan (radv) backend got\n\
+         # \"renderD128: Operation not permitted\" and fell back to CPU. Needed for\n\
+         # Vulkan (ncnn iGPU depth) and harmless for the other EPs.\n\
+         DeviceAllow=char-drm rw\n\
          DeviceAllow=/dev/dri rw\n\
          DeviceAllow=/dev/kfd rw\n\
          MemoryMax=2G\n\
