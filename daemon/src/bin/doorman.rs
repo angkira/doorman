@@ -115,14 +115,19 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
         /// Auto-detect the execution provider (default).
-        #[arg(long, conflicts_with_all = ["cpu", "rocm"])]
+        #[arg(long, conflicts_with_all = ["cpu", "rocm", "ncnn"])]
         auto: bool,
         /// Force the CPU backend.
-        #[arg(long, conflicts_with_all = ["auto", "rocm"])]
+        #[arg(long, conflicts_with_all = ["auto", "rocm", "ncnn"])]
         cpu: bool,
         /// Force the AMD ROCm backend (iGPU).
-        #[arg(long, conflicts_with_all = ["auto", "cpu"])]
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "ncnn"])]
         rocm: bool,
+        /// Force the ncnn-Vulkan hybrid: depth-liveness on the iGPU via Vulkan,
+        /// detection + recognition on the CPU (ORT). Builds libncnn + converts the
+        /// depth model at install time.
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm"])]
+        ncnn: bool,
         /// Integrate with screen unlock only (default, safest).
         #[arg(long, conflicts_with_all = ["login", "sudo", "no_pam"])]
         screen_unlock: bool,
@@ -220,12 +225,13 @@ fn main() {
             auto: _,
             cpu,
             rocm,
+            ncnn,
             screen_unlock: _,
             login,
             sudo,
             no_pam,
             auto_unlock,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *login, *sudo, *no_pam, *auto_unlock),
+        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, *auto_unlock),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
     };
 
@@ -251,6 +257,7 @@ fn cmd_install(
     yes: bool,
     cpu: bool,
     rocm: bool,
+    ncnn: bool,
     login: bool,
     sudo: bool,
     no_pam: bool,
@@ -260,6 +267,8 @@ fn cmd_install(
         EpChoice::Cpu
     } else if rocm {
         EpChoice::Rocm
+    } else if ncnn {
+        EpChoice::Ncnn
     } else {
         EpChoice::Auto
     };

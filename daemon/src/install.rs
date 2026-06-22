@@ -34,6 +34,9 @@ pub enum EpChoice {
     Auto,
     Cpu,
     Rocm,
+    /// ncnn-Vulkan hybrid: depth-liveness on the iGPU via ncnn, detection +
+    /// embedding + liveness on the ORT CPU backend.
+    Ncnn,
 }
 
 /// Which PAM auth surface to integrate with.
@@ -79,6 +82,9 @@ pub enum Ep {
     Rocm,
     Cuda,
     CoreMl,
+    /// ncnn-Vulkan hybrid (iGPU depth + CPU detect/recognize). Builds with
+    /// `backend-ort,backend-ncnn`; runs depth on the integrated GPU via Vulkan.
+    Ncnn,
 }
 
 impl Ep {
@@ -89,6 +95,8 @@ impl Ep {
             Ep::Rocm => "backend-ort-rocm",
             Ep::Cuda => "backend-ort-cuda",
             Ep::CoreMl => "backend-ort-coreml",
+            // Hybrid: ORT (CPU detect/recognize) + ncnn (iGPU depth).
+            Ep::Ncnn => "backend-ort,backend-ncnn",
         }
     }
     pub fn label(self) -> &'static str {
@@ -97,6 +105,7 @@ impl Ep {
             Ep::Rocm => "rocm",
             Ep::Cuda => "cuda",
             Ep::CoreMl => "coreml",
+            Ep::Ncnn => "ncnn",
         }
     }
 }
@@ -220,6 +229,10 @@ pub fn pick_ep(
 ) -> (Ep, String) {
     match forced {
         EpChoice::Cpu => (Ep::Cpu, "forced --cpu".to_string()),
+        EpChoice::Ncnn => (
+            Ep::Ncnn,
+            "forced --ncnn (ncnn-Vulkan iGPU depth + CPU detect/recognize)".to_string(),
+        ),
         EpChoice::Rocm => {
             let note = if rocm_so_present {
                 "forced --rocm (ROCm ONNX Runtime .so found)".to_string()
@@ -853,25 +866,30 @@ fn render_config(src: &str, ep: Ep, enable_proactive: bool) -> String {
     let src = if ep == Ep::Cpu {
         src.to_string()
     } else {
-        let device = ep.label(); // "rocm" | "cuda"
+        let label = ep.label(); // "rocm" | "cuda" | "ncnn"
         let is_rocm = ep == Ep::Rocm;
+        // ncnn hybrid: ORT runs on CPU (detect/recognize); only depth goes to the
+        // iGPU via ncnn. So the config is backend="ncnn", device="cpu".
+        let is_ncnn = ep == Ep::Ncnn;
+        let backend_str = if is_ncnn { "ncnn" } else { "ort" };
+        let device_str = if is_ncnn { "cpu" } else { label };
         // Don't duplicate knobs the shipped template may already carry.
         let has_gpu_uuid = src.contains("gpu_uuid");
         let has_hsa = src.contains("hsa_gfx_version");
+        let has_vulkan = src.contains("vulkan_device");
         let mut out = String::with_capacity(src.len() + 256);
         for line in src.lines() {
             let t = line.trim_start();
             if t.starts_with("backend") && t.contains('=') {
                 out.push_str(&format!(
-                    "backend = \"ort\"  # set by `doorman install --{device}`\n"
+                    "backend = \"{backend_str}\"  # set by `doorman install --{label}`\n"
                 ));
             } else if t.starts_with("device") && t.contains('=') {
                 out.push_str(&format!(
-                    "device = \"{device}\"  # set by `doorman install --{device}`\n"
+                    "device = \"{device_str}\"  # set by `doorman install --{label}`\n"
                 ));
-                // Insert the config-driven GPU-selection knobs right after `device`
-                // (they live in the same [ml] section). ROCm only — CUDA scopes by
-                // CUDA_VISIBLE_DEVICES, not these keys.
+                // Insert the config-driven device-selection knobs right after `device`
+                // (same [ml] section). ROCm: gpu_uuid/hsa. ncnn: vulkan_device.
                 if is_rocm && !has_gpu_uuid {
                     out.push_str("# Bind ROCm to ONE GPU by its STABLE UUID (see `rocminfo` / `rocm-smi --showuniqueid`).\n");
                     out.push_str("# Empty = ROCm stays OFF and the daemon runs on CPU (so no card is ever auto-picked\n");
@@ -880,6 +898,12 @@ fn render_config(src: &str, ep: Ep, enable_proactive: bool) -> String {
                 }
                 if is_rocm && !has_hsa {
                     out.push_str("hsa_gfx_version = \"11.0.3\"  # HSA_OVERRIDE_GFX_VERSION (gfx1103 iGPU); adjust per GPU\n");
+                }
+                if is_ncnn && !has_vulkan {
+                    out.push_str("# ncnn/Vulkan device for the iGPU depth backend: a name substring from\n");
+                    out.push_str("# `vulkaninfo` (e.g. \"RADV PHOENIX\"). Empty = first INTEGRATED GPU (the code\n");
+                    out.push_str("# refuses the discrete dGPU). Only used with backend = \"ncnn\".\n");
+                    out.push_str("vulkan_device = \"\"  # e.g. \"RADV PHOENIX\"\n");
                 }
             } else {
                 out.push_str(line);
@@ -1047,6 +1071,20 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     // cargo invocation with the SAME ROCm feature, so it loads the depth model on
     // the iGPU (ROCm EP) and keeps the CPU light during auth. CPU/CUDA installs run
     // depth in-process and do not need (or build) the sidecar.
+    // ncnn-Vulkan hybrid: build the STATIC libncnn (Vulkan) into the repo-relative
+    // prefix that build.rs defaults DOORMAN_NCNN_DIR to, so the de-escalated cargo
+    // build below links it with no extra per-step env. User context (toolchain +
+    // network); idempotent (the script no-ops if the prefix already has libncnn.a).
+    if d.ep == Ep::Ncnn {
+        plan.push(Action::user(
+            "Build static libncnn (Vulkan) for the iGPU depth backend (scripts/build_ncnn.sh)",
+            &[
+                Box::leak(root.join("scripts/build_ncnn.sh").display().to_string().into_boxed_str()),
+                Box::leak(root.join(".ncnn-prefix").display().to_string().into_boxed_str()),
+            ],
+        ));
+    }
+
     let build_depthd = d.ep == Ep::Rocm;
     {
         let mut argv: Vec<&str> = vec![
@@ -1137,11 +1175,18 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     // backend="tract"/device="cpu", so a GPU install MUST be transformed to
     // backend="ort"/device=<ep> or the daemon stays on CPU regardless of the unit's
     // --device flag. CPU installs render to an unchanged (tract/cpu) config.
-    let backend_label = if d.ep == Ep::Cpu { "tract" } else { "ort" };
+    let backend_label = match d.ep {
+        Ep::Cpu => "tract",
+        Ep::Ncnn => "ncnn",
+        _ => "ort",
+    };
+    // ncnn runs the inner ORT backend on CPU (only depth goes to the iGPU), so its
+    // config device is "cpu", not the EP label.
+    let device_label = if d.ep == Ep::Ncnn { "cpu" } else { d.ep.label() };
     let cfg_summary = if opts.auto_unlock {
-        format!("backend={backend_label}, device={}, proactive_unlock=true", d.ep.label())
+        format!("backend={backend_label}, device={device_label}, proactive_unlock=true")
     } else {
-        format!("backend={backend_label}, device={}", d.ep.label())
+        format!("backend={backend_label}, device={device_label}")
     };
     let rendered = render_config(
         &std::fs::read_to_string(&cfg_src).unwrap_or_default(),
@@ -1220,6 +1265,37 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         "chown models to doorman:doorman".to_string(),
         &["chown", "-R", "doorman:doorman", STATE_DIR],
     ));
+
+    // ncnn hybrid: convert the Depth-Anything ONNX -> ncnn and install
+    // depth.ncnn.{param,bin} into the models dir (next to the ONNX the inner ORT
+    // backend loads). Convert reads the user-readable ONNX source (XDG or repo),
+    // writes to a user-writable prefix, then a privileged install copies the two
+    // files into the root-owned models dir owned by doorman.
+    if d.ep == Ep::Ncnn {
+        let onnx_src = invoking_user_home()
+            .map(|h| h.join(".local/share/doorman/models"))
+            .filter(|p| dir_nonempty(p))
+            .unwrap_or_else(|| root.join("data/models"));
+        let out = root.join(".ncnn-prefix/models");
+        plan.push(Action::user(
+            "Convert Depth-Anything ONNX -> ncnn (depth.ncnn) for the iGPU depth backend (scripts/convert_ncnn.sh)",
+            &[
+                Box::leak(root.join("scripts/convert_ncnn.sh").display().to_string().into_boxed_str()),
+                Box::leak(onnx_src.display().to_string().into_boxed_str()),
+                Box::leak(out.display().to_string().into_boxed_str()),
+            ],
+        ));
+        for f in ["depth.ncnn.param", "depth.ncnn.bin"] {
+            plan.push(Action::priv_(
+                format!("Install {f} -> {MODELS_DIR}"),
+                &[
+                    "install", "-m", "0644", "-o", "doorman", "-g", "doorman",
+                    Box::leak(out.join(f).display().to_string().into_boxed_str()),
+                    MODELS_DIR,
+                ],
+            ));
+        }
+    }
 
     // ROCm: relocate the verified ORT .so into /usr/lib/doorman.
     if d.ep == Ep::Rocm {
@@ -2573,6 +2649,43 @@ mod tests {
         assert!(!out.contains("proactive_unlock = false"));
         // Exactly one proactive_unlock line (no duplication).
         assert_eq!(out.matches("proactive_unlock").count(), 1);
+    }
+
+    #[test]
+    fn render_config_ncnn_sets_ncnn_backend_cpu_device_and_vulkan_seed() {
+        // ncnn hybrid: the inner ORT backend runs on CPU (only depth goes to the
+        // iGPU), so the config is backend="ncnn"/device="cpu" with a vulkan_device seed.
+        let src = "[ml]\nbackend = \"tract\"\ndevice = \"cpu\"\ncpu_threads = 0\n";
+        let out = render_config(src, Ep::Ncnn, false);
+        assert!(out.contains("backend = \"ncnn\""), "got:\n{out}");
+        assert!(out.contains("device = \"cpu\""), "got:\n{out}");
+        assert!(out.contains("vulkan_device = \"\""), "ncnn must seed vulkan_device:\n{out}");
+        // ncnn must NOT carry the ROCm-only knobs.
+        assert!(!out.contains("gpu_uuid"));
+        assert!(!out.contains("hsa_gfx_version"));
+        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("backend")).count(), 1);
+        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("device")).count(), 1);
+    }
+
+    #[test]
+    fn plan_ncnn_builds_libncnn_converts_depth_and_no_depthd() {
+        let plan = build_install_plan(&test_diag(Ep::Ncnn), &opts(false));
+        let joined = plan.iter().map(|a| a.desc.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("static libncnn"), "ncnn plan must build libncnn:\n{joined}");
+        assert!(
+            plan.iter().any(|a| a.argv.iter().any(|s| s.contains("backend-ort,backend-ncnn"))),
+            "ncnn build must use the backend-ort,backend-ncnn feature set"
+        );
+        assert!(joined.contains("Convert Depth-Anything ONNX"), "ncnn plan must convert depth:\n{joined}");
+        assert!(
+            joined.contains("depth.ncnn.param") && joined.contains("depth.ncnn.bin"),
+            "ncnn plan must install depth.ncnn.{{param,bin}}:\n{joined}"
+        );
+        // ncnn runs depth in-process on the iGPU — NO ROCm depth sidecar.
+        assert!(
+            !joined.to_lowercase().contains("doorman-depthd"),
+            "ncnn must NOT build/install the ROCm depth sidecar:\n{joined}"
+        );
     }
 
     fn test_diag(ep: Ep) -> Diagnosis {

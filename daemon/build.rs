@@ -29,8 +29,13 @@ fn build_ncnn_shim() {
     println!("cargo:rerun-if-changed=ncnn_shim/ncnn_shim.h");
 
     // ncnn install prefix (static lib + headers), built with NCNN_VULKAN=ON.
-    let ncnn_dir = std::env::var("DOORMAN_NCNN_DIR")
-        .unwrap_or_else(|_| "/tmp/ncnn_install".to_string());
+    // Defaults to a repo-relative `.ncnn-prefix` that `doorman install --ncnn`
+    // (and scripts/build_ncnn.sh) populate, so the installer's de-escalated cargo
+    // build links libncnn with no extra per-step env. Override with DOORMAN_NCNN_DIR.
+    let ncnn_dir = std::env::var("DOORMAN_NCNN_DIR").unwrap_or_else(|_| {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        format!("{manifest}/../.ncnn-prefix")
+    });
     let ncnn_dir = PathBuf::from(ncnn_dir);
     let ncnn_inc = ncnn_dir.join("include").join("ncnn");
     let ncnn_lib = ncnn_dir.join("lib");

@@ -97,3 +97,7 @@ benchmark_results/
 /doormand.service
 /doormand-user.service
 /doorman-lightweight.toml
+
+# ncnn-Vulkan build prefix (static libncnn + converted depth.ncnn) produced by
+# scripts/build_ncnn.sh + scripts/convert_ncnn.sh / `doorman install --ncnn`.
+/.ncnn-prefix/
