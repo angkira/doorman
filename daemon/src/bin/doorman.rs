@@ -156,6 +156,14 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// Open the live preview window (camera + detection overlay). Thin wrapper that
+    /// launches the `doorman-preview` GUI, defaulting --runtime-dir to the system
+    /// daemon's socket dir. Extra args are forwarded to doorman-preview.
+    Preview {
+        /// Arguments forwarded to doorman-preview (e.g. --runtime-dir <dir>).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Resolved socket locations for this invocation.
@@ -233,6 +241,7 @@ fn main() {
             auto_unlock,
         } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, *auto_unlock),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
+        Command::Preview { args } => cmd_preview(args),
     };
 
     if let Err(CliError(msg)) = result {
@@ -293,6 +302,43 @@ fn cmd_install(
 
 fn cmd_uninstall(dry_run: bool, purge: bool) -> Result<(), CliError> {
     install::run_uninstall(&UninstallOpts { dry_run, purge }).map_err(CliError::new)
+}
+
+/// Launch the `doorman-preview` GUI. Resolves the binary next to this executable
+/// (installed layout) or on `$PATH`, and defaults `--runtime-dir` to the system
+/// daemon's socket directory (so `doorman preview` "just works" against a system
+/// install) unless the caller passed one. Extra args are forwarded verbatim.
+fn cmd_preview(args: &[String]) -> Result<(), CliError> {
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("doorman-preview")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("doorman-preview"));
+
+    let mut cmd = std::process::Command::new(&bin);
+    // Default the runtime dir to the system daemon's socket dir if the caller didn't
+    // set one and the system frame socket is present.
+    let has_runtime = args
+        .iter()
+        .any(|a| a == "--runtime-dir" || a.starts_with("--runtime-dir="));
+    if !has_runtime {
+        if let Some(dir) = Path::new(doorman_shared::SOCKET_PATH).parent() {
+            if dir.join("doorman-frames.sock").exists() {
+                cmd.arg("--runtime-dir").arg(dir);
+            }
+        }
+    }
+    cmd.args(args);
+
+    match cmd.status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(CliError::new(format!("doorman-preview exited with {s}"))),
+        Err(e) => Err(CliError::new(format!(
+            "failed to launch '{}': {e}. Build/install it: \
+             cargo build --release --features preview --bin doorman-preview",
+            bin.display()
+        ))),
+    }
 }
 
 /// Connect, send one request line, read one response line. This is the exact

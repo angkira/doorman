@@ -613,6 +613,7 @@ impl Action {
 const SYS_BIN: &str = "/usr/bin/doormand";
 const SYS_DEPTHD_BIN: &str = "/usr/bin/doorman-depthd";
 const SYS_CLI: &str = "/usr/bin/doorman";
+const SYS_PREVIEW: &str = "/usr/bin/doorman-preview";
 const SYS_LIBDIR: &str = "/usr/lib/doorman";
 const ETC_DIR: &str = "/etc/doorman";
 const ETC_CONFIG: &str = "/etc/doorman/doorman.toml";
@@ -1099,12 +1100,15 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
             "--release",
             "--no-default-features",
             "--features",
-            // camera features always included for V4L2 + ffmpeg fallback.
-            Box::leak(format!("{feature},camera-v4l2,camera-ffmpeg").into_boxed_str()),
+            // camera features always included for V4L2 + ffmpeg fallback; `preview`
+            // builds the doorman-preview GUI so `doorman preview` works post-install.
+            Box::leak(format!("{feature},camera-v4l2,camera-ffmpeg,preview").into_boxed_str()),
             "--bin",
             "doormand",
             "--bin",
             "doorman",
+            "--bin",
+            "doorman-preview",
         ];
         if build_depthd {
             argv.push("--bin");
@@ -1151,6 +1155,11 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         format!("Install doorman CLI -> {SYS_CLI}"),
         &["install", "-m", "0755",
           Box::leak(target.join("doorman").display().to_string().into_boxed_str()), SYS_CLI],
+    ));
+    plan.push(Action::priv_(
+        format!("Install doorman-preview GUI -> {SYS_PREVIEW} (so `doorman preview` works)"),
+        &["install", "-m", "0755",
+          Box::leak(target.join("doorman-preview").display().to_string().into_boxed_str()), SYS_PREVIEW],
     ));
     // ROCm: install the depth-liveness sidecar binary (runs depth on the iGPU).
     if build_depthd {
