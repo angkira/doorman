@@ -217,13 +217,19 @@ pub struct AuthConfig {
     #[serde(default = "default_proactive_unlock")]
     pub proactive_unlock: bool,
 
-    /// Continuous improvement: after a face is RECOGNIZED (>= similarity_threshold)
-    /// AND passes the FATAL depth-liveness gate, fold that embedding into the user's
-    /// template (union + farthest-point reselect, capped) so recognition adapts to
-    /// the current lighting/angle over time. Safe by construction — only
-    /// confirmed-live, recognized embeddings are ever added, so a spoof or a wrong
-    /// face can never poison the gallery; redundant (near-duplicate) samples are
-    /// skipped. Default `true`.
+    /// Continuous improvement (OPT-IN): after a face is recognized AND passes the
+    /// FATAL depth-liveness gate, fold that embedding into the user's template so
+    /// recognition adapts to changing lighting/angle over time.
+    ///
+    /// Default `false`. This is a biometric template-update feature and carries an
+    /// AUTHENTICATION-DRIFT risk: repeatedly adapting on borderline matches can walk
+    /// the stored identity over time (toward a persistent look-alike). It is hardened
+    /// so the risk is bounded — adaptation ONLY happens on a HIGH-confidence match
+    /// (cosine >= max(0.85, similarity_threshold + 0.05), well above the auth
+    /// threshold), the original enrolled embeddings are APPEND-only-anchored (never
+    /// evicted by adaptation), the gallery is hard-capped, near-duplicates are
+    /// skipped, and a spoof/wrong face can't enter (liveness + recognition both gate
+    /// it). Enable only if you understand and accept the drift trade-off.
     #[serde(default = "default_adaptive_enroll")]
     pub adaptive_enroll: bool,
 }
@@ -344,7 +350,7 @@ fn default_similarity_threshold() -> f32 { 0.4 }
 fn default_auth_frames() -> usize { 10 }
 fn default_liveness_enabled() -> bool { true }
 fn default_proactive_unlock() -> bool { false }
-fn default_adaptive_enroll() -> bool { true }
+fn default_adaptive_enroll() -> bool { false }
 // Calibrated through the daemon at 1024x720 on in-situ genuine vs screen-replay
 // captures (see .session/2026-06-08_liveness-wired.md). On the working
 // (CPU-EP) depth path the relief separates cleanly: genuine 0.068..0.245

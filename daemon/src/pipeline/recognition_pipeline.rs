@@ -244,7 +244,14 @@ pub async fn run_recognition_pipeline(
                                     // recognition (>= threshold) AND the FATAL liveness
                                     // gate both PASSED, so no spoof/wrong face can leak in.
                                     if config.authentication.adaptive_enroll {
-                                        maybe_adapt_template(&storage, &username, &aggregated).await;
+                                        maybe_adapt_template(
+                                            &storage,
+                                            &username,
+                                            &aggregated,
+                                            similarity,
+                                            config.authentication.similarity_threshold,
+                                        )
+                                        .await;
                                     }
                                 }
                                 Ok(false) => warn!(
@@ -329,20 +336,40 @@ pub async fn run_recognition_pipeline(
 }
 
 /// Calculate cosine similarity between two embeddings
-/// Continuous-improvement template update: fold a freshly-recognized,
-/// liveness-PASSED embedding into the user's stored gallery. Union + farthest-point
-/// reselect (capped at `ADAPT_TARGET`) keeps the template diverse and bounded; a
-/// near-duplicate that adds no coverage is skipped. No-op if the user has no
-/// template. Only ever called after recognition (>= threshold) AND the FATAL
-/// liveness gate PASSED, so a spoof or wrong face can never poison the gallery.
-async fn maybe_adapt_template(storage: &Arc<RwLock<Storage>>, username: &str, embedding: &[f32]) {
-    const ADAPT_TARGET: usize = 30;
+/// Continuous-improvement template update — HARDENED against authentication drift /
+/// template poisoning. Folds a freshly-recognized, liveness-PASSED embedding into the
+/// user's gallery ONLY when ALL hold:
+///   1. the match was HIGH-confidence — `similarity >= max(0.85, auth_threshold+0.05)`,
+///      well above the auth threshold, so a borderline unlock can never walk the
+///      template toward a persistent look-alike;
+///   2. it adds real coverage (not a near-duplicate of an existing embedding);
+///   3. the gallery is below a hard cap.
+/// It APPENDS only — the originally-enrolled embeddings are NEVER evicted, so they
+/// permanently anchor the identity. Combined with the caller's gates (recognition >=
+/// threshold AND the FATAL liveness gate), a spoof or wrong face cannot enter. No-op
+/// if the user has no template or `adaptive_enroll` is off.
+async fn maybe_adapt_template(
+    storage: &Arc<RwLock<Storage>>,
+    username: &str,
+    embedding: &[f32],
+    similarity: f32,
+    auth_threshold: f32,
+) {
+    // Drift guard: adaptation requires a MUCH stronger match than authentication.
+    let adapt_min = (auth_threshold + 0.05).max(0.85);
+    if similarity < adapt_min {
+        return;
+    }
+    const ADAPT_GALLERY_CAP: usize = 40; // bounded growth; stop adapting once full
     const ADAPT_MIN_NOVELTY: f32 = 0.03; // min cosine-distance to the nearest stored
     let mut sg = storage.write().await;
     let existing = match sg.get_embeddings(username) {
         Some(e) => e.clone(),
         None => return,
     };
+    if existing.len() >= ADAPT_GALLERY_CAP {
+        return;
+    }
     let nearest = existing
         .iter()
         .map(|e| cosine_similarity(embedding, e))
@@ -350,13 +377,14 @@ async fn maybe_adapt_template(storage: &Arc<RwLock<Storage>>, username: &str, em
     if 1.0 - nearest < ADAPT_MIN_NOVELTY {
         return; // already well covered — don't bloat the gallery with a near-duplicate
     }
+    // APPEND-only: never reselect/evict, so the original enrollment embeddings stay
+    // and anchor the identity even as high-confidence samples accumulate.
     let mut pool = existing;
     pool.push(embedding.to_vec());
-    let selected = crate::ipc::select_diverse_embeddings(pool, ADAPT_TARGET);
-    match sg.store_embeddings(username.to_string(), selected).await {
+    match sg.store_embeddings(username.to_string(), pool).await {
         Ok(()) => info!(
-            "Adaptive enroll: folded a new live embedding into {}'s template (nearest cosine {:.3})",
-            username, nearest
+            "Adaptive enroll: appended a high-confidence ({:.3}) live embedding to {}'s template (nearest {:.3}); originals anchored",
+            similarity, username, nearest
         ),
         Err(e) => warn!("Adaptive enroll: failed to update {}'s template: {}", username, e),
     }
