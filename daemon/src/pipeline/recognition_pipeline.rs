@@ -238,6 +238,14 @@ pub async fn run_recognition_pipeline(
                                              user is not installed yet (installer stage)."
                                         ),
                                     }
+                                    // Continuous improvement: fold this LIVE, recognized
+                                    // embedding into the user's template so recognition
+                                    // adapts to the current lighting/angle. Safe here —
+                                    // recognition (>= threshold) AND the FATAL liveness
+                                    // gate both PASSED, so no spoof/wrong face can leak in.
+                                    if config.authentication.adaptive_enroll {
+                                        maybe_adapt_template(&storage, &username, &aggregated).await;
+                                    }
                                 }
                                 Ok(false) => warn!(
                                     "Proactive unlock REJECTED: liveness/anti-spoof gate failed for {} — NOT unlocking",
@@ -321,6 +329,39 @@ pub async fn run_recognition_pipeline(
 }
 
 /// Calculate cosine similarity between two embeddings
+/// Continuous-improvement template update: fold a freshly-recognized,
+/// liveness-PASSED embedding into the user's stored gallery. Union + farthest-point
+/// reselect (capped at `ADAPT_TARGET`) keeps the template diverse and bounded; a
+/// near-duplicate that adds no coverage is skipped. No-op if the user has no
+/// template. Only ever called after recognition (>= threshold) AND the FATAL
+/// liveness gate PASSED, so a spoof or wrong face can never poison the gallery.
+async fn maybe_adapt_template(storage: &Arc<RwLock<Storage>>, username: &str, embedding: &[f32]) {
+    const ADAPT_TARGET: usize = 30;
+    const ADAPT_MIN_NOVELTY: f32 = 0.03; // min cosine-distance to the nearest stored
+    let mut sg = storage.write().await;
+    let existing = match sg.get_embeddings(username) {
+        Some(e) => e.clone(),
+        None => return,
+    };
+    let nearest = existing
+        .iter()
+        .map(|e| cosine_similarity(embedding, e))
+        .fold(0.0f32, f32::max);
+    if 1.0 - nearest < ADAPT_MIN_NOVELTY {
+        return; // already well covered — don't bloat the gallery with a near-duplicate
+    }
+    let mut pool = existing;
+    pool.push(embedding.to_vec());
+    let selected = crate::ipc::select_diverse_embeddings(pool, ADAPT_TARGET);
+    match sg.store_embeddings(username.to_string(), selected).await {
+        Ok(()) => info!(
+            "Adaptive enroll: folded a new live embedding into {}'s template (nearest cosine {:.3})",
+            username, nearest
+        ),
+        Err(e) => warn!("Adaptive enroll: failed to update {}'s template: {}", username, e),
+    }
+}
+
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;

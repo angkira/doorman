@@ -109,8 +109,10 @@ pub const AUTH_TIMEOUT_SECS: u64 = 3;
 /// Number of frames to capture during authentication
 pub const AUTH_FRAMES: usize = 10;
 
-/// Duration to record video during enrollment (in seconds)
-pub const ENROLL_DURATION_SECS: u64 = 10;
+/// Duration to record video during enrollment (in seconds). Longer = more frames
+/// across which to vary pose/lighting, so the diverse-embedding selection has a
+/// richer pool to draw a capacious template from.
+pub const ENROLL_DURATION_SECS: u64 = 15;
 
 /// Cosine similarity threshold for face matching (0.0-1.0).
 /// Higher value = stricter matching, fewer false positives.

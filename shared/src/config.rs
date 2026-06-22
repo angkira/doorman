@@ -216,6 +216,16 @@ pub struct AuthConfig {
     /// `org.freedesktop.login1.unlock-sessions` action (installed separately).
     #[serde(default = "default_proactive_unlock")]
     pub proactive_unlock: bool,
+
+    /// Continuous improvement: after a face is RECOGNIZED (>= similarity_threshold)
+    /// AND passes the FATAL depth-liveness gate, fold that embedding into the user's
+    /// template (union + farthest-point reselect, capped) so recognition adapts to
+    /// the current lighting/angle over time. Safe by construction — only
+    /// confirmed-live, recognized embeddings are ever added, so a spoof or a wrong
+    /// face can never poison the gallery; redundant (near-duplicate) samples are
+    /// skipped. Default `true`.
+    #[serde(default = "default_adaptive_enroll")]
+    pub adaptive_enroll: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +344,7 @@ fn default_similarity_threshold() -> f32 { 0.4 }
 fn default_auth_frames() -> usize { 10 }
 fn default_liveness_enabled() -> bool { true }
 fn default_proactive_unlock() -> bool { false }
+fn default_adaptive_enroll() -> bool { true }
 // Calibrated through the daemon at 1024x720 on in-situ genuine vs screen-replay
 // captures (see .session/2026-06-08_liveness-wired.md). On the working
 // (CPU-EP) depth path the relief separates cleanly: genuine 0.068..0.245
@@ -425,6 +436,7 @@ impl Default for AuthConfig {
             liveness_enabled: default_liveness_enabled(),
             liveness_depth_threshold: default_liveness_depth_threshold(),
             proactive_unlock: default_proactive_unlock(),
+            adaptive_enroll: default_adaptive_enroll(),
         }
     }
 }

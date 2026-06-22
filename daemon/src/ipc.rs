@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 
 /// Select diverse embeddings from a larger set using maximal distance approach
 /// This ensures we capture different angles/variations of the face
-fn select_diverse_embeddings(embeddings: Vec<Vec<f32>>, count: usize) -> Vec<Vec<f32>> {
+pub(crate) fn select_diverse_embeddings(embeddings: Vec<Vec<f32>>, count: usize) -> Vec<Vec<f32>> {
     if embeddings.len() <= count {
         return embeddings;
     }
@@ -416,7 +416,7 @@ async fn handle_enroll(
     // this is enough variation for the diverse-embedding selection below while
     // cutting enrollment processing time by ~10x and freeing recognizer sessions
     // for live detection sooner.
-    const ENROLL_MAX_PROCESS_FRAMES: usize = 30;
+    const ENROLL_MAX_PROCESS_FRAMES: usize = 40;
     let frames: Vec<image::DynamicImage> = if frames.len() > ENROLL_MAX_PROCESS_FRAMES {
         let total = frames.len();
         // Evenly spaced indices across the whole recording.
@@ -491,13 +491,31 @@ async fn handle_enroll(
     let num_valid = valid_embeddings.len();
     info!("Extracted {} valid embeddings", num_valid);
 
-    // Select diverse embeddings that cover different angles/variations
-    // Use k-means-like approach: pick embeddings that are furthest apart
-    const TARGET_EMBEDDINGS: usize = 10;
-    let selected_embeddings = if valid_embeddings.len() <= TARGET_EMBEDDINGS {
-        valid_embeddings
+    // Capacious enrollment. The stored template must cover the conditions you'll
+    // actually unlock under (lighting, angle, distance, glasses). Two parts:
+    //   1. UNION the freshly-captured embeddings with any ALREADY stored for this
+    //      user, so re-running `enroll` under a NEW condition ADDS coverage instead
+    //      of overwriting it (re-enroll a few times across conditions to build a
+    //      robust set; `doorman remove <user>` resets).
+    //   2. Keep the most DIVERSE TARGET_EMBEDDINGS from the combined pool via
+    //      farthest-point selection, so the stored set is spread across conditions
+    //      rather than clustered on one.
+    const TARGET_EMBEDDINGS: usize = 30;
+    let mut pool = valid_embeddings;
+    {
+        let storage = state.storage.read().await;
+        if let Some(existing) = storage.get_embeddings(username) {
+            info!(
+                "Capacious enroll: merging {} new + {} existing embeddings for {}",
+                pool.len(), existing.len(), username
+            );
+            pool.extend(existing.iter().cloned());
+        }
+    }
+    let selected_embeddings = if pool.len() <= TARGET_EMBEDDINGS {
+        pool
     } else {
-        select_diverse_embeddings(valid_embeddings, TARGET_EMBEDDINGS)
+        select_diverse_embeddings(pool, TARGET_EMBEDDINGS)
     };
 
     info!("Selected {} diverse embeddings for storage", selected_embeddings.len());
