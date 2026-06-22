@@ -345,11 +345,17 @@ async fn main() -> Result<()> {
     let (latest_frame_tx, latest_frame_rx) =
         tokio::sync::watch::channel::<Option<Arc<image::DynamicImage>>>(None);
     let (camera_tx, camera_rx) = tokio::sync::mpsc::channel::<pipeline::RawFrame>(30);
+    // Camera capture gate. The producer opens/holds the live camera only while this
+    // is `true`. Initial value = `always_track` (super-security: camera on from boot);
+    // otherwise the gate task / mode setup below drives it from armed + preview.
+    let (capture_active_tx, capture_active_rx) =
+        tokio::sync::watch::channel::<bool>(config.camera.always_track);
     pipeline::spawn_camera_producer(
         camera_source,
         Arc::new(config.clone()),
         latest_frame_tx,
         camera_tx,
+        capture_active_rx,
     );
     let camera_rx = Arc::new(tokio::sync::Mutex::new(Some(camera_rx)));
 
@@ -457,6 +463,7 @@ async fn main() -> Result<()> {
     // developer flow is unchanged.
     let pipeline_handles = if config.daemon.preview_mode {
         info!("Starting pipeline (preview mode - detection+recognition overlay, always-on)");
+        let _ = capture_active_tx.send(true); // preview => camera always capturing
         let camera_rx = camera_rx.lock().await.take()
             .expect("camera_rx consumed exactly once by the pipeline");
         let handles = pipeline::start_pipeline(state.clone(), camera_rx).await;
@@ -491,6 +498,37 @@ async fn main() -> Result<()> {
             };
             (Some(sup.armed_rx.clone()), unlock_ctx)
         };
+
+        // Camera capture gate (system mode): drive `capture_active` from armed
+        // (screen locked) OR a connected preview client OR `always_track`. Re-evaluated
+        // on every armed change and every 300ms — cheap, and crucially runs even when
+        // the camera is OFF (unlike the frame-driven pipeline supervisor), so it can
+        // turn the camera back ON when you lock the screen. In --user/dev mode
+        // (armed_rx=None) there is no lock gate, so capture stays on.
+        if let Some(gate_armed) = armed_rx.clone() {
+            let cap_tx = capture_active_tx;
+            let fb = frame_broadcaster.clone();
+            let db = debug_broadcaster.clone();
+            let always = config.camera.always_track;
+            tokio::spawn(async move {
+                let mut gate_armed = gate_armed;
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(300));
+                loop {
+                    let subs = fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0)
+                        + db.receiver_count();
+                    let want = always || *gate_armed.borrow() || subs > 0;
+                    if cap_tx.send(want).is_err() {
+                        break; // producer gone
+                    }
+                    tokio::select! {
+                        r = gate_armed.changed() => { if r.is_err() { break; } }
+                        _ = tick.tick() => {}
+                    }
+                }
+            });
+        } else {
+            let _ = capture_active_tx.send(true);
+        }
 
         let supervisor_state = state.clone();
         let frame_bcast_for_sup = frame_broadcaster.clone();

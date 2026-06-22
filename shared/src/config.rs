@@ -109,6 +109,20 @@ pub struct CameraConfig {
     
     #[serde(default = "default_fps")]
     pub fps: u32,
+
+    /// Super-security: keep the camera capturing ALWAYS, not only while the screen
+    /// is locked. Default `false` — the camera (and its idle CPU) is gated to the
+    /// armed state (screen locked) / an attached preview client, so an unlocked
+    /// desktop pays ~0 for it. Set `true` for continuous presence tracking.
+    #[serde(default)]
+    pub always_track: bool,
+
+    /// FUTURE (super-security, requires `always_track = true`): auto-lock the
+    /// session after this many seconds with NO recognized face present, so the box
+    /// locks itself when you walk away. `0` = disabled. The monitoring loop is not
+    /// wired yet — this is the config hook the feature will read.
+    #[serde(default)]
+    pub presence_autolock_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -379,6 +393,8 @@ impl Default for CameraConfig {
             width: default_camera_width(),
             height: default_camera_height(),
             fps: default_fps(),
+            always_track: false,
+            presence_autolock_secs: 0,
         }
     }
 }

@@ -49,59 +49,67 @@ pub fn spawn_camera_producer(
     config: Arc<Config>,
     latest_frame_tx: watch::Sender<Option<Arc<image::DynamicImage>>>,
     frame_tx: mpsc::Sender<RawFrame>,
+    // Capture gate: when `false` the LIVE camera is RELEASED (V4L2 device closed,
+    // LED off) and the thread idles at ~0 CPU; when `true` it (re)opens and
+    // captures at the configured fps. Driven from `armed || preview || always_track`
+    // so an unlocked desktop pays nothing for the camera. (Video-file sources ignore
+    // the gate and always replay.)
+    capture_active: watch::Receiver<bool>,
 ) {
     let fps = config.camera.fps;
-    info!("Camera producer started (target {}fps) - single-owner dedicated thread", fps);
+    info!("Camera producer thread started (target {}fps; opens the camera only while capture is gated ON)", fps);
 
     std::thread::spawn(move || {
         let interval_ms = 1000 / fps.max(1) as u64;
         let mut sequence = 0u64;
         let mut last_capture = std::time::Instant::now();
+        const REPROBE_SECS: u64 = 3;
 
-        // Open the camera ON THIS THREAD so the V4L2 stream's mmap buffers are
-        // bound to this thread's fd context. This thread is the SOLE owner of
-        // the camera and the only thread that ever touches it.
-        let mut camera = match &source {
+        // VideoFile (test/replay) is opened once and is NOT gated. The live Config
+        // camera is opened lazily when capture is active and released when gated off.
+        let is_video = matches!(source, CameraSource::VideoFile { .. });
+        let mut camera: Option<Camera> = match &source {
             CameraSource::VideoFile { path, width, height, fps, loop_playback } => {
-                Camera::from_video_file(path.clone(), *width, *height, *fps, *loop_playback)
+                Some(Camera::from_video_file(path.clone(), *width, *height, *fps, *loop_playback))
             }
-            CameraSource::Config => {
-                // Retry opening the camera with backoff instead of killing the
-                // producer thread. A missing/disconnected camera at startup must
-                // leave the daemon idling and re-probing (so it recovers when the
-                // camera reappears) rather than permanently dying — auth is
-                // on-demand and the pipeline is lifecycle-gated, so "no camera"
-                // is a transient not-ready state, not a fatal condition.
-                const REPROBE_SECS: u64 = 3;
-                loop {
-                    // Bail out if nobody wants frames anymore (pipeline stopped /
-                    // shutdown) so a cameraless box doesn't spin a zombie thread.
-                    if frame_tx.is_closed() && latest_frame_tx.is_closed() {
-                        debug!("All frame receivers gone before a camera could be opened; producer exiting");
-                        return;
-                    }
-                    match futures::executor::block_on(Camera::new_with_config(&config)) {
-                        Ok(cam) => {
-                            info!("Camera opened in producer thread");
-                            break cam;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Camera not available ({}); idling, will re-probe in {}s",
-                                e, REPROBE_SECS
-                            );
-                            std::thread::sleep(std::time::Duration::from_secs(REPROBE_SECS));
-                        }
-                    }
-                }
-            }
+            CameraSource::Config => None,
         };
 
         loop {
-            // Stop if every receiver has gone away (graceful shutdown).
+            // Graceful shutdown: every receiver gone.
             if frame_tx.is_closed() && latest_frame_tx.is_closed() {
                 debug!("All frame receivers gone, camera producer exiting");
                 return;
+            }
+
+            // Capture gate. Video always captures; the live camera follows the gate.
+            let active = is_video || *capture_active.borrow();
+            if !active {
+                // Release the live camera (closes the device / LED off) and idle.
+                if camera.is_some() {
+                    info!("Camera gated OFF (screen unlocked / no preview) — releasing device");
+                    camera = None;
+                    let _ = latest_frame_tx.send(None);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+
+            // Active: ensure the live camera is open; retry with backoff (a missing
+            // or just-reconnected camera must not kill the thread).
+            if camera.is_none() {
+                match futures::executor::block_on(Camera::new_with_config(&config)) {
+                    Ok(cam) => {
+                        info!("Camera gated ON — opened in producer thread");
+                        camera = Some(cam);
+                        last_capture = std::time::Instant::now();
+                    }
+                    Err(e) => {
+                        warn!("Camera not available ({}); will re-probe in {}s", e, REPROBE_SECS);
+                        std::thread::sleep(std::time::Duration::from_secs(REPROBE_SECS));
+                        continue;
+                    }
+                }
             }
 
             // Rate limit captures.
@@ -111,12 +119,12 @@ pub fn spawn_camera_producer(
             }
             last_capture = std::time::Instant::now();
 
-            // Blocking capture is fine: this is a dedicated OS thread and the
-            // camera is never accessed from anywhere else.
-            let frame = match camera.capture_frame() {
+            // Blocking capture is fine: this dedicated OS thread is the sole owner.
+            let frame = match camera.as_mut().unwrap().capture_frame() {
                 Ok(f) => f,
                 Err(e) => {
-                    warn!("Capture error: {}", e);
+                    warn!("Capture error: {} — releasing camera to re-open", e);
+                    camera = None; // drop + re-open next active iteration (handles disconnect)
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     continue;
                 }
@@ -136,8 +144,6 @@ pub fn spawn_camera_producer(
 
             // Non-blocking send to the pipeline (drop frame if channel full).
             if let Err(mpsc::error::TrySendError::Closed(_)) = frame_tx.try_send(raw_frame) {
-                // Pipeline gone but IPC may still want frames; keep going unless
-                // both are closed (checked at the top of the loop).
                 debug!("Pipeline frame channel closed");
             }
         }
