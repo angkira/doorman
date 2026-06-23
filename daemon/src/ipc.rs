@@ -234,13 +234,16 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     };
     drop(storage);
 
-    // Ensure the camera producer is publishing frames.
-    if let Err(err_msg) = wait_for_frame(state).await {
-        error!("{}", err_msg);
-        return Response::Failure {
-            reason: err_msg,
-        };
-    }
+    // Turn the camera ON on-demand (works even when the screen is unlocked and the
+    // camera is otherwise gated off) and wait for frames. The lease is held for the
+    // rest of this call so the camera stays up through the capture.
+    let _camera_lease = match state.acquire_camera(std::time::Duration::from_secs(8)).await {
+        Ok(lease) => lease,
+        Err(err_msg) => {
+            error!("{}", err_msg);
+            return Response::Failure { reason: err_msg };
+        }
+    };
 
     // Collect frames from the camera producer (single source of truth).
     let frames = collect_frames(state, AUTH_FRAMES).await;
@@ -377,13 +380,16 @@ async fn handle_enroll(
 ) -> Response {
     info!("Enrollment request for user: {}", username);
 
-    // Ensure the camera producer is publishing frames.
-    if let Err(err_msg) = wait_for_frame(state).await {
-        error!("{}", err_msg);
-        return Response::Failure {
-            reason: err_msg,
-        };
-    }
+    // Turn the camera ON on-demand (works even when the screen is unlocked and the
+    // camera is otherwise gated off) and wait for frames. The lease is held for the
+    // rest of this call so the camera stays up through the capture.
+    let _camera_lease = match state.acquire_camera(std::time::Duration::from_secs(8)).await {
+        Ok(lease) => lease,
+        Err(err_msg) => {
+            error!("{}", err_msg);
+            return Response::Failure { reason: err_msg };
+        }
+    };
 
     // Get frames from the camera producer (single source of truth).
     info!("Recording video for {} seconds for enrollment...", ENROLL_DURATION_SECS);
@@ -591,6 +597,11 @@ async fn handle_status(state: &DaemonState) -> Response {
 async fn handle_detect_and_recognize(state: &DaemonState) -> Response {
     use doorman_shared::DetectionInfo;
 
+    // Turn the camera on on-demand (it's gated off while the screen is unlocked).
+    let _camera_lease = match state.acquire_camera(std::time::Duration::from_secs(5)).await {
+        Ok(l) => l,
+        Err(e) => return Response::Failure { reason: e },
+    };
     // Get the latest frame from the camera producer (single source of truth).
     let frame = match wait_for_frame(state).await {
         Ok(f) => (*f).clone(),

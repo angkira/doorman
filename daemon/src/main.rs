@@ -34,11 +34,62 @@ pub struct DaemonState {
     pub debug_broadcaster: Arc<debug_stream::DebugStreamBroadcaster>,
     pub frame_broadcaster: Option<Arc<frame_stream::FrameStreamBroadcaster>>,
     pub system_locked: Arc<RwLock<bool>>,
+    /// On-demand camera capture leases. IPC operations that need live frames
+    /// (enroll, `test`/PAM auth) increment this; the camera gate keeps the camera ON
+    /// while it is > 0, so capture works even when the screen is unlocked and the
+    /// pipeline is otherwise gated off. Released via `CaptureLease` (RAII).
+    pub capture_requests: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 // Safety: All fields are wrapped in Arc/RwLock making them thread-safe
 unsafe impl Send for DaemonState {}
 unsafe impl Sync for DaemonState {}
+
+/// RAII lease that keeps the camera ON for an on-demand IPC capture (enroll/auth).
+/// Increments `DaemonState::capture_requests` on creation; releases it on drop.
+pub struct CaptureLease {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl CaptureLease {
+    fn new(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self { counter }
+    }
+}
+impl Drop for CaptureLease {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl DaemonState {
+    /// Acquire an on-demand capture lease and wait (up to `timeout`) for the camera
+    /// to produce a live frame. This turns the camera ON via the gate even when the
+    /// screen is unlocked (enroll/preview/test). Returns a guard that releases the
+    /// lease on drop, or an error if no frame arrives within the timeout (no camera).
+    pub async fn acquire_camera(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<CaptureLease, String> {
+        let lease = CaptureLease::new(self.capture_requests.clone());
+        let mut rx = self.latest_frame.clone();
+        let start = std::time::Instant::now();
+        // The producer publishes `None` while the live camera is released and `Some`
+        // once it has (re)opened and captured. Wait for a fresh `Some`.
+        loop {
+            if rx.borrow_and_update().is_some() {
+                return Ok(lease);
+            }
+            if start.elapsed() >= timeout {
+                return Err(
+                    "Camera not available (no frames). Please connect a camera and try again."
+                        .to_string(),
+                );
+            }
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(250), rx.changed()).await;
+        }
+    }
+}
 
 /// Subscriber-gated preview supervisor (production / system-daemon path).
 ///
@@ -350,6 +401,9 @@ async fn main() -> Result<()> {
     // otherwise the gate task / mode setup below drives it from armed + preview.
     let (capture_active_tx, capture_active_rx) =
         tokio::sync::watch::channel::<bool>(config.camera.always_track);
+    // On-demand capture leases: IPC ops (enroll / `test` / PAM auth) bump this so the
+    // gate keeps the camera ON even while the screen is unlocked.
+    let capture_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     pipeline::spawn_camera_producer(
         camera_source,
         Arc::new(config.clone()),
@@ -383,6 +437,7 @@ async fn main() -> Result<()> {
         debug_broadcaster: debug_broadcaster.clone(),
         frame_broadcaster: frame_broadcaster.clone(),
         system_locked: Arc::new(RwLock::new(initial_locked)),
+        capture_requests: capture_requests.clone(),
     };
 
     // Setup signal handlers for graceful shutdown
@@ -510,13 +565,16 @@ async fn main() -> Result<()> {
             let fb = frame_broadcaster.clone();
             let db = debug_broadcaster.clone();
             let always = config.camera.always_track;
+            let reqs = capture_requests.clone();
             tokio::spawn(async move {
                 let mut gate_armed = gate_armed;
-                let mut tick = tokio::time::interval(std::time::Duration::from_millis(300));
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
                 loop {
                     let subs = fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0)
                         + db.receiver_count();
-                    let want = always || *gate_armed.borrow() || subs > 0;
+                    // On-demand IPC leases (enroll/auth) force the camera on too.
+                    let on_demand = reqs.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                    let want = always || *gate_armed.borrow() || subs > 0 || on_demand;
                     if cap_tx.send(want).is_err() {
                         break; // producer gone
                     }
