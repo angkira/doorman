@@ -104,6 +104,18 @@ enum Command {
     },
     /// Show daemon status (version, uptime, camera, models, enrolled users).
     Status,
+    /// Build an offline self-improvement candidate from the attempt-log dataset.
+    Train {
+        /// Data directory containing dataset/attempts-*.jsonl and labels-*.jsonl.
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+        /// Output models directory. Defaults to <data-dir>/models.
+        #[arg(long, value_name = "DIR")]
+        models_dir: Option<PathBuf>,
+        /// Minimum confirmed-genuine label events required before writing a candidate.
+        #[arg(long, default_value_t = 1)]
+        min_confirmed: usize,
+    },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
     /// Install doorman: daemon service, models, config, and (opt-in) PAM integration.
@@ -226,6 +238,11 @@ fn main() {
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
         Command::Test { username } => cmd_test(&sockets, username, cli.json),
         Command::Status => cmd_status(&sockets, cli.json),
+        Command::Train {
+            data_dir,
+            models_dir,
+            min_confirmed,
+        } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
         Command::Doctor => cmd_doctor(),
         Command::Install {
             dry_run,
@@ -257,6 +274,41 @@ fn main() {
 fn cmd_doctor() -> Result<(), CliError> {
     let d = install::diagnose(EpChoice::Auto, PamScope::ScreenUnlock);
     install::print_diagnosis(&d);
+    Ok(())
+}
+
+fn cmd_train(
+    data_dir: Option<&Path>,
+    models_dir: Option<&Path>,
+    min_confirmed: usize,
+    json: bool,
+) -> Result<(), CliError> {
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(doorman_shared::DATA_DIR));
+    let models_dir = models_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("models"));
+    let report = doormand::training::run_offline_training(&data_dir, &models_dir, min_confirmed)
+        .map_err(|e| CliError::new(format!("offline training refused: {e}")))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| CliError::new(format!("failed to render training report: {e}")))?
+        );
+    } else {
+        println!("doorman offline training candidate");
+        println!("  version: {}", report.version);
+        println!("  attempts seen: {}", report.attempts_seen);
+        println!("  confirmed genuine labels: {}", report.confirmed_genuine);
+        println!("  rejected attempts: {}", report.rejected);
+        println!("  suspected spoof attempts: {}", report.suspected_spoof);
+        println!("  unknown attempts: {}", report.unknown);
+        println!("  output: {}", report.output_dir.display());
+        println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
+    }
     Ok(())
 }
 
