@@ -1,4 +1,5 @@
 use crate::DaemonState;
+use crate::dataset::{self, AttemptConditions, GtSource, LabelEvent, Outcome};
 use anyhow::{Context, Result};
 use doorman_shared::{
     Request, Response, ResponseData, DaemonInfo, StreamMessage, EnrollmentPhase,
@@ -318,10 +319,36 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let aggregated = crate::pipeline::aggregate_embeddings(&passed_embeddings)
         .unwrap_or_else(|| passed_embeddings[0].clone());
 
-    let best_similarity = stored_embeddings
+    let gallery_similarities: Vec<f32> = stored_embeddings
         .iter()
         .map(|stored_emb| crate::ml::cosine_similarity(&aggregated, stored_emb))
-        .fold(0.0f32, f32::max);
+        .collect();
+    let best_similarity = gallery_similarities.iter().copied().fold(0.0f32, f32::max);
+    let matched = best_similarity >= threshold;
+    let attempt_id = format!(
+        "auth-{}-{}",
+        username,
+        chrono::Utc::now().timestamp_micros()
+    );
+    dataset::log_attempt_capped(
+        &state.config.daemon.data_dir,
+        state.config.dataset.logging_enabled,
+        state.config.dataset.max_attempt_records_per_day,
+        &dataset::new_attempt_record(
+            attempt_id.clone(),
+            0,
+            if matched { Some(username.to_string()) } else { None },
+            best_similarity,
+            None,
+            Some(true),
+            if matched { Outcome::Unknown } else { Outcome::Rejected },
+            GtSource::None,
+            &aggregated,
+            None,
+            dataset::gallery_spread_from_similarities(&gallery_similarities),
+            AttemptConditions::default(),
+        ),
+    );
 
     info!(
         "Authentication aggregate for {}: {} quality frames, cosine={:.4} (threshold {:.2})",
@@ -329,7 +356,18 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     );
 
     let _ = SIMILARITY_THRESHOLD; // kept for back-compat; threshold comes from config now
-    if best_similarity >= threshold {
+    if matched {
+        dataset::log_label_event(
+            &state.config.daemon.data_dir,
+            state.config.dataset.logging_enabled,
+            &LabelEvent {
+                schema_version: 1,
+                attempt_id,
+                timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                outcome: Outcome::ConfirmedGenuine,
+                gt_source: GtSource::PamFaceAuth,
+            },
+        );
         info!("Authentication successful for {} (similarity: {:.4})", username, best_similarity);
         Response::Success {
             message: Some(format!("Authenticated (confidence: {:.2}%)", best_similarity * 100.0)),
@@ -718,4 +756,3 @@ async fn handle_detect_and_recognize(state: &DaemonState) -> Response {
         data: Some(ResponseData::DetectionResult { result: info }),
     }
 }
-

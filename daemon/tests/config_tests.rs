@@ -25,6 +25,10 @@ fn test_default_config() {
     
     assert_eq!(config.preprocessing.image_width, 256);
     assert_eq!(config.preprocessing.image_height, 256);
+
+    assert!(!config.dataset.logging_enabled);
+    assert!(!config.dataset.keep_raw_frames);
+    assert_eq!(config.dataset.max_attempt_records_per_day, 50_000);
 }
 
 #[test]
@@ -158,3 +162,20 @@ fn test_proactive_unlock_can_be_set_true() {
     assert!(config.authentication.liveness_enabled);
 }
 
+#[test]
+fn test_dataset_logging_defaults_off_and_can_be_enabled() {
+    let default_config = Config::default();
+    assert!(!default_config.dataset.logging_enabled);
+    assert!(!default_config.dataset.keep_raw_frames);
+
+    let toml_str = r#"
+        [dataset]
+        logging_enabled = true
+        keep_raw_frames = false
+        max_attempt_records_per_day = 12
+    "#;
+    let config: Config = toml::from_str(toml_str).unwrap();
+    assert!(config.dataset.logging_enabled);
+    assert!(!config.dataset.keep_raw_frames);
+    assert_eq!(config.dataset.max_attempt_records_per_day, 12);
+}

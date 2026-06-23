@@ -40,6 +40,9 @@ pub struct Config {
 
     #[serde(default)]
     pub recognition: RecognitionConfig,
+
+    #[serde(default)]
+    pub dataset: DatasetConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,6 +304,41 @@ impl Default for RecognitionConfig {
     }
 }
 
+/// Attempt-log dataset (R&D milestone M1). When enabled, the daemon appends one
+/// embeddings-only record per scored unlock attempt under `<data_dir>/dataset/`, to
+/// seed the future learnable depth projector / fusion / self-training work. SEPARATE
+/// from the live gallery; never read on the auth hot path. Default OFF — opt-in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetConfig {
+    /// Master switch. When `false` (default) NOTHING is written and the auth path
+    /// is byte-for-byte unaffected.
+    #[serde(default)]
+    pub logging_enabled: bool,
+
+    /// FUTURE hook (not wired yet): also persist the aligned raw frame alongside the
+    /// embedding for offline depth-projector training. Default `false` and intended
+    /// to stay off on the deployed box — embeddings-only is the privacy-preserving
+    /// path; raw frames must NEVER reach the public repo.
+    #[serde(default)]
+    pub keep_raw_frames: bool,
+
+    /// Maximum attempt records written to one daily shard. `0` disables attempt
+    /// writes even when logging is enabled. Labels are separate and are not capped
+    /// here because they are low-volume ground-truth events.
+    #[serde(default = "default_dataset_max_attempt_records_per_day")]
+    pub max_attempt_records_per_day: usize,
+}
+
+impl Default for DatasetConfig {
+    fn default() -> Self {
+        Self {
+            logging_enabled: false,
+            keep_raw_frames: false,
+            max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
     // Face detector (BlazeFace)
@@ -369,6 +407,7 @@ fn default_hysteresis_frames() -> u32 { 3 }
 // conservative so synthesized/real faces pass while clearly blurred frames fail.
 fn default_min_sharpness() -> f32 { 8.0 }
 fn default_min_face_area_frac() -> f32 { 0.02 }
+fn default_dataset_max_attempt_records_per_day() -> usize { 50_000 }
 fn default_image_size() -> u32 { 256 }
 fn default_filter_type() -> String { "lanczos3".to_string() }
 fn default_camera_width() -> u32 { 1280 }
@@ -492,6 +531,7 @@ impl Default for Config {
             preprocessing: PreprocessingConfig::default(),
             models: ModelsConfig::default(),
             recognition: RecognitionConfig::default(),
+            dataset: DatasetConfig::default(),
         }
     }
 }
@@ -569,4 +609,3 @@ mod tests {
         assert_eq!(config.ml.gpu_device_id, 1);
     }
 }
-

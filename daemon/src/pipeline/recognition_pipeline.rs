@@ -1,6 +1,7 @@
 use super::aggregate::aggregate_embeddings;
 use super::types::DetectionResult;
 use super::UnlockContext;
+use crate::dataset::{self, AttemptConditions, GallerySpreadStats, GtSource, Outcome};
 use crate::debug_stream::DebugStreamBroadcaster;
 use crate::ml::MLPipeline;
 use crate::storage::Storage;
@@ -40,6 +41,7 @@ pub async fn run_recognition_pipeline(
     // very first locked session is eligible.
     let proactive_enabled = config.authentication.proactive_unlock && unlock_ctx.is_some();
     let mut spent_for_gen: Option<u64> = None;
+    let dataset_logging = config.dataset.logging_enabled;
 
     // Phase 1: rolling window of recent quality-passed embeddings for the
     // tracked face. Single-user/single-face preview, so one window is enough.
@@ -143,14 +145,16 @@ pub async fn run_recognition_pipeline(
         let storage_guard = storage.read().await;
         let mut best_match: Option<(String, f32)> = None;
         let mut best_similarity = 0.0f32;
+        let mut gallery_similarities = Vec::new();
 
         for user_info in storage_guard.list_users() {
             if let Some(stored_embeddings) = storage_guard.get_embeddings(&user_info.username) {
                 // Compare with all stored embeddings and take best match
-                let max_similarity = stored_embeddings
-                    .iter()
-                    .map(|stored_emb| cosine_similarity(&aggregated, stored_emb))
-                    .fold(0.0f32, f32::max);
+                let max_similarity = stored_embeddings.iter().map(|stored_emb| {
+                    let similarity = cosine_similarity(&aggregated, stored_emb);
+                    gallery_similarities.push(similarity);
+                    similarity
+                }).fold(0.0f32, f32::max);
 
                 if max_similarity > best_similarity {
                     best_similarity = max_similarity;
@@ -166,6 +170,14 @@ pub async fn run_recognition_pipeline(
             "Aggregated recognition: window={} cosine={:.4} threshold={:.2} (frame {})",
             window.len(), best_similarity, config.authentication.similarity_threshold, result.sequence
         );
+
+        let gallery_spread = dataset::gallery_spread_from_similarities(&gallery_similarities);
+        let conditions = AttemptConditions {
+            brightness: None,
+            face_area_frac: Some((face.bbox.2 * face.bbox.3).abs()),
+            sharpness: None,
+            hour_utc: None,
+        };
 
         // Box-color hysteresis: debounce RECOGNIZED <-> unknown flips.
         let raw_recognized = best_match.is_some();
@@ -189,6 +201,7 @@ pub async fn run_recognition_pipeline(
 
         // Handle recognition result
         if let Some((username, similarity)) = best_match {
+            let mut dataset_logged = false;
             info!(
                 "✓ User recognized: {} (similarity: {:.2}, frame: {})",
                 username, similarity, result.sequence
@@ -221,6 +234,20 @@ pub async fn run_recognition_pipeline(
                         (Some(frame), Some(face)) => {
                             match ml_pipeline.liveness_gate(frame, face).await {
                                 Ok(true) => {
+                                    log_dataset_attempt(
+                                        &config,
+                                        dataset_logging,
+                                        cur_gen,
+                                        result.sequence,
+                                        Some(username.clone()),
+                                        similarity,
+                                        Some(true),
+                                        dataset::outcome_from_match(true, Some(true)),
+                                        &aggregated,
+                                        gallery_spread.clone(),
+                                        conditions.clone(),
+                                    );
+                                    dataset_logged = true;
                                     // One-shot: mark this generation spent BEFORE the
                                     // call so a slow/failed Unlock can't be retried in a
                                     // tight loop within the same lock.
@@ -254,17 +281,63 @@ pub async fn run_recognition_pipeline(
                                         .await;
                                     }
                                 }
-                                Ok(false) => warn!(
-                                    "Proactive unlock REJECTED: liveness/anti-spoof gate failed for {} — NOT unlocking",
-                                    username
-                                ),
-                                Err(e) => warn!(
-                                    "Proactive unlock REJECTED: liveness error for {} ({e}) — NOT unlocking (fail-safe)",
-                                    username
-                                ),
+                                Ok(false) => {
+                                    log_dataset_attempt(
+                                        &config,
+                                        dataset_logging,
+                                        cur_gen,
+                                        result.sequence,
+                                        Some(username.clone()),
+                                        similarity,
+                                        Some(false),
+                                        dataset::outcome_from_match(true, Some(false)),
+                                        &aggregated,
+                                        gallery_spread.clone(),
+                                        conditions.clone(),
+                                    );
+                                    dataset_logged = true;
+                                    warn!(
+                                        "Proactive unlock REJECTED: liveness/anti-spoof gate failed for {} — NOT unlocking",
+                                        username
+                                    );
+                                }
+                                Err(e) => {
+                                    log_dataset_attempt(
+                                        &config,
+                                        dataset_logging,
+                                        cur_gen,
+                                        result.sequence,
+                                        Some(username.clone()),
+                                        similarity,
+                                        None,
+                                        Outcome::Unknown,
+                                        &aggregated,
+                                        gallery_spread.clone(),
+                                        conditions.clone(),
+                                    );
+                                    dataset_logged = true;
+                                    warn!(
+                                        "Proactive unlock REJECTED: liveness error for {} ({e}) — NOT unlocking (fail-safe)",
+                                        username
+                                    );
+                                }
                             }
                         }
                         _ => {
+                            log_dataset_attempt(
+                                &config,
+                                dataset_logging,
+                                cur_gen,
+                                result.sequence,
+                                Some(username.clone()),
+                                similarity,
+                                None,
+                                Outcome::Unknown,
+                                &aggregated,
+                                gallery_spread.clone(),
+                                conditions.clone(),
+                            );
+                            dataset_logged = true;
                             // Recognized on a frame that carried no liveness inputs
                             // (shouldn't happen for quality-passed embeddings). Fail
                             // safe: no inputs -> no unlock.
@@ -274,6 +347,21 @@ pub async fn run_recognition_pipeline(
                 } else if already_spent {
                     debug!("Proactive unlock: lock generation {} already spent — skipping (one-shot)", cur_gen);
                 }
+            }
+            if !dataset_logged {
+                log_dataset_attempt(
+                    &config,
+                    dataset_logging,
+                    0,
+                    result.sequence,
+                    Some(username.clone()),
+                    similarity,
+                    None,
+                    Outcome::Unknown,
+                    &aggregated,
+                    gallery_spread.clone(),
+                    conditions.clone(),
+                );
             }
             // ---------------------------------------------------------------------
 
@@ -302,6 +390,19 @@ pub async fn run_recognition_pipeline(
             };
             debug_broadcaster.broadcast(message);
         } else {
+            log_dataset_attempt(
+                &config,
+                dataset_logging,
+                0,
+                result.sequence,
+                None,
+                best_similarity,
+                None,
+                dataset::outcome_from_match(false, None),
+                &aggregated,
+                gallery_spread.clone(),
+                conditions.clone(),
+            );
             // Unknown face
             debug!(
                 "Unknown face detected (best similarity: {:.2}, frame: {})",
@@ -417,6 +518,47 @@ fn should_attempt_unlock(enabled: bool, armed: bool, already_spent: bool) -> boo
     enabled && armed && !already_spent
 }
 
+fn log_dataset_attempt(
+    config: &Config,
+    enabled: bool,
+    lock_generation: u64,
+    sequence: u64,
+    matched_user: Option<String>,
+    best_cosine: f32,
+    liveness_pass: Option<bool>,
+    outcome: Outcome,
+    edgeface_emb: &[f32],
+    gallery_spread: GallerySpreadStats,
+    conditions: AttemptConditions,
+) {
+    if !enabled {
+        return;
+    }
+    let attempt_id = format!(
+        "pipeline-gen-{lock_generation}-frame-{sequence}-{}",
+        chrono::Utc::now().timestamp_micros()
+    );
+    dataset::log_attempt_capped(
+        &config.daemon.data_dir,
+        enabled,
+        config.dataset.max_attempt_records_per_day,
+        &dataset::new_attempt_record(
+            attempt_id,
+            lock_generation,
+            matched_user,
+            best_cosine,
+            None,
+            liveness_pass,
+            outcome,
+            GtSource::None,
+            edgeface_emb,
+            None,
+            gallery_spread,
+            conditions,
+        ),
+    );
+}
+
 #[cfg(test)]
 mod proactive_unlock_tests {
     use super::should_attempt_unlock;
@@ -447,4 +589,5 @@ mod proactive_unlock_tests {
         // signal bumps it -> no repeat-unlock spam.
         assert!(!should_attempt_unlock(true, true, true));
     }
+
 }

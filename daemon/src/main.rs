@@ -2,6 +2,7 @@
 // GStreamer backend is default (PipeWire-integrated)
 // Falls back to V4L2 if GStreamer not available
 use doormand::camera;
+mod dataset;
 mod debug_stream;
 mod frame_stream;
 mod ipc;
