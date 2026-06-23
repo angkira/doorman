@@ -1,0 +1,22 @@
+doorman Debian package
+======================
+
+The package installs the daemon, CLI, PAM module, default config template,
+runtime models, and systemd units. It intentionally does not edit PAM
+configuration.
+
+After installing:
+
+1. Enroll and test:
+
+   doorman enroll "$USER"
+   doorman test "$USER"
+
+2. Only after the test path works, add the PAM line for the services you want:
+
+   auth    sufficient    pam_doorman.so
+
+The package creates /etc/doorman/doorman.toml from the template only when it is
+missing. Keep a root shell open while editing PAM. Removing the package
+preserves /var/lib/doorman. Purging the package removes /etc/doorman,
+/var/lib/doorman, and the doorman system user.

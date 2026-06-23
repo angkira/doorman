@@ -1,0 +1,15 @@
+Package: doorman
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: @ARCH@
+Maintainer: doorman contributors
+Installed-Size: @INSTALLED_SIZE@
+Depends: adduser, libc6, libgcc-s1, libpam0g, systemd, ffmpeg, v4l-utils
+Recommends: pamtester
+Homepage: https://github.com/doorman/doorman
+Description: Face authentication daemon and PAM module
+ doorman provides a local face-authentication daemon, management CLI, and PAM
+ module for Linux login, unlock, and sudo flows. The package installs the
+ daemon, CLI, PAM module, systemd units, and default configuration, but never
+ edits /etc/pam.d automatically.

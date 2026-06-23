@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -e
+
+if ! getent group doorman >/dev/null; then
+  addgroup --system doorman >/dev/null
+fi
+
+if ! getent passwd doorman >/dev/null; then
+  adduser \
+    --system \
+    --home /var/lib/doorman \
+    --no-create-home \
+    --ingroup doorman \
+    --disabled-login \
+    --gecos "doorman face authentication daemon" \
+    doorman >/dev/null
+fi
+
+if getent group video >/dev/null; then
+  usermod -aG video doorman || true
+fi
+
+if getent group render >/dev/null; then
+  usermod -aG render doorman || true
+fi
+
+install -d -o doorman -g doorman -m 0750 /var/lib/doorman
+install -d -o doorman -g doorman -m 0750 /var/lib/doorman/models
+install -d -o doorman -g doorman -m 0750 /var/lib/doorman/miopen
+install -d -o doorman -g doorman -m 0750 /var/lib/doorman/.cache
+install -d -m 0755 /etc/doorman
+
+if [ ! -f /etc/doorman/doorman.toml ]; then
+  install -m 0644 /usr/share/doorman/doorman.toml.example /etc/doorman/doorman.toml
+  echo "Installed default config to /etc/doorman/doorman.toml."
+elif grep -q 'socket_path = "/run/doorman.sock"' /etc/doorman/doorman.toml; then
+  cp -a /etc/doorman/doorman.toml /etc/doorman/doorman.toml.bak
+  sed -i 's#socket_path = "/run/doorman.sock"#socket_path = "/run/doorman/doorman.sock"#' \
+    /etc/doorman/doorman.toml
+  echo "Migrated /etc/doorman/doorman.toml socket path; backup at /etc/doorman/doorman.toml.bak."
+fi
+
+if [ -d /usr/share/doorman/models ]; then
+  copied_models=0
+  for model in \
+    face_detection_yunet_2023mar.onnx \
+    edgeface_s.onnx \
+    minifasnet_v2se.onnx \
+    minifasnet_v2se_int8.onnx; do
+    if [ -f "/usr/share/doorman/models/$model" ]; then
+      install -o doorman -g doorman -m 0644 \
+        "/usr/share/doorman/models/$model" \
+        "/var/lib/doorman/models/$model"
+      copied_models=$((copied_models + 1))
+    fi
+  done
+  if [ "$copied_models" -gt 0 ]; then
+    echo "Installed $copied_models bundled model file(s) into /var/lib/doorman/models."
+  fi
+else
+  echo "No bundled models found in /usr/share/doorman/models."
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+  systemctl enable doormand.service || true
+  systemctl restart doormand.service || true
+fi
+
+cat <<'MSG'
+doorman installed.
+
+Next steps:
+  1. Enroll and test before touching PAM:
+       doorman enroll "$USER"
+       doorman test "$USER"
+  2. Add PAM integration manually only after testing.
+MSG
+
+exit 0

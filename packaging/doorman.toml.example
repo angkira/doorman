@@ -4,7 +4,7 @@
 # All keys are optional; omitted keys fall back to the documented defaults.
 
 [daemon]
-socket_path = "/run/doorman.sock"
+socket_path = "/run/doorman/doorman.sock"
 data_dir    = "/var/lib/doorman"
 log_level   = "info"
 # Real deployment: boot LOCKED and clear the lock only on a recognized face.

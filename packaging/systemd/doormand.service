@@ -2,7 +2,7 @@
 #
 # This is the unit used for a real Ubuntu login/lock-screen unlock. The daemon
 # runs continuously as a dedicated, unprivileged `doorman` system user and the
-# PAM module (pam_doorman.so) talks to it over /run/doorman.sock on demand.
+# PAM module (pam_doorman.so) talks to it over /run/doorman/doorman.sock on demand.
 #
 # Install:   /etc/systemd/system/doormand.service   (handled by `make install`)
 # Enable:    sudo systemctl enable --now doormand.service
