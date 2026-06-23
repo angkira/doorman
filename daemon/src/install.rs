@@ -974,6 +974,17 @@ fn render_pam_override(service: &str) -> String {
     // `auth sufficient libpam_doorman.so` — immediately BEFORE the first
     // `@include common-auth`, so face is tried first and ANY non-success falls
     // through to the unchanged password stack. common-auth itself is never edited.
+    let etc = std::fs::read_to_string(format!("/etc/pam.d/{service}")).ok();
+    let vendor = std::fs::read_to_string(format!("/usr/lib/pam.d/{service}")).ok();
+
+    render_pam_override_from_sources(service, etc.as_deref(), vendor.as_deref())
+}
+
+fn render_pam_override_from_sources(
+    service: &str,
+    etc_content: Option<&str>,
+    vendor_content: Option<&str>,
+) -> String {
     let header = format!(
         "# /etc/pam.d/{service} — managed by `doorman install`. Face auth is additive\n\
          # and `sufficient`; on any non-success it falls through to the system password\n\
@@ -981,18 +992,37 @@ fn render_pam_override(service: &str) -> String {
     );
     let doorman_line = "auth    sufficient    libpam_doorman.so\n";
 
-    let base = std::fs::read_to_string(format!("/etc/pam.d/{service}"))
-        .or_else(|_| std::fs::read_to_string(format!("/usr/lib/pam.d/{service}")))
-        .ok();
+    let etc_is_ours = etc_content
+        .map(|content| content.contains("managed by `doorman install`"))
+        .unwrap_or(false);
+
+    let base = if etc_is_ours {
+        // Repair older doorman-generated overrides from the vendor stack. Some
+        // early installers copied an entire login-oriented stack into /etc and
+        // future runs used to preserve it because the doorman line was present.
+        vendor_content.or(etc_content)
+    } else {
+        etc_content.or(vendor_content)
+    };
 
     if let Some(content) = base {
-        // Don't double-insert if a previous run already added our line.
-        if content.contains("libpam_doorman.so") {
-            return content;
+        // Preserve manually managed files that already contain the PAM module.
+        if !etc_is_ours && content.contains("libpam_doorman.so") {
+            return content.to_string();
         }
         let mut out = header;
         let mut inserted = false;
         for line in content.lines() {
+            if etc_is_ours
+                && (line.contains("managed by `doorman install`")
+                    || line.contains("Face auth is additive")
+                    || line.contains("common-auth untouched"))
+            {
+                continue;
+            }
+            if line.contains("libpam_doorman.so") {
+                continue;
+            }
             if !inserted && line.trim_start().starts_with("@include common-auth") {
                 out.push_str(doorman_line);
                 inserted = true;
@@ -2836,6 +2866,30 @@ mod tests {
         assert!(p.contains("@include common-auth"));
         // Must never edit common-auth itself.
         assert!(!p.contains("common-auth\n#"));
+    }
+
+    #[test]
+    fn pam_override_repairs_old_managed_file_from_vendor_stack() {
+        let old_etc = "\
+# /etc/pam.d/kde — managed by `doorman install`. Face auth is additive
+auth    sufficient    libpam_doorman.so
+@include common-auth
+auth    required      old_bad_module.so
+";
+        let vendor = "\
+#%PAM-1.0
+auth    requisite       pam_nologin.so
+@include common-auth
+@include common-account
+";
+
+        let p = render_pam_override_from_sources("kde", Some(old_etc), Some(vendor));
+
+        assert!(p.contains("auth    requisite       pam_nologin.so"));
+        assert!(p.contains("auth    sufficient    libpam_doorman.so\n@include common-auth"));
+        assert!(p.contains("@include common-account"));
+        assert!(!p.contains("old_bad_module"));
+        assert_eq!(p.matches("libpam_doorman.so").count(), 1);
     }
 
     // -----------------------------------------------------------------------
