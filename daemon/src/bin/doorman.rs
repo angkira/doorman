@@ -116,6 +116,27 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         min_confirmed: usize,
     },
+    /// Promote a projector candidate after offline validation passes.
+    Promote {
+        /// Candidate directory containing manifest.json.
+        #[arg(long, value_name = "DIR")]
+        candidate_dir: PathBuf,
+        /// False-accept rate for the currently active projector.
+        #[arg(long)]
+        incumbent_far: f32,
+        /// False-accept rate for the candidate projector.
+        #[arg(long)]
+        candidate_far: f32,
+        /// False-reject rate for the currently active projector.
+        #[arg(long)]
+        incumbent_frr: f32,
+        /// False-reject rate for the candidate projector.
+        #[arg(long)]
+        candidate_frr: f32,
+        /// Maximum allowed absolute FRR regression.
+        #[arg(long, default_value_t = 0.01)]
+        max_frr_regression: f32,
+    },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
     /// Install doorman: daemon service, models, config, and (opt-in) PAM integration.
@@ -243,6 +264,22 @@ fn main() {
             models_dir,
             min_confirmed,
         } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
+        Command::Promote {
+            candidate_dir,
+            incumbent_far,
+            candidate_far,
+            incumbent_frr,
+            candidate_frr,
+            max_frr_regression,
+        } => cmd_promote(
+            candidate_dir,
+            *incumbent_far,
+            *candidate_far,
+            *incumbent_frr,
+            *candidate_frr,
+            *max_frr_regression,
+            cli.json,
+        ),
         Command::Doctor => cmd_doctor(),
         Command::Install {
             dry_run,
@@ -307,6 +344,47 @@ fn cmd_train(
         println!("  suspected spoof attempts: {}", report.suspected_spoof);
         println!("  unknown attempts: {}", report.unknown);
         println!("  output: {}", report.output_dir.display());
+        println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
+    }
+    Ok(())
+}
+
+fn cmd_promote(
+    candidate_dir: &Path,
+    incumbent_far: f32,
+    candidate_far: f32,
+    incumbent_frr: f32,
+    candidate_frr: f32,
+    max_frr_regression: f32,
+    json: bool,
+) -> Result<(), CliError> {
+    let validation = doormand::training::ValidationMetrics {
+        incumbent_far,
+        candidate_far,
+        incumbent_frr,
+        candidate_frr,
+    };
+    let report = doormand::training::promote_projector_candidate(
+        candidate_dir,
+        validation,
+        max_frr_regression,
+    )
+    .map_err(|e| CliError::new(format!("projector promotion refused: {e}")))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| CliError::new(format!("failed to render promotion report: {e}")))?
+        );
+    } else {
+        println!("doorman projector promotion");
+        println!("  candidate: {}", report.candidate_dir.display());
+        println!("  current: {}", report.current_path.display());
+        println!("  incumbent FAR: {:.6}", report.validation.incumbent_far);
+        println!("  candidate FAR: {:.6}", report.validation.candidate_far);
+        println!("  incumbent FRR: {:.6}", report.validation.incumbent_frr);
+        println!("  candidate FRR: {:.6}", report.validation.candidate_frr);
         println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
     }
     Ok(())

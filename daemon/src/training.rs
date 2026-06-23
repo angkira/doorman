@@ -16,6 +16,24 @@ pub struct TrainingReport {
     pub promoted: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ValidationMetrics {
+    pub incumbent_far: f32,
+    pub candidate_far: f32,
+    pub incumbent_frr: f32,
+    pub candidate_frr: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionReport {
+    pub schema_version: u32,
+    pub candidate_dir: PathBuf,
+    pub current_path: PathBuf,
+    pub validation: ValidationMetrics,
+    pub promoted: bool,
+    pub promoted_at_utc: String,
+}
+
 pub fn run_offline_training(
     data_dir: &Path,
     models_dir: &Path,
@@ -71,6 +89,105 @@ pub fn run_offline_training(
     std::fs::write(report.output_dir.join("manifest.json"), manifest)
         .with_context(|| "failed to write projector candidate manifest")?;
     Ok(report)
+}
+
+pub fn promote_projector_candidate(
+    candidate_dir: &Path,
+    validation: ValidationMetrics,
+    max_frr_regression: f32,
+) -> Result<PromotionReport> {
+    if validation.candidate_far > validation.incumbent_far {
+        write_validation(candidate_dir, validation, false)?;
+        return Err(anyhow!(
+            "FAR regression: candidate {:.6} > incumbent {:.6}",
+            validation.candidate_far,
+            validation.incumbent_far
+        ));
+    }
+    if validation.candidate_frr > validation.incumbent_frr + max_frr_regression {
+        write_validation(candidate_dir, validation, false)?;
+        return Err(anyhow!(
+            "FRR regression: candidate {:.6} > allowed {:.6}",
+            validation.candidate_frr,
+            validation.incumbent_frr + max_frr_regression
+        ));
+    }
+
+    let manifest = candidate_dir.join("manifest.json");
+    if !manifest.exists() {
+        return Err(anyhow!(
+            "candidate manifest missing: {}",
+            manifest.display()
+        ));
+    }
+
+    write_validation(candidate_dir, validation, true)?;
+    let projector_dir = candidate_dir
+        .parent()
+        .ok_or_else(|| anyhow!("candidate has no projector parent directory"))?;
+    let current_path = projector_dir.join("current");
+    replace_current_link(&current_path, candidate_dir)?;
+
+    let report = PromotionReport {
+        schema_version: 1,
+        candidate_dir: candidate_dir.to_path_buf(),
+        current_path,
+        validation,
+        promoted: true,
+        promoted_at_utc: chrono::Utc::now().to_rfc3339(),
+    };
+    std::fs::write(
+        candidate_dir.join("promotion.json"),
+        serde_json::to_string_pretty(&report)?,
+    )
+    .with_context(|| "failed to write promotion report")?;
+    Ok(report)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationReport {
+    schema_version: u32,
+    validation: ValidationMetrics,
+    passed: bool,
+    validated_at_utc: String,
+}
+
+fn write_validation(candidate_dir: &Path, validation: ValidationMetrics, passed: bool) -> Result<()> {
+    std::fs::create_dir_all(candidate_dir)
+        .with_context(|| format!("failed to create {}", candidate_dir.display()))?;
+    let report = ValidationReport {
+        schema_version: 1,
+        validation,
+        passed,
+        validated_at_utc: chrono::Utc::now().to_rfc3339(),
+    };
+    std::fs::write(
+        candidate_dir.join("validation.json"),
+        serde_json::to_string_pretty(&report)?,
+    )
+    .with_context(|| "failed to write validation report")
+}
+
+fn replace_current_link(current_path: &Path, candidate_dir: &Path) -> Result<()> {
+    if current_path.exists() || current_path.symlink_metadata().is_ok() {
+        let metadata = current_path.symlink_metadata()?;
+        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(current_path)?;
+        } else {
+            std::fs::remove_file(current_path)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(candidate_dir, current_path)
+            .with_context(|| format!("failed to update {}", current_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(current_path, candidate_dir.display().to_string())
+            .with_context(|| format!("failed to update {}", current_path.display()))?;
+    }
+    Ok(())
 }
 
 fn read_jsonl_prefix<T: for<'de> Deserialize<'de>>(dir: &Path, prefix: &str) -> Result<Vec<T>> {
@@ -184,5 +301,60 @@ mod tests {
 
         assert!(err.to_string().contains("not enough confirmed-genuine labels"));
         assert!(!models_dir.join("projector").exists());
+    }
+
+    #[test]
+    fn refuses_promotion_when_candidate_far_regresses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let models_dir = tmp.path().join("models");
+        let dataset_dir = data_dir.join("dataset");
+        write_jsonl(&dataset_dir.join("attempts-20260623.jsonl"), &sample_attempt());
+        write_jsonl(&dataset_dir.join("labels-20260623.jsonl"), &sample_label());
+        let report = super::run_offline_training(&data_dir, &models_dir, 1).unwrap();
+
+        let err = super::promote_projector_candidate(
+            &report.output_dir,
+            super::ValidationMetrics {
+                incumbent_far: 0.01,
+                candidate_far: 0.02,
+                incumbent_frr: 0.05,
+                candidate_frr: 0.04,
+            },
+            0.01,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("FAR regression"));
+        assert!(!models_dir.join("projector/current").exists());
+    }
+
+    #[test]
+    fn promotes_candidate_when_validation_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let models_dir = tmp.path().join("models");
+        let dataset_dir = data_dir.join("dataset");
+        write_jsonl(&dataset_dir.join("attempts-20260623.jsonl"), &sample_attempt());
+        write_jsonl(&dataset_dir.join("labels-20260623.jsonl"), &sample_label());
+        let report = super::run_offline_training(&data_dir, &models_dir, 1).unwrap();
+
+        let promotion = super::promote_projector_candidate(
+            &report.output_dir,
+            super::ValidationMetrics {
+                incumbent_far: 0.01,
+                candidate_far: 0.01,
+                incumbent_frr: 0.05,
+                candidate_frr: 0.055,
+            },
+            0.01,
+        )
+        .unwrap();
+
+        assert!(promotion.promoted);
+        assert_eq!(promotion.current_path, models_dir.join("projector/current"));
+        assert!(models_dir.join("projector/current").exists());
+        assert!(report.output_dir.join("validation.json").exists());
+        assert!(report.output_dir.join("promotion.json").exists());
     }
 }
