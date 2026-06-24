@@ -93,6 +93,8 @@ pub struct AttemptRecord {
     pub liveness_relief: Option<f32>,
     pub liveness_pass: Option<bool>,
     pub outcome: Outcome,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
     pub gt_source: GtSource,
     /// Aggregated EdgeFace RGB embedding (the one scored against the gallery).
     pub edgeface_emb: Vec<f32>,
@@ -167,10 +169,43 @@ pub fn new_attempt_record(
         liveness_relief,
         liveness_pass,
         outcome,
+        failure_reason: None,
         gt_source,
         edgeface_emb: edgeface_emb.to_vec(),
         depth_proj_emb,
         gallery_spread,
+        conditions,
+    }
+}
+
+pub fn new_failure_attempt_record(
+    attempt_id: String,
+    lock_generation: u64,
+    matched_user: Option<String>,
+    outcome: Outcome,
+    liveness_pass: Option<bool>,
+    failure_reason: String,
+    mut conditions: AttemptConditions,
+) -> AttemptRecord {
+    let now = chrono::Utc::now();
+    if conditions.hour_utc.is_none() {
+        conditions.hour_utc = Some(now.hour());
+    }
+    AttemptRecord {
+        schema_version: 1,
+        attempt_id,
+        timestamp_utc: now.to_rfc3339(),
+        lock_generation,
+        matched_user,
+        best_cosine: 0.0,
+        liveness_relief: None,
+        liveness_pass,
+        outcome,
+        failure_reason: Some(failure_reason),
+        gt_source: GtSource::None,
+        edgeface_emb: Vec::new(),
+        depth_proj_emb: None,
+        gallery_spread: GallerySpreadStats::default(),
         conditions,
     }
 }
@@ -263,6 +298,7 @@ mod tests {
             liveness_relief: None,
             liveness_pass: Some(true),
             outcome: Outcome::ProactiveUnlocked,
+            failure_reason: None,
             gt_source: GtSource::None,
             edgeface_emb: vec![0.1, 0.2, 0.3],
             depth_proj_emb: None,
@@ -317,6 +353,45 @@ mod tests {
         assert_eq!(stored.conditions.face_area_frac, Some(0.08));
         assert_eq!(stored.conditions.sharpness, Some(12.0));
         assert_eq!(stored.conditions.hour_utc, Some(14));
+    }
+
+    #[test]
+    fn deserializes_legacy_attempt_record_with_missing_failure_reason() {
+        let legacy_record = r#"{"schema_version":1,"attempt_id":"legacy-1","timestamp_utc":"2026-06-23T12:00:00Z","lock_generation":1,"matched_user":null,"best_cosine":0.11,"liveness_relief":null,"liveness_pass":null,"outcome":"Rejected","gt_source":"None","edgeface_emb":[0.1,0.2],"depth_proj_emb":null,"gallery_spread":{"nearest":0.1,"mean":0.1,"max":0.1},"conditions":{"brightness":null,"face_area_frac":null,"sharpness":null,"hour_utc":null}}"#;
+        let stored: AttemptRecord = serde_json::from_str(legacy_record).unwrap();
+
+        assert_eq!(stored.failure_reason, None);
+        assert_eq!(stored.attempt_id, "legacy-1");
+    }
+
+    #[test]
+    fn new_failure_attempt_record_populates_failure_fields() {
+        let rec = new_failure_attempt_record(
+            "fail-1".to_string(),
+            0,
+            Some("owner".to_string()),
+            Outcome::SuspectedSpoof,
+            Some(false),
+            "liveness_rejected".to_string(),
+            AttemptConditions {
+                face_area_frac: Some(0.08),
+                ..AttemptConditions::default()
+            },
+        );
+
+        assert!(matches!(rec.outcome, Outcome::SuspectedSpoof));
+        assert_eq!(rec.liveness_pass, Some(false));
+        assert_eq!(rec.failure_reason, Some("liveness_rejected".to_string()));
+        assert!(rec.edgeface_emb.is_empty());
+        assert_eq!(rec.best_cosine, 0.0);
+        assert!(rec.depth_proj_emb.is_none());
+        assert_eq!(rec.gallery_spread.nearest, 0.0);
+        assert_eq!(rec.gallery_spread.mean, 0.0);
+        assert_eq!(rec.gallery_spread.max, 0.0);
+        assert_eq!(rec.conditions.face_area_frac, Some(0.08));
+        assert!(rec.conditions.hour_utc.is_some());
+        assert_eq!(rec.matched_user, Some("owner".to_string()));
+        assert!(matches!(rec.gt_source, GtSource::None));
     }
 
     #[test]

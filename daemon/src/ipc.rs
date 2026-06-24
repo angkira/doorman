@@ -251,6 +251,14 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
 
     if frames.is_empty() {
         error!("Failed to capture any frames");
+        log_auth_failure_attempt(
+            state,
+            username,
+            Outcome::Rejected,
+            None,
+            "no_frames",
+            AttemptConditions::default(),
+        );
         return Response::Failure {
             reason: "Failed to capture frames".to_string(),
         };
@@ -265,6 +273,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let rec = &state.config.recognition;
     let threshold = state.config.authentication.similarity_threshold;
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
+    let mut first_quality_face_area_frac = None;
     // Liveness (FATAL depth gate) runs ONCE per attempt — depth is ~0.5s on CPU
     // and running it on every frame overran the PAM screen-unlock deadline.
     // Recognition still aggregates EVERY quality frame (embedding is ~15ms).
@@ -284,6 +293,9 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         if !frame_passes_quality_gate(frame, &face, rec, i, "auth") {
             continue;
         }
+        if first_quality_face_area_frac.is_none() {
+            first_quality_face_area_frac = face_area_frac(&face);
+        }
         // First quality face: run the anti-spoofing depth gate ONCE.
         if !liveness_checked {
             liveness_checked = true;
@@ -291,12 +303,34 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                 Ok(true) => {}
                 Ok(false) => {
                     warn!("Authentication failed for {}: liveness/anti-spoof gate rejected", username);
+                    log_auth_failure_attempt(
+                        state,
+                        username,
+                        Outcome::SuspectedSpoof,
+                        Some(false),
+                        "liveness_rejected",
+                        AttemptConditions {
+                            face_area_frac: first_quality_face_area_frac,
+                            ..AttemptConditions::default()
+                        },
+                    );
                     return Response::Failure {
                         reason: "Liveness check failed (not a live face).".to_string(),
                     };
                 }
                 Err(e) => {
                     warn!("Authentication failed for {}: liveness error: {}", username, e);
+                    log_auth_failure_attempt(
+                        state,
+                        username,
+                        Outcome::SuspectedSpoof,
+                        Some(false),
+                        "liveness_error",
+                        AttemptConditions {
+                            face_area_frac: first_quality_face_area_frac,
+                            ..AttemptConditions::default()
+                        },
+                    );
                     return Response::Failure {
                         reason: "Liveness check error.".to_string(),
                     };
@@ -311,6 +345,14 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
 
     if passed_embeddings.is_empty() {
         warn!("Authentication failed for {}: no quality-passed faces", username);
+        log_auth_failure_attempt(
+            state,
+            username,
+            Outcome::Rejected,
+            None,
+            "no_clear_face",
+            AttemptConditions::default(),
+        );
         return Response::Failure {
             reason: "No clear face detected. Please ensure good lighting and look at the camera.".to_string(),
         };
@@ -409,6 +451,40 @@ fn frame_passes_quality_gate(
         if pass { "PASS" } else { "REJECT" }
     );
     pass
+}
+
+fn face_area_frac(face: &crate::ml::Face) -> Option<f32> {
+    let (_, _, w, h) = face.bbox;
+    Some((w * h).abs())
+}
+
+fn log_auth_failure_attempt(
+    state: &DaemonState,
+    username: &str,
+    outcome: Outcome,
+    liveness_pass: Option<bool>,
+    failure_reason: &str,
+    conditions: AttemptConditions,
+) {
+    let attempt_id = format!(
+        "auth-{}-{}",
+        username,
+        chrono::Utc::now().timestamp_micros()
+    );
+    dataset::log_attempt_capped(
+        &state.config.daemon.data_dir,
+        state.config.dataset.logging_enabled,
+        state.config.dataset.max_attempt_records_per_day,
+        &dataset::new_failure_attempt_record(
+            attempt_id,
+            0,
+            Some(username.to_string()),
+            outcome,
+            liveness_pass,
+            failure_reason.to_string(),
+            conditions,
+        ),
+    );
 }
 
 async fn handle_enroll(

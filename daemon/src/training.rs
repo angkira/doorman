@@ -1,6 +1,7 @@
 use crate::dataset::{AttemptRecord, GtSource, LabelEvent, Outcome};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,22 @@ pub struct TrainingReport {
     pub unknown: usize,
     pub output_dir: PathBuf,
     pub promoted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DatasetReport {
+    pub schema_version: u32,
+    pub attempts_seen: usize,
+    pub labels_seen: usize,
+    pub confirmed_genuine: usize,
+    pub rejected: usize,
+    pub suspected_spoof: usize,
+    pub unknown: usize,
+    pub proactive_unlocked: usize,
+    pub matched_attempts: usize,
+    pub unlabeled_attempts: usize,
+    #[serde(default)]
+    pub failure_reasons: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -39,22 +56,12 @@ pub fn run_offline_training(
     models_dir: &Path,
     min_confirmed: usize,
 ) -> Result<TrainingReport> {
-    let dataset_dir = data_dir.join("dataset");
-    let attempts = read_jsonl_prefix::<AttemptRecord>(&dataset_dir, "attempts")?;
-    let labels = read_jsonl_prefix::<LabelEvent>(&dataset_dir, "labels")?;
+    let dataset_report = inspect_dataset(data_dir)?;
 
-    let confirmed_genuine = labels
-        .iter()
-        .filter(|event| {
-            matches!(event.outcome, Outcome::ConfirmedGenuine)
-                && !matches!(event.gt_source, GtSource::None)
-        })
-        .count();
-
-    if confirmed_genuine < min_confirmed {
+    if dataset_report.confirmed_genuine < min_confirmed {
         return Err(anyhow!(
             "not enough confirmed-genuine labels: have {}, need {}",
-            confirmed_genuine,
+            dataset_report.confirmed_genuine,
             min_confirmed
         ));
     }
@@ -67,7 +74,58 @@ pub fn run_offline_training(
     let report = TrainingReport {
         schema_version: 1,
         version,
+        attempts_seen: dataset_report.attempts_seen,
+        confirmed_genuine: dataset_report.confirmed_genuine,
+        rejected: dataset_report.rejected,
+        suspected_spoof: dataset_report.suspected_spoof,
+        unknown: dataset_report.unknown,
+        output_dir,
+        promoted: false,
+    };
+
+    let manifest = serde_json::to_string_pretty(&report)?;
+    std::fs::write(report.output_dir.join("manifest.json"), manifest)
+        .with_context(|| "failed to write projector candidate manifest")?;
+    Ok(report)
+}
+
+pub fn inspect_dataset(data_dir: &Path) -> Result<DatasetReport> {
+    let dataset_dir = data_dir.join("dataset");
+    let attempts = read_jsonl_prefix::<AttemptRecord>(&dataset_dir, "attempts")?;
+    let labels = read_jsonl_prefix::<LabelEvent>(&dataset_dir, "labels")?;
+
+    let confirmed_genuine = labels
+        .iter()
+        .filter(|event| {
+            matches!(event.outcome, Outcome::ConfirmedGenuine)
+                && !matches!(event.gt_source, GtSource::None)
+        })
+        .count();
+
+    let mut failure_reasons = BTreeMap::new();
+    for attempt in &attempts {
+        if let Some(reason) = &attempt.failure_reason {
+            *failure_reasons.entry(reason.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let labeled_attempt_ids: HashSet<&str> = labels
+        .iter()
+        .map(|event| event.attempt_id.as_str())
+        .collect();
+    let unlabeled_attempts = attempts
+        .iter()
+        .filter(|attempt| !labeled_attempt_ids.contains(attempt.attempt_id.as_str()))
+        .count();
+    let matched_attempts = attempts
+        .iter()
+        .filter(|attempt| !matches!(attempt.outcome, Outcome::Rejected))
+        .count();
+
+    Ok(DatasetReport {
+        schema_version: 1,
         attempts_seen: attempts.len(),
+        labels_seen: labels.len(),
         confirmed_genuine,
         rejected: attempts
             .iter()
@@ -81,14 +139,14 @@ pub fn run_offline_training(
             .iter()
             .filter(|attempt| matches!(attempt.outcome, Outcome::Unknown))
             .count(),
-        output_dir,
-        promoted: false,
-    };
-
-    let manifest = serde_json::to_string_pretty(&report)?;
-    std::fs::write(report.output_dir.join("manifest.json"), manifest)
-        .with_context(|| "failed to write projector candidate manifest")?;
-    Ok(report)
+        proactive_unlocked: attempts
+            .iter()
+            .filter(|attempt| matches!(attempt.outcome, Outcome::ProactiveUnlocked))
+            .count(),
+        matched_attempts,
+        unlabeled_attempts,
+        failure_reasons,
+    })
 }
 
 pub fn promote_projector_candidate(
@@ -227,6 +285,8 @@ fn read_jsonl_prefix<T: for<'de> Deserialize<'de>>(dir: &Path, prefix: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use crate::dataset::{
         AttemptConditions, GallerySpreadStats, GtSource, LabelEvent, Outcome,
     };
@@ -236,6 +296,19 @@ mod tests {
         let mut line = serde_json::to_string(value).unwrap();
         line.push('\n');
         std::fs::write(path, line).unwrap();
+    }
+
+    fn append_jsonl<T: serde::Serialize>(path: &std::path::Path, value: &T) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut line = serde_json::to_string(value).unwrap();
+        line.push('\n');
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        file.write_all(line.as_bytes()).unwrap();
     }
 
     fn sample_attempt() -> crate::dataset::AttemptRecord {
@@ -259,6 +332,20 @@ mod tests {
         )
     }
 
+    fn sample_attempt_with(
+        attempt_id: &str,
+        outcome: Outcome,
+        failure_reason: Option<&str>,
+        matched_user: Option<&str>,
+    ) -> crate::dataset::AttemptRecord {
+        let mut attempt = sample_attempt();
+        attempt.attempt_id = attempt_id.to_string();
+        attempt.outcome = outcome;
+        attempt.failure_reason = failure_reason.map(str::to_string);
+        attempt.matched_user = matched_user.map(str::to_string);
+        attempt
+    }
+
     fn sample_label() -> LabelEvent {
         LabelEvent {
             schema_version: 1,
@@ -267,6 +354,77 @@ mod tests {
             outcome: Outcome::ConfirmedGenuine,
             gt_source: GtSource::PamFaceAuth,
         }
+    }
+
+    #[test]
+    fn inspects_dataset_and_counts_attempts_labels_and_failure_reasons() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let dataset_dir = data_dir.join("dataset");
+        append_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt_with(
+                "attempt-1",
+                Outcome::ProactiveUnlocked,
+                Some("too_dark"),
+                Some("owner"),
+            ),
+        );
+        append_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt_with("attempt-2", Outcome::Unknown, None, Some("owner")),
+        );
+        append_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt_with(
+                "attempt-3",
+                Outcome::SuspectedSpoof,
+                Some("spoof_pattern"),
+                Some("guest"),
+            ),
+        );
+        append_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt_with("attempt-4", Outcome::Rejected, None, None),
+        );
+        append_jsonl(
+            &dataset_dir.join("labels-20260623.jsonl"),
+            &LabelEvent {
+                schema_version: 1,
+                attempt_id: "attempt-1".to_string(),
+                timestamp_utc: "2026-06-23T12:00:01Z".to_string(),
+                outcome: Outcome::ConfirmedGenuine,
+                gt_source: GtSource::PamFaceAuth,
+            },
+        );
+        append_jsonl(
+            &dataset_dir.join("labels-20260623.jsonl"),
+            &LabelEvent {
+                schema_version: 1,
+                attempt_id: "attempt-4".to_string(),
+                timestamp_utc: "2026-06-23T12:00:02Z".to_string(),
+                outcome: Outcome::Rejected,
+                gt_source: GtSource::PasswordFallback,
+            },
+        );
+
+        let report = super::inspect_dataset(&data_dir).unwrap();
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.attempts_seen, 4);
+        assert_eq!(report.labels_seen, 2);
+        assert_eq!(report.confirmed_genuine, 1);
+        assert_eq!(report.proactive_unlocked, 1);
+        assert_eq!(report.unknown, 1);
+        assert_eq!(report.suspected_spoof, 1);
+        assert_eq!(report.rejected, 1);
+        assert_eq!(report.matched_attempts, 3);
+        assert_eq!(report.unlabeled_attempts, 2);
+
+        let mut expected_reasons = BTreeMap::new();
+        expected_reasons.insert("spoof_pattern".to_string(), 1);
+        expected_reasons.insert("too_dark".to_string(), 1);
+        assert_eq!(report.failure_reasons, expected_reasons);
     }
 
     #[test]

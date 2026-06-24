@@ -116,6 +116,12 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         min_confirmed: usize,
     },
+    /// Inspect offline dataset files and print a summary.
+    DatasetReport {
+        /// Data directory containing dataset/attempts-*.jsonl and labels-*.jsonl.
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+    },
     /// Promote a projector candidate after offline validation passes.
     Promote {
         /// Candidate directory containing manifest.json.
@@ -267,6 +273,7 @@ fn main() {
             models_dir,
             min_confirmed,
         } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
+        Command::DatasetReport { data_dir } => cmd_dataset_report(data_dir.as_deref(), cli.json),
         Command::Promote {
             candidate_dir,
             incumbent_far,
@@ -349,6 +356,43 @@ fn cmd_train(
         println!("  unknown attempts: {}", report.unknown);
         println!("  output: {}", report.output_dir.display());
         println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
+    }
+    Ok(())
+}
+
+fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliError> {
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(doorman_shared::DATA_DIR));
+    let report = doormand::training::inspect_dataset(&data_dir)
+        .map_err(|e| CliError::new(format!("dataset inspection failed: {e}")))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|e| CliError::new(format!("failed to render dataset report: {e}")))?
+        );
+    } else {
+        println!("doorman dataset report");
+        println!("  data dir: {}", data_dir.display());
+        println!("  attempts seen: {}", report.attempts_seen);
+        println!("  labels seen: {}", report.labels_seen);
+        println!("  confirmed genuine labels: {}", report.confirmed_genuine);
+        println!("  rejected attempts: {}", report.rejected);
+        println!("  suspected spoof attempts: {}", report.suspected_spoof);
+        println!("  proactive unlocked attempts: {}", report.proactive_unlocked);
+        println!("  unknown attempts: {}", report.unknown);
+        println!("  matched attempts: {}", report.matched_attempts);
+        println!("  unlabeled attempts: {}", report.unlabeled_attempts);
+        if report.failure_reasons.is_empty() {
+            println!("  failure reasons: none");
+        } else {
+            println!("  failure reasons:");
+            for (reason, count) in report.failure_reasons {
+                println!("    {reason}: {count}");
+            }
+        }
     }
     Ok(())
 }
