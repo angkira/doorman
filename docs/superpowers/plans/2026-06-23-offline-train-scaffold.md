@@ -25,33 +25,33 @@
 - Create: `daemon/src/training.rs`
 - Modify: `daemon/src/lib.rs`
 
-- [ ] Write a failing test that creates a temp `dataset/attempts-YYYYMMDD.jsonl` and `labels-YYYYMMDD.jsonl`, runs `run_offline_training`, and expects a report with `confirmed_genuine = 1`, `promoted = false`, and an artifact directory.
-- [ ] Run: `cargo test -p doormand training::tests::writes_projector_candidate_without_promoting`
-- [ ] Implement `run_offline_training`.
-- [ ] Re-run the targeted test.
+- [x] Write a failing test that creates a temp `dataset/attempts-YYYYMMDD.jsonl` and `labels-YYYYMMDD.jsonl`, runs `run_offline_training`, and expects a report with `confirmed_genuine = 1`, `promoted = false`, and an artifact directory.
+- [x] Run: `cargo test -p doormand training::tests::writes_projector_candidate_without_promoting`
+- [x] Implement `run_offline_training`.
+- [x] Re-run the targeted test.
 
 ### Task 2: Safety Failure For Insufficient Labels
 
 **Files:**
 - Modify: `daemon/src/training.rs`
 
-- [ ] Write a failing test that requires `min_confirmed = 2` with only one label and expects an error.
-- [ ] Run: `cargo test -p doormand training::tests::refuses_training_without_enough_confirmed_labels`
-- [ ] Implement the minimum confirmed-genuine gate.
-- [ ] Re-run targeted tests.
+- [x] Write a failing test that requires `min_confirmed = 2` with only one label and expects an error.
+- [x] Run: `cargo test -p doormand training::tests::refuses_training_without_enough_confirmed_labels`
+- [x] Implement the minimum confirmed-genuine gate.
+- [x] Re-run targeted tests.
 
 ### Task 3: CLI Command
 
 **Files:**
 - Modify: `daemon/src/bin/doorman.rs`
 
-- [ ] Add `Command::Train { data_dir, models_dir, min_confirmed }`.
-- [ ] Add `cmd_train` that calls `doormand::training::run_offline_training`.
-- [ ] Print report text in normal mode and JSON in `--json` mode.
-- [ ] Run: `cargo test -p doormand`.
+- [x] Add `Command::Train { data_dir, models_dir, min_confirmed }`.
+- [x] Add `cmd_train` that calls `doormand::training::run_offline_training`.
+- [x] Print report text in normal mode and JSON in `--json` mode.
+- [x] Run: `cargo test -p doormand`.
 
 ### Task 4: Final Verification
 
-- [ ] Run: `git diff --check`.
-- [ ] Run: `cargo test -p doormand`.
-- [ ] Commit the scaffold.
+- [x] Run: `git diff --check`.
+- [x] Run: `cargo test -p doormand`.
+- [x] Commit the scaffold.
