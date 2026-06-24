@@ -29,7 +29,7 @@
 - Test: `daemon/src/dataset.rs`
 - Test: `daemon/tests/config_tests.rs`
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
 Add tests in `daemon/src/dataset.rs` that expect `AttemptRecord` to include:
 
@@ -45,7 +45,7 @@ Run: `cargo test -p doormand dataset::tests::enabled_logging_appends_jsonl_recor
 
 Expected: FAIL because these fields/types do not exist yet.
 
-- [ ] **Step 2: Implement minimal schema**
+- [x] **Step 2: Implement minimal schema**
 
 Add these types in `daemon/src/dataset.rs`:
 
@@ -76,7 +76,7 @@ pub struct AttemptConditions {
 
 Extend `AttemptRecord` with `schema_version`, `depth_proj_emb`, `gallery_spread`, `gt_source`, and `conditions`.
 
-- [ ] **Step 3: Verify schema tests pass**
+- [x] **Step 3: Verify schema tests pass**
 
 Run: `cargo test -p doormand dataset::tests`
 
@@ -93,7 +93,7 @@ Expected: PASS for dataset writer tests.
 - Test: `daemon/src/pipeline/recognition_pipeline.rs`
 - Test: unit tests in `daemon/src/ipc.rs` if needed for pure helpers
 
-- [ ] **Step 1: Write failing tests for helper calculations**
+- [x] **Step 1: Write failing tests for helper calculations**
 
 Add pure helper tests for:
 
@@ -106,7 +106,7 @@ Run: `cargo test -p doormand gallery_spread`
 
 Expected: FAIL because helpers do not exist.
 
-- [ ] **Step 2: Implement helper calculations**
+- [x] **Step 2: Implement helper calculations**
 
 Add pure helpers in `daemon/src/dataset.rs`:
 
@@ -121,11 +121,11 @@ Add pipeline-local or dataset-level outcome helper:
 pub fn outcome_from_match(matched: bool, liveness_pass: Option<bool>) -> Outcome
 ```
 
-- [ ] **Step 3: Log rejected scored attempts in recognition pipeline**
+- [x] **Step 3: Log rejected scored attempts in recognition pipeline**
 
 In `daemon/src/pipeline/recognition_pipeline.rs`, after scoring `best_similarity`, log `Outcome::Rejected` for no match when dataset logging is enabled. Use the same once-per-lock-generation throttle as proactive outcomes to avoid correlated-frame floods.
 
-- [ ] **Step 4: Log on-demand auth attempts**
+- [x] **Step 4: Log on-demand auth attempts**
 
 In `daemon/src/ipc.rs`, after aggregated scoring in `handle_authenticate`, append an `AttemptRecord` with:
 
@@ -138,7 +138,7 @@ gt_source: GtSource::None,
 
 Then Task 3 will append the confirmation label event when success is known.
 
-- [ ] **Step 5: Verify M1 logging coverage**
+- [x] **Step 5: Verify M1 logging coverage**
 
 Run: `cargo test -p doormand`
 
@@ -154,7 +154,7 @@ Expected: PASS.
 - Test: `daemon/src/dataset.rs`
 - Test: `daemon/src/ipc.rs` pure helper tests if introduced
 
-- [ ] **Step 1: Write failing label-event tests**
+- [x] **Step 1: Write failing label-event tests**
 
 In `daemon/src/dataset.rs`, add a test that writes a label event to `<data_dir>/dataset/labels-YYYYMMDD.jsonl`:
 
@@ -172,7 +172,7 @@ Run: `cargo test -p doormand dataset::tests::enabled_label_logging_appends_jsonl
 
 Expected: FAIL because `LabelEvent` and `log_label_event` do not exist.
 
-- [ ] **Step 2: Implement label-event writer**
+- [x] **Step 2: Implement label-event writer**
 
 Add:
 
@@ -191,7 +191,7 @@ pub fn log_label_event(data_dir: &str, enabled: bool, event: &LabelEvent)
 
 Write to `<data_dir>/dataset/labels-YYYYMMDD.jsonl` with the same best-effort permissions as attempts.
 
-- [ ] **Step 3: Append confirmed label on auth success**
+- [x] **Step 3: Append confirmed label on auth success**
 
 In `daemon/src/ipc.rs`, when `best_similarity >= threshold`, append a `LabelEvent` for the just-written auth attempt:
 
@@ -202,7 +202,7 @@ gt_source: GtSource::PamFaceAuth,
 
 Do not label failed face auth as confirmed genuine. Do not try to infer password fallback success; PAM password fallback happens after `pam_doorman` returns failure and is outside the daemon today.
 
-- [ ] **Step 4: Verify M2 tests pass**
+- [x] **Step 4: Verify M2 tests pass**
 
 Run: `cargo test -p doormand`
 
@@ -215,18 +215,18 @@ Expected: PASS.
 **Files:**
 - Modify: `.plans/2026-06-23_learnable-projector-rnd.md` only if implementation semantics differ from the original text.
 
-- [ ] **Step 1: Verify whitespace**
+- [x] **Step 1: Verify whitespace**
 
 Run: `git diff --check`
 
 Expected: no output, exit code 0.
 
-- [ ] **Step 2: Verify daemon tests**
+- [x] **Step 2: Verify daemon tests**
 
 Run: `cargo test -p doormand`
 
 Expected: all non-ignored tests pass. Existing warnings in ML tests are allowed if unchanged.
 
-- [ ] **Step 3: Record exact M1/M2 boundary**
+- [x] **Step 3: Record exact M1/M2 boundary**
 
 If password fallback is not implemented, add a short note to `.plans/2026-06-23_learnable-projector-rnd.md` that current M2 labels daemon-confirmed face-auth success only, and password fallback labeling needs a separate trusted PAM-side signal.

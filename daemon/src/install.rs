@@ -2425,43 +2425,49 @@ mod tests {
 
     #[test]
     fn pam_kde_screen_unlock() {
-        let (svc, _note) = pick_pam_service("KDE", PamScope::ScreenUnlock, true, false);
+        let (svc, _note) = pick_pam_service("KDE", PamScope::ScreenUnlock, true, false, false);
         assert_eq!(svc.as_deref(), Some("kde"));
     }
 
     #[test]
     fn pam_kde_via_plasma_token() {
-        let (svc, _) = pick_pam_service("ubuntu:plasma", PamScope::ScreenUnlock, true, false);
+        let (svc, _) = pick_pam_service("ubuntu:plasma", PamScope::ScreenUnlock, true, false, false);
         assert_eq!(svc.as_deref(), Some("kde"));
     }
 
     #[test]
     fn pam_gnome_screen_unlock() {
-        let (svc, _) = pick_pam_service("ubuntu:GNOME", PamScope::ScreenUnlock, false, true);
+        let (svc, _) = pick_pam_service("ubuntu:GNOME", PamScope::ScreenUnlock, false, true, false);
         assert_eq!(svc.as_deref(), Some("gnome-screensaver"));
     }
 
     #[test]
+    fn pam_sway_screen_unlock() {
+        let (svc, _) = pick_pam_service("sway", PamScope::ScreenUnlock, false, false, true);
+        assert_eq!(svc.as_deref(), Some("swaylock"));
+    }
+
+    #[test]
     fn pam_login_flag_forces_sddm() {
-        let (svc, _) = pick_pam_service("KDE", PamScope::Login, true, false);
+        let (svc, _) = pick_pam_service("KDE", PamScope::Login, true, false, false);
         assert_eq!(svc.as_deref(), Some("sddm"));
     }
 
     #[test]
     fn pam_sudo_flag_forces_sudo() {
-        let (svc, _) = pick_pam_service("KDE", PamScope::Sudo, true, false);
+        let (svc, _) = pick_pam_service("KDE", PamScope::Sudo, true, false, false);
         assert_eq!(svc.as_deref(), Some("sudo"));
     }
 
     #[test]
     fn pam_unknown_desktop_is_none() {
-        let (svc, _) = pick_pam_service("XFCE", PamScope::ScreenUnlock, false, false);
+        let (svc, _) = pick_pam_service("XFCE", PamScope::ScreenUnlock, false, false, false);
         assert!(svc.is_none());
     }
 
     #[test]
     fn pam_none_scope_disables() {
-        let (svc, _) = pick_pam_service("KDE", PamScope::None, true, false);
+        let (svc, _) = pick_pam_service("KDE", PamScope::None, true, false, false);
         assert!(svc.is_none());
     }
 
@@ -2845,6 +2851,7 @@ mod tests {
             assume_yes: true,
             ep: EpChoice::Rocm,
             pam_scope: PamScope::None,
+            desktop: DesktopChoice::Auto,
             auto_unlock,
         }
     }
