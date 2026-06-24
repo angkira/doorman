@@ -1,0 +1,9 @@
+# doorman Sway adapter.
+#
+# Include this from ~/.config/sway/config or copy the binding into your own
+# bindings file. The adapter prefers gtklock when installed, falls back to
+# swaylock, then polls the system doorman daemon and closes the locker after a
+# recognized face. Password remains the fallback through the locker's PAM file.
+
+set $doorman_lock /usr/lib/doorman/adapters/sway/doorman-sway-lock
+bindsym $mod+l exec $doorman_lock

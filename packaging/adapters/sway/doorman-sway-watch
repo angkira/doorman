@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+user="${1:-${USER:-$(id -un)}}"
+socket="${2:-${DOORMAN_SOCKET:-/run/doorman/doorman.sock}}"
+locker="${3:-swaylock}"
+interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"
+attempt=0
+
+while pgrep -u "$user" -x "$locker" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    out="$(doorman --socket "$socket" test "$user" 2>&1 || true)"
+    printf '%s attempt=%s %s\n' "$(date -Is)" "$attempt" "$out"
+
+    case "$out" in
+        recognized:*)
+            pkill -TERM -u "$user" -x "$locker" >/dev/null 2>&1 || true
+            sleep 1
+            pkill -KILL -u "$user" -x "$locker" >/dev/null 2>&1 || true
+            exit 0
+            ;;
+    esac
+
+    sleep "$interval"
+done

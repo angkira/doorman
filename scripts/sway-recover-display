@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -u
+
+log="${SWAY_RECOVER_LOG:-/tmp/sway-recover-display.log}"
+user="${USER:-$(id -un)}"
+sid="${XDG_SESSION_ID:-}"
+
+{
+    echo "[$(date -Is)] recover start user=$user sid=${sid:-?} display=${WAYLAND_DISPLAY:-?} swaysock=${SWAYSOCK:-?}"
+
+    if [ -n "$sid" ]; then
+        loginctl unlock-session "$sid" >/dev/null 2>&1 || true
+    fi
+
+    pkill -TERM -u "$user" -x gtklock >/dev/null 2>&1 || true
+    pkill -TERM -u "$user" -x swaylock >/dev/null 2>&1 || true
+    sleep 0.3
+    pkill -KILL -u "$user" -x gtklock >/dev/null 2>&1 || true
+    pkill -KILL -u "$user" -x swaylock >/dev/null 2>&1 || true
+
+    if command -v swaymsg >/dev/null 2>&1; then
+        swaymsg "output * power on" >/dev/null 2>&1 || true
+        sleep 0.2
+        swaymsg -t get_outputs 2>/dev/null || true
+    fi
+
+    echo "[$(date -Is)] recover done"
+} >> "$log" 2>&1

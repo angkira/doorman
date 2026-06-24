@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
+user="${DOORMAN_USER:-${USER:-$(id -un)}}"
+watcher="${DOORMAN_SWAY_WATCH:-/usr/lib/doorman/adapters/sway/doorman-sway-watch}"
+gtklock_bin="${GTKLOCK:-gtklock}"
+swaylock_bin="${SWAYLOCK:-swaylock}"
+gtklock_config="${DOORMAN_GTKLOCK_CONFIG:-$HOME/.config/gtklock/config.ini}"
+swaylock_config="${DOORMAN_SWAYLOCK_CONFIG:-$HOME/.config/swaylock/config}"
+backend="${DOORMAN_LOCK_BACKEND:-auto}"
+log="${DOORMAN_SWAY_LOG:-/tmp/doorman-sway-lock.log}"
+
+printf '%s lock user=%s socket=%s\n' "$(date -Is)" "$user" "$socket" >> "$log"
+
+if [ "$backend" = "auto" ]; then
+    if command -v "$gtklock_bin" >/dev/null 2>&1; then
+        backend=gtklock
+    else
+        backend=swaylock
+    fi
+fi
+
+case "$backend" in
+    gtklock)
+        if [ -f "$gtklock_config" ]; then
+            "$gtklock_bin" --daemonize --config "$gtklock_config" "$@"
+        else
+            "$gtklock_bin" --daemonize "$@"
+        fi
+        locker=gtklock
+        ;;
+    swaylock)
+        if [ -f "$swaylock_config" ]; then
+            "$swaylock_bin" --daemonize --config "$swaylock_config" "$@"
+        else
+            "$swaylock_bin" --daemonize "$@"
+        fi
+        locker=swaylock
+        ;;
+    *)
+        echo "unsupported DOORMAN_LOCK_BACKEND=$backend" >&2
+        exit 2
+        ;;
+esac
+
+"$watcher" "$user" "$socket" "$locker" >> "$log" 2>&1 &

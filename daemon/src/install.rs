@@ -52,12 +52,48 @@ pub enum PamScope {
     None,
 }
 
+/// Which desktop adapter to target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopChoice {
+    Auto,
+    Sway,
+    Kde,
+    Gnome,
+    None,
+}
+
+impl DesktopChoice {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "sway" => Ok(Self::Sway),
+            "kde" | "plasma" => Ok(Self::Kde),
+            "gnome" => Ok(Self::Gnome),
+            "none" | "off" => Ok(Self::None),
+            other => Err(format!(
+                "unknown desktop adapter '{other}' (expected auto, sway, kde, gnome, or none)"
+            )),
+        }
+    }
+
+    fn override_desktop(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Sway => Some("sway"),
+            Self::Kde => Some("kde"),
+            Self::Gnome => Some("gnome"),
+            Self::None => Some(""),
+        }
+    }
+}
+
 /// Options for `doorman install`.
 pub struct InstallOpts {
     pub dry_run: bool,
     pub assume_yes: bool,
     pub ep: EpChoice,
     pub pam_scope: PamScope,
+    pub desktop: DesktopChoice,
     /// Opt-in: grant the `doorman` system user the logind
     /// `org.freedesktop.login1.lock-sessions` polkit action AND flip
     /// `proactive_unlock = true` in the installed config, so a recognized face
@@ -171,10 +207,12 @@ pub fn pick_pam_service(
     scope: PamScope,
     has_kscreenlocker: bool,
     has_gnome_screensaver: bool,
+    has_swaylock: bool,
 ) -> (Option<String>, String) {
     let desk = desktop.to_ascii_lowercase();
     let is_kde = desk.contains("kde") || desk.contains("plasma");
     let is_gnome = desk.contains("gnome");
+    let is_sway = desk.contains("sway");
 
     match scope {
         PamScope::None => (None, "PAM integration disabled (--no-pam)".to_string()),
@@ -187,7 +225,17 @@ pub fn pick_pam_service(
             "sudo authentication (explicit --sudo)".to_string(),
         ),
         PamScope::ScreenUnlock => {
-            if is_kde && has_kscreenlocker {
+            if is_sway && has_swaylock {
+                (
+                    Some("swaylock".to_string()),
+                    "Sway screen unlock (swaylock -> /etc/pam.d/swaylock)".to_string(),
+                )
+            } else if is_sway {
+                (
+                    Some("swaylock".to_string()),
+                    "Sway assumed (swaylock not found on PATH during diagnosis)".to_string(),
+                )
+            } else if is_kde && has_kscreenlocker {
                 (
                     Some("kde".to_string()),
                     "KDE/Plasma screen unlock (kscreenlocker -> /etc/pam.d/kde)".to_string(),
@@ -399,18 +447,28 @@ fn systemctl_state(unit: &str) -> (bool, bool) {
 // doctor
 // ---------------------------------------------------------------------------
 
-pub fn diagnose(ep_choice: EpChoice, pam_scope: PamScope) -> Diagnosis {
+pub fn diagnose(ep_choice: EpChoice, pam_scope: PamScope, desktop_choice: DesktopChoice) -> Diagnosis {
     let os = read_file("/etc/os-release").unwrap_or_default();
     let (os_pretty, os_id, os_version) = parse_os_release(&os);
 
     let has_systemd = binary_on_path("systemctl");
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let desktop = desktop_choice
+        .override_desktop()
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default());
 
     let has_kscreenlocker = binary_on_path("kscreenlocker_greet")
         || Path::new("/usr/lib/x86_64-linux-gnu/libexec/kscreenlocker_greet").exists();
     let has_gnome_screensaver = binary_on_path("gnome-screensaver");
+    let has_swaylock = binary_on_path("swaylock");
     let (pam_service, pam_service_note) =
-        pick_pam_service(&desktop, pam_scope, has_kscreenlocker, has_gnome_screensaver);
+        pick_pam_service(
+            &desktop,
+            pam_scope,
+            has_kscreenlocker,
+            has_gnome_screensaver,
+            has_swaylock,
+        );
 
     let has_kfd = Path::new("/sys/class/kfd").exists() || binary_on_path("rocminfo");
     let rocm_so = rocm_so_path();
@@ -615,6 +673,7 @@ const SYS_DEPTHD_BIN: &str = "/usr/bin/doorman-depthd";
 const SYS_CLI: &str = "/usr/bin/doorman";
 const SYS_PREVIEW: &str = "/usr/bin/doorman-preview";
 const SYS_LIBDIR: &str = "/usr/lib/doorman";
+const SYS_SWAY_ADAPTER_DIR: &str = "/usr/lib/doorman/adapters/sway";
 const ETC_DIR: &str = "/etc/doorman";
 const ETC_CONFIG: &str = "/etc/doorman/doorman.toml";
 const STATE_DIR: &str = "/var/lib/doorman";
@@ -1164,6 +1223,10 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         &["install", "-d", "-m", "0755", ETC_DIR, SYS_LIBDIR],
     ));
     plan.push(Action::priv_(
+        format!("Create adapter dir {SYS_SWAY_ADAPTER_DIR}"),
+        &["install", "-d", "-m", "0755", SYS_SWAY_ADAPTER_DIR],
+    ));
+    plan.push(Action::priv_(
         format!("Create state dir {STATE_DIR} owned by doorman"),
         &["install", "-d", "-m", "0750", "-o", "doorman", "-g", "doorman", STATE_DIR, MODELS_DIR],
     ));
@@ -1190,6 +1253,20 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         format!("Install doorman-preview GUI -> {SYS_PREVIEW} (so `doorman preview` works)"),
         &["install", "-m", "0755",
           Box::leak(target.join("doorman-preview").display().to_string().into_boxed_str()), SYS_PREVIEW],
+    ));
+    for script in ["doorman-sway-lock", "doorman-sway-watch"] {
+        plan.push(Action::priv_(
+            format!("Install Sway adapter {script} -> {SYS_SWAY_ADAPTER_DIR}/{script}"),
+            &["install", "-m", "0755",
+              Box::leak(root.join("packaging/adapters/sway").join(script).display().to_string().into_boxed_str()),
+              Box::leak(format!("{SYS_SWAY_ADAPTER_DIR}/{script}").into_boxed_str())],
+        ));
+    }
+    plan.push(Action::priv_(
+        format!("Install Sway config example -> {SYS_SWAY_ADAPTER_DIR}/sway.conf.example"),
+        &["install", "-m", "0644",
+          Box::leak(root.join("packaging/adapters/sway/sway.conf.example").display().to_string().into_boxed_str()),
+          Box::leak(format!("{SYS_SWAY_ADAPTER_DIR}/sway.conf.example").into_boxed_str())],
     ));
     // ROCm: install the depth-liveness sidecar binary (runs depth on the iGPU).
     if build_depthd {
@@ -1700,7 +1777,7 @@ pub fn run_install(opts: &InstallOpts) -> Result<(), String> {
         );
     }
 
-    let d = diagnose(opts.ep, opts.pam_scope);
+    let d = diagnose(opts.ep, opts.pam_scope, opts.desktop);
 
     if !d.has_systemd {
         return Err("systemd not found — this installer targets systemd Linux only".into());
@@ -2205,6 +2282,13 @@ fn print_next_steps(d: &Diagnosis, opts: &InstallOpts) {
         println!("  the session with NO keypress. Your password remains a fallback. Disable by re-running");
         println!("  install without --auto-unlock (then `doorman uninstall` removes the polkit rule).");
     }
+    if d.desktop.to_ascii_lowercase().contains("sway") {
+        println!("\n  Sway adapter installed:");
+        println!("     {SYS_SWAY_ADAPTER_DIR}/doorman-sway-lock");
+        println!("  Add this binding to your Sway config, or include the example at");
+        println!("     {SYS_SWAY_ADAPTER_DIR}/sway.conf.example");
+        println!("     bindsym $mod+l exec {SYS_SWAY_ADAPTER_DIR}/doorman-sway-lock");
+    }
     println!("\n  Liveness/print-attack note: face auth is `sufficient`, not a replacement for");
     println!("  the password. Treat photos/video spoofing as a residual risk on this surface.");
     println!("  Revert everything any time with:  doorman uninstall  (add --purge to wipe data)");
@@ -2228,7 +2312,7 @@ fn print_next_steps(d: &Diagnosis, opts: &InstallOpts) {
 // ---------------------------------------------------------------------------
 
 pub fn run_uninstall(opts: &UninstallOpts) -> Result<(), String> {
-    let d = diagnose(EpChoice::Auto, PamScope::None);
+    let d = diagnose(EpChoice::Auto, PamScope::None, DesktopChoice::Auto);
     let mut plan: Vec<Action> = Vec::new();
 
     // Remove PAM overrides we installed (restore backups where present).

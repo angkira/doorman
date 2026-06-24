@@ -6,7 +6,7 @@ Architecture: @ARCH@
 Maintainer: doorman contributors
 Installed-Size: @INSTALLED_SIZE@
 Depends: adduser, libc6, libgcc-s1, libpam0g, systemd, ffmpeg, v4l-utils
-Recommends: pamtester
+Recommends: gtklock, pamtester, swaylock
 Homepage: https://github.com/doorman/doorman
 Description: Face authentication daemon and PAM module
  doorman provides a local face-authentication daemon, management CLI, and PAM

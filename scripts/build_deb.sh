@@ -71,6 +71,7 @@ cargo build --release -p pam_doorman
 install -d -m 0755 "$pkgdir/DEBIAN"
 install -d -m 0755 "$pkgdir/usr/bin"
 install -d -m 0755 "$pkgdir/usr/lib/$multiarch/security"
+install -d -m 0755 "$pkgdir/usr/lib/doorman/adapters/sway"
 install -d -m 0755 "$pkgdir/lib/systemd/system"
 install -d -m 0755 "$pkgdir/usr/lib/systemd/user"
 install -d -m 0755 "$pkgdir/usr/share/doc/doorman"
@@ -83,6 +84,12 @@ install -m 0644 target/release/libpam_doorman.so \
 ln -s libpam_doorman.so "$pkgdir/usr/lib/$multiarch/security/pam_doorman.so"
 
 install -m 0644 packaging/doorman.toml.example "$pkgdir/usr/share/doorman/doorman.toml.example"
+install -m 0755 packaging/adapters/sway/doorman-sway-lock \
+  "$pkgdir/usr/lib/doorman/adapters/sway/doorman-sway-lock"
+install -m 0755 packaging/adapters/sway/doorman-sway-watch \
+  "$pkgdir/usr/lib/doorman/adapters/sway/doorman-sway-watch"
+install -m 0644 packaging/adapters/sway/sway.conf.example \
+  "$pkgdir/usr/lib/doorman/adapters/sway/sway.conf.example"
 install -m 0644 packaging/systemd/doormand.service "$pkgdir/lib/systemd/system/doormand.service"
 install -m 0644 packaging/systemd/doormand-user.service \
   "$pkgdir/usr/lib/systemd/user/doormand.service"

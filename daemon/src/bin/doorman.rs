@@ -40,7 +40,7 @@ use doorman_shared::{
 // --no-default-features.
 #[path = "../install.rs"]
 mod install;
-use install::{EpChoice, InstallOpts, PamScope, UninstallOpts};
+use install::{DesktopChoice, EpChoice, InstallOpts, PamScope, UninstallOpts};
 
 /// Default runtime directory when neither `--socket`/`--runtime-dir` nor
 /// `$XDG_RUNTIME_DIR` is set. Matches how the daemon is run on this Mac.
@@ -173,6 +173,9 @@ enum Command {
         /// Do not touch PAM at all (service + enroll only).
         #[arg(long, conflicts_with_all = ["screen_unlock", "login", "sudo"])]
         no_pam: bool,
+        /// Desktop adapter to install/configure (auto, sway, kde, gnome, none).
+        #[arg(long, value_name = "DESKTOP", default_value = "auto")]
+        desktop: String,
         /// HIGH-TRUST opt-in: grant the `doorman` user the logind unlock-sessions
         /// polkit action AND set proactive_unlock=true, so a recognized face (with
         /// liveness PASS) unlocks the session WITHOUT a keypress. Password remains a
@@ -292,8 +295,9 @@ fn main() {
             login,
             sudo,
             no_pam,
+            desktop,
             auto_unlock,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, *auto_unlock),
+        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, desktop, *auto_unlock),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
         Command::Preview { args } => cmd_preview(args),
     };
@@ -309,7 +313,7 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn cmd_doctor() -> Result<(), CliError> {
-    let d = install::diagnose(EpChoice::Auto, PamScope::ScreenUnlock);
+    let d = install::diagnose(EpChoice::Auto, PamScope::ScreenUnlock, DesktopChoice::Auto);
     install::print_diagnosis(&d);
     Ok(())
 }
@@ -400,6 +404,7 @@ fn cmd_install(
     login: bool,
     sudo: bool,
     no_pam: bool,
+    desktop: &str,
     auto_unlock: bool,
 ) -> Result<(), CliError> {
     let ep = if cpu {
@@ -420,11 +425,13 @@ fn cmd_install(
     } else {
         PamScope::ScreenUnlock
     };
+    let desktop = DesktopChoice::parse(desktop).map_err(CliError::new)?;
     install::run_install(&InstallOpts {
         dry_run,
         assume_yes: yes,
         ep,
         pam_scope,
+        desktop,
         auto_unlock,
     })
     .map_err(CliError::new)

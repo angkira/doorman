@@ -16,6 +16,15 @@ After installing:
 
    auth    sufficient    pam_doorman.so
 
+For Sway, the package ships an optional adapter in:
+
+   /usr/lib/doorman/adapters/sway/doorman-sway-lock
+
+It prefers gtklock when available and falls back to swaylock. Include the
+example binding from:
+
+   /usr/lib/doorman/adapters/sway/sway.conf.example
+
 The package creates /etc/doorman/doorman.toml from the template only when it is
 missing. Keep a root shell open while editing PAM. Removing the package
 preserves /var/lib/doorman. Purging the package removes /etc/doorman,

@@ -42,6 +42,8 @@ grep -q '/usr/lib/systemd/user/doormand.service' scripts/build_deb.sh
 grep -q 'libpam_doorman.so' scripts/build_deb.sh
 grep -q 'pam_doorman.so' scripts/build_deb.sh
 grep -q '/usr/share/doorman/doorman.toml.example' scripts/build_deb.sh
+grep -q '/usr/lib/doorman/adapters/sway/doorman-sway-lock' scripts/build_deb.sh
+grep -q '/usr/lib/doorman/adapters/sway/doorman-sway-watch' scripts/build_deb.sh
 grep -q '/usr/share/doorman/models' scripts/build_deb.sh
 grep -q 'edgeface_s.onnx' scripts/build_deb.sh
 grep -q '/etc/doorman/doorman.toml' packaging/deb/postinst
@@ -75,6 +77,9 @@ for deb in target/debian/dist/*.deb; do
     exit 1
   fi
   grep -q './usr/share/doorman/doorman.toml.example$' <<<"$contents"
+  grep -q './usr/lib/doorman/adapters/sway/doorman-sway-lock$' <<<"$contents"
+  grep -q './usr/lib/doorman/adapters/sway/doorman-sway-watch$' <<<"$contents"
+  grep -q './usr/lib/doorman/adapters/sway/sway.conf.example$' <<<"$contents"
   grep -q './usr/lib/.*/security/libpam_doorman.so$' <<<"$contents"
   grep -q './usr/lib/.*/security/pam_doorman.so -> libpam_doorman.so$' <<<"$contents"
   if grep -q './usr/share/doorman/models/$' <<<"$contents"; then
