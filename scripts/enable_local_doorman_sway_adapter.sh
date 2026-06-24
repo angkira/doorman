@@ -243,11 +243,20 @@ if [ -f "${home}/.config/sway/config" ]; then
     chown "$target_user:$target_user" "${home}/.config/sway/config" 2>/dev/null || true
 fi
 
+for helper in "${home}/.local/bin/sway-idle" "${home}/.local/bin/waybar-click"; do
+    [ -f "$helper" ] || continue
+    cp -a "$helper" "${helper}.bak-sway-adapter-${ts}"
+    sed -i "s|${home}/.local/bin/sway-lock|${lock}|g" "$helper"
+    chown "$target_user:$target_user" "$helper" 2>/dev/null || true
+done
+
 systemctl restart doormand.service
 
 for sock in "/run/user/${uid}"/sway-ipc."${uid}".*.sock; do
     [ -S "$sock" ] || continue
     runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" SWAYSOCK="$sock" swaymsg reload >/dev/null 2>&1 || true
+    runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" SWAYSOCK="$sock" pkill -x swayidle >/dev/null 2>&1 || true
+    runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" SWAYSOCK="$sock" swaymsg exec "${home}/.local/bin/sway-idle" >/dev/null 2>&1 || true
     break
 done
 
