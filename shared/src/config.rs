@@ -322,6 +322,20 @@ pub struct DatasetConfig {
     #[serde(default)]
     pub keep_raw_frames: bool,
 
+    /// Maximum number of quality-passed frames persisted in one capture bundle.
+    /// Only used when `keep_raw_frames=true`.
+    #[serde(default = "default_raw_frame_bundle_size")]
+    pub raw_frame_bundle_size: usize,
+
+    /// Maximum raw capture bundles written per day. `0` disables bundle writes
+    /// even when `keep_raw_frames=true`.
+    #[serde(default = "default_max_capture_packs_per_day")]
+    pub max_capture_packs_per_day: usize,
+
+    /// JPEG quality for opt-in raw capture bundles.
+    #[serde(default = "default_raw_frame_jpeg_quality")]
+    pub raw_frame_jpeg_quality: u8,
+
     /// Maximum attempt records written to one daily shard. `0` disables attempt
     /// writes even when logging is enabled. Labels are separate and are not capped
     /// here because they are low-volume ground-truth events.
@@ -334,6 +348,9 @@ impl Default for DatasetConfig {
         Self {
             logging_enabled: false,
             keep_raw_frames: false,
+            raw_frame_bundle_size: default_raw_frame_bundle_size(),
+            max_capture_packs_per_day: default_max_capture_packs_per_day(),
+            raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
         }
     }
@@ -408,6 +425,9 @@ fn default_hysteresis_frames() -> u32 { 3 }
 fn default_min_sharpness() -> f32 { 8.0 }
 fn default_min_face_area_frac() -> f32 { 0.02 }
 fn default_dataset_max_attempt_records_per_day() -> usize { 50_000 }
+fn default_raw_frame_bundle_size() -> usize { 10 }
+fn default_max_capture_packs_per_day() -> usize { 500 }
+fn default_raw_frame_jpeg_quality() -> u8 { 92 }
 fn default_image_size() -> u32 { 256 }
 fn default_filter_type() -> String { "lanczos3".to_string() }
 fn default_camera_width() -> u32 { 1280 }

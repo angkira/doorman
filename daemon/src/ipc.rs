@@ -1,6 +1,7 @@
 use crate::DaemonState;
 use crate::dataset::{self, AttemptConditions, GtSource, LabelEvent, Outcome};
 use anyhow::{Context, Result};
+use chrono::Timelike;
 use doorman_shared::{
     Request, Response, ResponseData, DaemonInfo, StreamMessage, EnrollmentPhase,
     AUTH_FRAMES, ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
@@ -274,6 +275,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let threshold = state.config.authentication.similarity_threshold;
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
     let mut first_quality_face_area_frac = None;
+    let mut capture_frames = Vec::new();
     // Liveness (FATAL depth gate) runs ONCE per attempt — depth is ~0.5s on CPU
     // and running it on every frame overran the PAM screen-unlock deadline.
     // Recognition still aggregates EVERY quality frame (embedding is ~15ms).
@@ -295,6 +297,17 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         }
         if first_quality_face_area_frac.is_none() {
             first_quality_face_area_frac = face_area_frac(&face);
+        }
+        if state.config.dataset.logging_enabled
+            && state.config.dataset.keep_raw_frames
+            && capture_frames.len() < state.config.dataset.raw_frame_bundle_size
+        {
+            capture_frames.push(dataset::CaptureFrameImage {
+                source_index: i,
+                image: frame.clone(),
+                bbox_norm: Some(face_bbox_norm(&face)),
+                conditions: capture_conditions(frame, &face),
+            });
         }
         // First quality face: run the anti-spoofing depth gate ONCE.
         if !liveness_checked {
@@ -404,12 +417,13 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             state.config.dataset.logging_enabled,
             &LabelEvent {
                 schema_version: 1,
-                attempt_id,
+                attempt_id: attempt_id.clone(),
                 timestamp_utc: chrono::Utc::now().to_rfc3339(),
                 outcome: Outcome::ConfirmedGenuine,
                 gt_source: GtSource::PamFaceAuth,
             },
         );
+        log_auth_capture_pack(state, &attempt_id, username, capture_frames);
         info!("Authentication successful for {} (similarity: {:.4})", username, best_similarity);
         Response::Success {
             message: Some(format!("Authenticated (confidence: {:.2}%)", best_similarity * 100.0)),
@@ -458,6 +472,20 @@ fn face_area_frac(face: &crate::ml::Face) -> Option<f32> {
     Some((w * h).abs())
 }
 
+fn face_bbox_norm(face: &crate::ml::Face) -> [f32; 4] {
+    let (x, y, w, h) = face.bbox;
+    [x, y, w, h]
+}
+
+fn capture_conditions(frame: &image::DynamicImage, face: &crate::ml::Face) -> AttemptConditions {
+    AttemptConditions {
+        brightness: None,
+        face_area_frac: face_area_frac(face),
+        sharpness: Some(crate::pipeline::sharpness_score(frame)),
+        hour_utc: Some(chrono::Utc::now().hour()),
+    }
+}
+
 fn log_auth_failure_attempt(
     state: &DaemonState,
     username: &str,
@@ -485,6 +513,38 @@ fn log_auth_failure_attempt(
             conditions,
         ),
     );
+}
+
+fn log_auth_capture_pack(
+    state: &DaemonState,
+    attempt_id: &str,
+    username: &str,
+    frames: Vec<dataset::CaptureFrameImage>,
+) {
+    if !state.config.dataset.logging_enabled
+        || !state.config.dataset.keep_raw_frames
+        || frames.is_empty()
+    {
+        return;
+    }
+    let data_dir = state.config.daemon.data_dir.clone();
+    let max_packs_per_day = state.config.dataset.max_capture_packs_per_day;
+    let jpeg_quality = state.config.dataset.raw_frame_jpeg_quality;
+    let attempt_id = attempt_id.to_string();
+    let username = username.to_string();
+    tokio::task::spawn_blocking(move || {
+        dataset::write_capture_pack(
+            &data_dir,
+            true,
+            &attempt_id,
+            Some(username),
+            Outcome::ConfirmedGenuine,
+            GtSource::PamFaceAuth,
+            max_packs_per_day,
+            jpeg_quality,
+            &frames,
+        );
+    });
 }
 
 async fn handle_enroll(

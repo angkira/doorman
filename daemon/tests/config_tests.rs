@@ -28,6 +28,9 @@ fn test_default_config() {
 
     assert!(!config.dataset.logging_enabled);
     assert!(!config.dataset.keep_raw_frames);
+    assert_eq!(config.dataset.raw_frame_bundle_size, 10);
+    assert_eq!(config.dataset.max_capture_packs_per_day, 500);
+    assert_eq!(config.dataset.raw_frame_jpeg_quality, 92);
     assert_eq!(config.dataset.max_attempt_records_per_day, 50_000);
 }
 
@@ -171,11 +174,17 @@ fn test_dataset_logging_defaults_off_and_can_be_enabled() {
     let toml_str = r#"
         [dataset]
         logging_enabled = true
-        keep_raw_frames = false
+        keep_raw_frames = true
+        raw_frame_bundle_size = 4
+        max_capture_packs_per_day = 9
+        raw_frame_jpeg_quality = 87
         max_attempt_records_per_day = 12
     "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert!(config.dataset.logging_enabled);
-    assert!(!config.dataset.keep_raw_frames);
+    assert!(config.dataset.keep_raw_frames);
+    assert_eq!(config.dataset.raw_frame_bundle_size, 4);
+    assert_eq!(config.dataset.max_capture_packs_per_day, 9);
+    assert_eq!(config.dataset.raw_frame_jpeg_quality, 87);
     assert_eq!(config.dataset.max_attempt_records_per_day, 12);
 }

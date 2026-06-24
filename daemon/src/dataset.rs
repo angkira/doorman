@@ -10,11 +10,13 @@
 //!
 //! Privacy: EMBEDDINGS ONLY — raw frames are never persisted here.
 
+use chrono::Timelike;
+use image::codecs::jpeg::JpegEncoder;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
-use chrono::Timelike;
 
 /// Outcome label for one attempt. The ground-truth-confirmed `ConfirmedGenuine` is set
 /// ONLY by the (future, M2) GT-labeling step — cosine alone never sets it. M1 logs the
@@ -110,6 +112,35 @@ pub struct LabelEvent {
     pub timestamp_utc: String,
     pub outcome: Outcome,
     pub gt_source: GtSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapturePackManifest {
+    pub schema_version: u32,
+    pub attempt_id: String,
+    pub timestamp_utc: String,
+    pub matched_user: Option<String>,
+    pub outcome: Outcome,
+    pub gt_source: GtSource,
+    pub frame_count: usize,
+    pub frames: Vec<CaptureFrameMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureFrameMeta {
+    pub filename: String,
+    pub source_index: usize,
+    pub frame_size: (u32, u32),
+    pub bbox_norm: Option<[f32; 4]>,
+    pub conditions: AttemptConditions,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureFrameImage {
+    pub source_index: usize,
+    pub image: image::DynamicImage,
+    pub bbox_norm: Option<[f32; 4]>,
+    pub conditions: AttemptConditions,
 }
 
 /// The dataset directory for a given daemon data dir (`<data_dir>/dataset`).
@@ -238,6 +269,192 @@ pub fn log_label_event(data_dir: &str, enabled: bool, event: &LabelEvent) {
         Ok(()) => debug!("dataset: logged label event for attempt {}", event.attempt_id),
         Err(e) => warn!("dataset: failed to log label event (non-fatal): {}", e),
     }
+}
+
+pub fn write_capture_pack(
+    data_dir: &str,
+    enabled: bool,
+    attempt_id: &str,
+    matched_user: Option<String>,
+    outcome: Outcome,
+    gt_source: GtSource,
+    max_packs_per_day: usize,
+    jpeg_quality: u8,
+    frames: &[CaptureFrameImage],
+) {
+    if !enabled || max_packs_per_day == 0 || frames.is_empty() {
+        return;
+    }
+    match write_capture_pack_inner(
+        data_dir,
+        attempt_id,
+        matched_user,
+        outcome,
+        gt_source,
+        max_packs_per_day,
+        jpeg_quality,
+        frames,
+    ) {
+        Ok(()) => debug!("dataset: wrote capture pack {}", attempt_id),
+        Err(e) => warn!("dataset: failed to write capture pack (non-fatal): {}", e),
+    }
+}
+
+fn write_capture_pack_inner(
+    data_dir: &str,
+    attempt_id: &str,
+    matched_user: Option<String>,
+    outcome: Outcome,
+    gt_source: GtSource,
+    max_packs_per_day: usize,
+    jpeg_quality: u8,
+    frames: &[CaptureFrameImage],
+) -> std::io::Result<()> {
+    let day = chrono::Utc::now().format("%Y%m%d").to_string();
+    let day_dir = dataset_dir(data_dir).join("captures").join(day);
+    if day_dir.exists() {
+        let existing = std::fs::read_dir(&day_dir)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .count();
+        if existing >= max_packs_per_day {
+            return Ok(());
+        }
+    }
+    let pack_dir = dataset_dir(data_dir)
+        .join("captures")
+        .join(chrono::Utc::now().format("%Y%m%d").to_string())
+        .join(sanitize_path_component(attempt_id));
+    create_private_dir_all(&pack_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dataset = dataset_dir(data_dir);
+        let captures = dataset.join("captures");
+        let day = captures.join(chrono::Utc::now().format("%Y%m%d").to_string());
+        let _ = std::fs::set_permissions(&dataset, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&captures, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&day, std::fs::Permissions::from_mode(0o700));
+        let _ = std::fs::set_permissions(&pack_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut metas = Vec::with_capacity(frames.len());
+    for (idx, frame) in frames.iter().enumerate() {
+        let filename = format!("frame-{idx:03}-src-{}.jpg", frame.source_index);
+        let path = pack_dir.join(&filename);
+        let mut file = create_private_file(&path)?;
+        let rgb = frame.image.to_rgb8();
+        let mut encoder = JpegEncoder::new_with_quality(&mut file, jpeg_quality);
+        encoder.encode_image(&rgb).map_err(std::io::Error::other)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        metas.push(CaptureFrameMeta {
+            filename,
+            source_index: frame.source_index,
+            frame_size: (frame.image.width(), frame.image.height()),
+            bbox_norm: frame.bbox_norm,
+            conditions: frame.conditions.clone(),
+        });
+    }
+
+    let manifest = CapturePackManifest {
+        schema_version: 1,
+        attempt_id: attempt_id.to_string(),
+        timestamp_utc: chrono::Utc::now().to_rfc3339(),
+        matched_user,
+        outcome,
+        gt_source,
+        frame_count: metas.len(),
+        frames: metas,
+    };
+    let manifest_path = pack_dir.join("manifest.json");
+    let mut manifest_file = create_private_file(&manifest_path)?;
+    serde_json::to_writer_pretty(&mut manifest_file, &manifest)
+        .map_err(std::io::Error::other)?;
+    writeln!(manifest_file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = manifest_file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        return builder.create(path);
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+#[allow(dead_code)]
+pub fn capture_stats(data_dir: &Path) -> std::io::Result<(usize, usize)> {
+    let captures_dir = data_dir.join("dataset").join("captures");
+    if !captures_dir.exists() {
+        return Ok((0, 0));
+    }
+    let mut packs = 0usize;
+    let mut frames = 0usize;
+    for day in std::fs::read_dir(captures_dir)? {
+        let day = day?;
+        if !day.file_type()?.is_dir() {
+            continue;
+        }
+        for pack in std::fs::read_dir(day.path())? {
+            let pack = pack?;
+            if !pack.file_type()?.is_dir() {
+                continue;
+            }
+            if pack.path().join("manifest.json").exists() {
+                packs += 1;
+                frames += std::fs::read_dir(pack.path())?
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+                    })
+                    .count();
+            }
+        }
+    }
+    Ok((packs, frames))
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn append_capped<T: Serialize>(
@@ -462,5 +679,75 @@ mod tests {
         assert_eq!(stored.attempt_id, "attempt-1");
         assert!(matches!(stored.outcome, Outcome::ConfirmedGenuine));
         assert!(matches!(stored.gt_source, GtSource::PamFaceAuth));
+    }
+
+    #[test]
+    fn capture_pack_writes_manifest_and_jpegs_with_daily_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_string_lossy();
+        let frame = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            6,
+            image::Rgb([32, 64, 96]),
+        ));
+        let frames = vec![CaptureFrameImage {
+            source_index: 3,
+            image: frame,
+            bbox_norm: Some([0.1, 0.2, 0.3, 0.4]),
+            conditions: AttemptConditions {
+                brightness: Some(0.5),
+                face_area_frac: Some(0.12),
+                sharpness: Some(42.0),
+                hour_utc: Some(13),
+            },
+        }];
+
+        write_capture_pack(
+            &data_dir,
+            true,
+            "attempt/unsafe",
+            Some("owner".to_string()),
+            Outcome::ConfirmedGenuine,
+            GtSource::PamFaceAuth,
+            1,
+            90,
+            &frames,
+        );
+        write_capture_pack(
+            &data_dir,
+            true,
+            "attempt-second",
+            Some("owner".to_string()),
+            Outcome::ConfirmedGenuine,
+            GtSource::PamFaceAuth,
+            1,
+            90,
+            &frames,
+        );
+
+        let (packs, saved_frames) = capture_stats(tmp.path()).unwrap();
+        assert_eq!(packs, 1);
+        assert_eq!(saved_frames, 1);
+
+        let day = chrono::Utc::now().format("%Y%m%d").to_string();
+        let manifest_path = dataset_dir(&data_dir)
+            .join("captures")
+            .join(day)
+            .join("attempt_unsafe")
+            .join("manifest.json");
+        let manifest: CapturePackManifest =
+            serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest.attempt_id, "attempt/unsafe");
+        assert_eq!(manifest.frame_count, 1);
+        assert_eq!(manifest.frames[0].source_index, 3);
+        assert_eq!(manifest.frames[0].frame_size, (8, 6));
+        assert_eq!(manifest.frames[0].bbox_norm, Some([0.1, 0.2, 0.3, 0.4]));
+        assert_eq!(manifest.frames[0].conditions.sharpness, Some(42.0));
+        assert!(dataset_dir(&data_dir)
+            .join("captures")
+            .join(chrono::Utc::now().format("%Y%m%d").to_string())
+            .join("attempt_unsafe")
+            .join(&manifest.frames[0].filename)
+            .exists());
     }
 }

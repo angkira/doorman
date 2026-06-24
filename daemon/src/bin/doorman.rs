@@ -385,6 +385,8 @@ fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliErro
         println!("  unknown attempts: {}", report.unknown);
         println!("  matched attempts: {}", report.matched_attempts);
         println!("  unlabeled attempts: {}", report.unlabeled_attempts);
+        println!("  capture packs: {}", report.capture_packs);
+        println!("  capture frames: {}", report.capture_frames);
         if report.failure_reasons.is_empty() {
             println!("  failure reasons: none");
         } else {

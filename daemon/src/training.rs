@@ -29,6 +29,8 @@ pub struct DatasetReport {
     pub proactive_unlocked: usize,
     pub matched_attempts: usize,
     pub unlabeled_attempts: usize,
+    pub capture_packs: usize,
+    pub capture_frames: usize,
     #[serde(default)]
     pub failure_reasons: BTreeMap<String, usize>,
 }
@@ -121,6 +123,8 @@ pub fn inspect_dataset(data_dir: &Path) -> Result<DatasetReport> {
         .iter()
         .filter(|attempt| !matches!(attempt.outcome, Outcome::Rejected))
         .count();
+    let (capture_packs, capture_frames) = crate::dataset::capture_stats(data_dir)
+        .with_context(|| format!("failed to inspect capture packs under {}", data_dir.display()))?;
 
     Ok(DatasetReport {
         schema_version: 1,
@@ -145,6 +149,8 @@ pub fn inspect_dataset(data_dir: &Path) -> Result<DatasetReport> {
             .count(),
         matched_attempts,
         unlabeled_attempts,
+        capture_packs,
+        capture_frames,
         failure_reasons,
     })
 }
@@ -420,6 +426,8 @@ mod tests {
         assert_eq!(report.rejected, 1);
         assert_eq!(report.matched_attempts, 3);
         assert_eq!(report.unlabeled_attempts, 2);
+        assert_eq!(report.capture_packs, 0);
+        assert_eq!(report.capture_frames, 0);
 
         let mut expected_reasons = BTreeMap::new();
         expected_reasons.insert("spoof_pattern".to_string(), 1);
