@@ -24,7 +24,7 @@ import numpy as np
 
 
 POSITIVE = {"ConfirmedGenuine", "FalseNegative", "ProactiveUnlocked"}
-NEGATIVE = {"Rejected", "SuspectedSpoof", "ExternalSpoof"}
+NEGATIVE = {"Rejected", "SuspectedSpoof", "ExternalSpoof", "ExternalLiveImpostor"}
 KAINYYY_ARROW = (
     "/mnt/datasets/models/.hf_home/datasets/Kainyyy___face-anti-spoof/default/0.0.0/"
     "8b1dd57c6fe0c617517a511543808c96962a55d9/face-anti-spoof-train.arrow"
@@ -98,7 +98,14 @@ def collect_samples(dataset_dir: Path) -> list[FrameSample]:
     return samples
 
 
-def collect_kainyyy_spoof_negatives(limit: int, out_dir: Path) -> list[FrameSample]:
+def collect_kainyyy_negatives(
+    *,
+    limit: int,
+    out_dir: Path,
+    kainyyy_label: int,
+    external_label: str,
+    prefix: str,
+) -> list[FrameSample]:
     import pyarrow.ipc as ipc
 
     samples: list[FrameSample] = []
@@ -108,7 +115,7 @@ def collect_kainyyy_spoof_negatives(limit: int, out_dir: Path) -> list[FrameSamp
         reader = ipc.open_stream(fh)
         for batch in reader:
             for row in batch.to_pylist():
-                if int(row["label"]) != 1:
+                if int(row["label"]) != kainyyy_label:
                     continue
                 image_path = Path(row["image"]["path"])
                 if not image_path.exists():
@@ -116,10 +123,10 @@ def collect_kainyyy_spoof_negatives(limit: int, out_dir: Path) -> list[FrameSamp
                 digest = hashlib.sha1(str(image_path).encode("utf-8")).hexdigest()[:16]
                 samples.append(
                     FrameSample(
-                        attempt_id=f"kainyyy-spoof-{digest}",
-                        label="ExternalSpoof",
+                        attempt_id=f"{prefix}-{digest}",
+                        label=external_label,
                         image_path=image_path,
-                        manifest_path=out_dir / "_external_groups" / f"kainyyy-spoof-{digest}" / "manifest.json",
+                        manifest_path=out_dir / "_external_groups" / f"{prefix}-{digest}" / "manifest.json",
                         source_index=0,
                         bbox_norm=None,
                         sharpness=None,
@@ -135,8 +142,47 @@ def collect_external_negatives(source: str, limit: int, out_dir: Path) -> list[F
     if source in {"", "none"} or limit <= 0:
         return []
     if source == "kainyyy-spoof":
-        samples = collect_kainyyy_spoof_negatives(limit, out_dir)
+        samples = collect_kainyyy_negatives(
+            limit=limit,
+            out_dir=out_dir,
+            kainyyy_label=1,
+            external_label="ExternalSpoof",
+            prefix="kainyyy-spoof",
+        )
         print(f"external negatives: loaded {len(samples)} Kainyyy spoof sample(s)", flush=True)
+        return samples
+    if source == "kainyyy-live":
+        samples = collect_kainyyy_negatives(
+            limit=limit,
+            out_dir=out_dir,
+            kainyyy_label=0,
+            external_label="ExternalLiveImpostor",
+            prefix="kainyyy-live",
+        )
+        print(f"external negatives: loaded {len(samples)} Kainyyy live impostor sample(s)", flush=True)
+        return samples
+    if source == "kainyyy-mixed":
+        spoof_limit = (limit + 1) // 2
+        live_limit = limit - spoof_limit
+        spoof = collect_kainyyy_negatives(
+            limit=spoof_limit,
+            out_dir=out_dir,
+            kainyyy_label=1,
+            external_label="ExternalSpoof",
+            prefix="kainyyy-spoof",
+        )
+        live = collect_kainyyy_negatives(
+            limit=live_limit,
+            out_dir=out_dir,
+            kainyyy_label=0,
+            external_label="ExternalLiveImpostor",
+            prefix="kainyyy-live",
+        )
+        samples = spoof + live
+        print(
+            f"external negatives: loaded {len(spoof)} Kainyyy spoof and {len(live)} live impostor sample(s)",
+            flush=True,
+        )
         return samples
     raise ValueError(f"unsupported external negatives source: {source}")
 
@@ -475,7 +521,11 @@ def main() -> int:
     parser.add_argument("--one-class-latent-dim", type=int, default=64)
     parser.add_argument("--one-class-val-frac", type=float, default=0.2)
     parser.add_argument("--disable-one-class", action="store_true")
-    parser.add_argument("--external-negatives", default="none", help="none or kainyyy-spoof")
+    parser.add_argument(
+        "--external-negatives",
+        default="none",
+        help="none, kainyyy-spoof, kainyyy-live, or kainyyy-mixed",
+    )
     parser.add_argument("--external-negative-limit", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=2000)
     args = parser.parse_args()
