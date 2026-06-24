@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::Timelike;
 use doorman_shared::{
     Request, Response, ResponseData, DaemonInfo, StreamMessage, EnrollmentPhase,
-    AUTH_FRAMES, ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
+    ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
 };
 use image::GenericImageView;
 use std::fs;
@@ -248,12 +248,19 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     };
 
     // Collect frames from the camera producer (single source of truth).
-    let frames = collect_frames(state, AUTH_FRAMES).await;
+    let auth_frames = state.config.authentication.auth_frames.max(1);
+    let frames = collect_frames(state, auth_frames).await;
+    let attempt_id = format!(
+        "auth-{}-{}",
+        username,
+        chrono::Utc::now().timestamp_micros()
+    );
 
     if frames.is_empty() {
         error!("Failed to capture any frames");
         log_auth_failure_attempt(
             state,
+            &attempt_id,
             username,
             Outcome::Rejected,
             None,
@@ -275,7 +282,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let threshold = state.config.authentication.similarity_threshold;
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
     let mut first_quality_face_area_frac = None;
-    let mut capture_frames = Vec::new();
+    let mut detected_faces: Vec<Option<crate::ml::Face>> = vec![None; frames.len()];
     // Liveness (FATAL depth gate) runs ONCE per attempt — depth is ~0.5s on CPU
     // and running it on every frame overran the PAM screen-unlock deadline.
     // Recognition still aggregates EVERY quality frame (embedding is ~15ms).
@@ -292,22 +299,12 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                 continue;
             }
         };
+        detected_faces[i] = Some(face.clone());
         if !frame_passes_quality_gate(frame, &face, rec, i, "auth") {
             continue;
         }
         if first_quality_face_area_frac.is_none() {
             first_quality_face_area_frac = face_area_frac(&face);
-        }
-        if state.config.dataset.logging_enabled
-            && state.config.dataset.keep_raw_frames
-            && capture_frames.len() < state.config.dataset.raw_frame_bundle_size
-        {
-            capture_frames.push(dataset::CaptureFrameImage {
-                source_index: i,
-                image: frame.clone(),
-                bbox_norm: Some(face_bbox_norm(&face)),
-                conditions: capture_conditions(frame, &face),
-            });
         }
         // First quality face: run the anti-spoofing depth gate ONCE.
         if !liveness_checked {
@@ -318,6 +315,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                     warn!("Authentication failed for {}: liveness/anti-spoof gate rejected", username);
                     log_auth_failure_attempt(
                         state,
+                        &attempt_id,
                         username,
                         Outcome::SuspectedSpoof,
                         Some(false),
@@ -327,6 +325,18 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                             ..AttemptConditions::default()
                         },
                     );
+                    log_auth_capture_pack(
+                        state,
+                        &attempt_id,
+                        Some(username),
+                        Outcome::SuspectedSpoof,
+                        GtSource::PamFaceAuth,
+                        build_auth_capture_frames(
+                            &frames,
+                            &detected_faces,
+                            state.config.dataset.raw_frame_bundle_size,
+                        ),
+                    );
                     return Response::Failure {
                         reason: "Liveness check failed (not a live face).".to_string(),
                     };
@@ -335,6 +345,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                     warn!("Authentication failed for {}: liveness error: {}", username, e);
                     log_auth_failure_attempt(
                         state,
+                        &attempt_id,
                         username,
                         Outcome::SuspectedSpoof,
                         Some(false),
@@ -343,6 +354,18 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                             face_area_frac: first_quality_face_area_frac,
                             ..AttemptConditions::default()
                         },
+                    );
+                    log_auth_capture_pack(
+                        state,
+                        &attempt_id,
+                        Some(username),
+                        Outcome::SuspectedSpoof,
+                        GtSource::PamFaceAuth,
+                        build_auth_capture_frames(
+                            &frames,
+                            &detected_faces,
+                            state.config.dataset.raw_frame_bundle_size,
+                        ),
                     );
                     return Response::Failure {
                         reason: "Liveness check error.".to_string(),
@@ -360,11 +383,35 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         warn!("Authentication failed for {}: no quality-passed faces", username);
         log_auth_failure_attempt(
             state,
+            &attempt_id,
             username,
-            Outcome::Rejected,
+            Outcome::FalseNegative,
             None,
             "no_clear_face",
             AttemptConditions::default(),
+        );
+        dataset::log_label_event(
+            &state.config.daemon.data_dir,
+            state.config.dataset.logging_enabled,
+            &LabelEvent {
+                schema_version: 1,
+                attempt_id: attempt_id.clone(),
+                timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                outcome: Outcome::FalseNegative,
+                gt_source: GtSource::PamFaceAuth,
+            },
+        );
+        log_auth_capture_pack(
+            state,
+            &attempt_id,
+            Some(username),
+            Outcome::FalseNegative,
+            GtSource::PamFaceAuth,
+            build_auth_capture_frames(
+                &frames,
+                &detected_faces,
+                state.config.dataset.raw_frame_bundle_size,
+            ),
         );
         return Response::Failure {
             reason: "No clear face detected. Please ensure good lighting and look at the camera.".to_string(),
@@ -380,11 +427,6 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         .collect();
     let best_similarity = gallery_similarities.iter().copied().fold(0.0f32, f32::max);
     let matched = best_similarity >= threshold;
-    let attempt_id = format!(
-        "auth-{}-{}",
-        username,
-        chrono::Utc::now().timestamp_micros()
-    );
     dataset::log_attempt_capped(
         &state.config.daemon.data_dir,
         state.config.dataset.logging_enabled,
@@ -396,8 +438,8 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             best_similarity,
             None,
             Some(true),
-            if matched { Outcome::Unknown } else { Outcome::Rejected },
-            GtSource::None,
+            if matched { Outcome::Unknown } else { Outcome::FalseNegative },
+            if matched { GtSource::None } else { GtSource::PamFaceAuth },
             &aggregated,
             None,
             dataset::gallery_spread_from_similarities(&gallery_similarities),
@@ -423,7 +465,18 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                 gt_source: GtSource::PamFaceAuth,
             },
         );
-        log_auth_capture_pack(state, &attempt_id, username, capture_frames);
+        log_auth_capture_pack(
+            state,
+            &attempt_id,
+            Some(username),
+            Outcome::ConfirmedGenuine,
+            GtSource::PamFaceAuth,
+            build_auth_capture_frames(
+                &frames,
+                &detected_faces,
+                state.config.dataset.raw_frame_bundle_size,
+            ),
+        );
         info!("Authentication successful for {} (similarity: {:.4})", username, best_similarity);
         Response::Success {
             message: Some(format!("Authenticated (confidence: {:.2}%)", best_similarity * 100.0)),
@@ -431,6 +484,29 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         }
     } else {
         warn!("Authentication failed for {} (aggregated similarity: {:.4})", username, best_similarity);
+        dataset::log_label_event(
+            &state.config.daemon.data_dir,
+            state.config.dataset.logging_enabled,
+            &LabelEvent {
+                schema_version: 1,
+                attempt_id: attempt_id.clone(),
+                timestamp_utc: chrono::Utc::now().to_rfc3339(),
+                outcome: Outcome::FalseNegative,
+                gt_source: GtSource::PamFaceAuth,
+            },
+        );
+        log_auth_capture_pack(
+            state,
+            &attempt_id,
+            Some(username),
+            Outcome::FalseNegative,
+            GtSource::PamFaceAuth,
+            build_auth_capture_frames(
+                &frames,
+                &detected_faces,
+                state.config.dataset.raw_frame_bundle_size,
+            ),
+        );
         Response::Failure {
             reason: format!("Face not recognized (confidence: {:.2}%)", best_similarity * 100.0),
         }
@@ -486,25 +562,56 @@ fn capture_conditions(frame: &image::DynamicImage, face: &crate::ml::Face) -> At
     }
 }
 
+fn capture_conditions_without_face() -> AttemptConditions {
+    AttemptConditions {
+        brightness: None,
+        face_area_frac: None,
+        sharpness: None,
+        hour_utc: Some(chrono::Utc::now().hour()),
+    }
+}
+
+fn build_auth_capture_frames(
+    frames: &[image::DynamicImage],
+    detected_faces: &[Option<crate::ml::Face>],
+    limit: usize,
+) -> Vec<dataset::CaptureFrameImage> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    frames
+        .iter()
+        .enumerate()
+        .take(limit)
+        .map(|(i, frame)| {
+            let face = detected_faces.get(i).and_then(|face| face.as_ref());
+            dataset::CaptureFrameImage {
+                source_index: i,
+                image: frame.clone(),
+                bbox_norm: face.map(face_bbox_norm),
+                conditions: face
+                    .map(|face| capture_conditions(frame, face))
+                    .unwrap_or_else(capture_conditions_without_face),
+            }
+        })
+        .collect()
+}
+
 fn log_auth_failure_attempt(
     state: &DaemonState,
+    attempt_id: &str,
     username: &str,
     outcome: Outcome,
     liveness_pass: Option<bool>,
     failure_reason: &str,
     conditions: AttemptConditions,
 ) {
-    let attempt_id = format!(
-        "auth-{}-{}",
-        username,
-        chrono::Utc::now().timestamp_micros()
-    );
     dataset::log_attempt_capped(
         &state.config.daemon.data_dir,
         state.config.dataset.logging_enabled,
         state.config.dataset.max_attempt_records_per_day,
         &dataset::new_failure_attempt_record(
-            attempt_id,
+            attempt_id.to_string(),
             0,
             Some(username.to_string()),
             outcome,
@@ -518,7 +625,9 @@ fn log_auth_failure_attempt(
 fn log_auth_capture_pack(
     state: &DaemonState,
     attempt_id: &str,
-    username: &str,
+    matched_user: Option<&str>,
+    outcome: Outcome,
+    gt_source: GtSource,
     frames: Vec<dataset::CaptureFrameImage>,
 ) {
     if !state.config.dataset.logging_enabled
@@ -531,20 +640,58 @@ fn log_auth_capture_pack(
     let max_packs_per_day = state.config.dataset.max_capture_packs_per_day;
     let jpeg_quality = state.config.dataset.raw_frame_jpeg_quality;
     let attempt_id = attempt_id.to_string();
-    let username = username.to_string();
+    let matched_user = matched_user.map(str::to_string);
     tokio::task::spawn_blocking(move || {
         dataset::write_capture_pack(
             &data_dir,
             true,
             &attempt_id,
-            Some(username),
-            Outcome::ConfirmedGenuine,
-            GtSource::PamFaceAuth,
+            matched_user,
+            outcome,
+            gt_source,
             max_packs_per_day,
             jpeg_quality,
             &frames,
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_frame(value: u8) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            3,
+            image::Rgb([value, value, value]),
+        ))
+    }
+
+    fn test_face() -> crate::ml::Face {
+        crate::ml::Face {
+            bbox: (0.1, 0.2, 0.3, 0.4),
+            confidence: 0.95,
+            frame_dimensions: (4, 3),
+            landmarks: None,
+        }
+    }
+
+    #[test]
+    fn auth_capture_pack_keeps_all_recorded_frames_not_only_quality_faces() {
+        let frames = vec![test_frame(1), test_frame(2), test_frame(3)];
+        let faces = vec![None, Some(test_face()), None];
+
+        let captured = build_auth_capture_frames(&frames, &faces, 10);
+
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0].source_index, 0);
+        assert_eq!(captured[1].source_index, 1);
+        assert_eq!(captured[2].source_index, 2);
+        assert_eq!(captured[0].bbox_norm, None);
+        assert_eq!(captured[1].bbox_norm, Some([0.1, 0.2, 0.3, 0.4]));
+        assert_eq!(captured[2].bbox_norm, None);
+    }
 }
 
 async fn handle_enroll(

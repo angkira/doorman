@@ -379,6 +379,7 @@ fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliErro
         println!("  attempts seen: {}", report.attempts_seen);
         println!("  labels seen: {}", report.labels_seen);
         println!("  confirmed genuine labels: {}", report.confirmed_genuine);
+        println!("  false negative attempts: {}", report.false_negative);
         println!("  rejected attempts: {}", report.rejected);
         println!("  suspected spoof attempts: {}", report.suspected_spoof);
         println!("  proactive unlocked attempts: {}", report.proactive_unlocked);

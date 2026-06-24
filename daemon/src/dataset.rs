@@ -25,6 +25,9 @@ use tracing::{debug, warn};
 pub enum Outcome {
     /// GT-confirmed genuine (PAM/password success). Reserved for M2 labeling.
     ConfirmedGenuine,
+    /// Genuine user was present but the recognizer failed to accept the attempt.
+    /// For training this is a positive/genuine sample with a failed model decision.
+    FalseNegative,
     /// Recognized (>= threshold) + liveness PASS at the unlock decision; GT not yet
     /// confirmed (a candidate positive).
     ProactiveUnlocked,

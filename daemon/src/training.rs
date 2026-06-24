@@ -23,6 +23,7 @@ pub struct DatasetReport {
     pub attempts_seen: usize,
     pub labels_seen: usize,
     pub confirmed_genuine: usize,
+    pub false_negative: usize,
     pub rejected: usize,
     pub suspected_spoof: usize,
     pub unknown: usize,
@@ -131,6 +132,10 @@ pub fn inspect_dataset(data_dir: &Path) -> Result<DatasetReport> {
         attempts_seen: attempts.len(),
         labels_seen: labels.len(),
         confirmed_genuine,
+        false_negative: attempts
+            .iter()
+            .filter(|attempt| matches!(attempt.outcome, Outcome::FalseNegative))
+            .count(),
         rejected: attempts
             .iter()
             .filter(|attempt| matches!(attempt.outcome, Outcome::Rejected))
@@ -394,6 +399,15 @@ mod tests {
             &sample_attempt_with("attempt-4", Outcome::Rejected, None, None),
         );
         append_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt_with(
+                "attempt-5",
+                Outcome::FalseNegative,
+                Some("missed_genuine"),
+                Some("owner"),
+            ),
+        );
+        append_jsonl(
             &dataset_dir.join("labels-20260623.jsonl"),
             &LabelEvent {
                 schema_version: 1,
@@ -417,19 +431,21 @@ mod tests {
         let report = super::inspect_dataset(&data_dir).unwrap();
 
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.attempts_seen, 4);
+        assert_eq!(report.attempts_seen, 5);
         assert_eq!(report.labels_seen, 2);
         assert_eq!(report.confirmed_genuine, 1);
+        assert_eq!(report.false_negative, 1);
         assert_eq!(report.proactive_unlocked, 1);
         assert_eq!(report.unknown, 1);
         assert_eq!(report.suspected_spoof, 1);
         assert_eq!(report.rejected, 1);
-        assert_eq!(report.matched_attempts, 3);
-        assert_eq!(report.unlabeled_attempts, 2);
+        assert_eq!(report.matched_attempts, 4);
+        assert_eq!(report.unlabeled_attempts, 3);
         assert_eq!(report.capture_packs, 0);
         assert_eq!(report.capture_frames, 0);
 
         let mut expected_reasons = BTreeMap::new();
+        expected_reasons.insert("missed_genuine".to_string(), 1);
         expected_reasons.insert("spoof_pattern".to_string(), 1);
         expected_reasons.insert("too_dark".to_string(), 1);
         assert_eq!(report.failure_reasons, expected_reasons);

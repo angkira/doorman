@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 
 
-POSITIVE = {"ConfirmedGenuine", "ProactiveUnlocked"}
+POSITIVE = {"ConfirmedGenuine", "FalseNegative", "ProactiveUnlocked"}
 NEGATIVE = {"Rejected", "SuspectedSpoof"}
 
 
