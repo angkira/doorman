@@ -10,6 +10,7 @@ feature baseline when enough labeled captures exist.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -23,7 +24,11 @@ import numpy as np
 
 
 POSITIVE = {"ConfirmedGenuine", "FalseNegative", "ProactiveUnlocked"}
-NEGATIVE = {"Rejected", "SuspectedSpoof"}
+NEGATIVE = {"Rejected", "SuspectedSpoof", "ExternalSpoof"}
+KAINYYY_ARROW = (
+    "/mnt/datasets/models/.hf_home/datasets/Kainyyy___face-anti-spoof/default/0.0.0/"
+    "8b1dd57c6fe0c617517a511543808c96962a55d9/face-anti-spoof-train.arrow"
+)
 
 
 @dataclass
@@ -91,6 +96,49 @@ def collect_samples(dataset_dir: Path) -> list[FrameSample]:
                     )
                 )
     return samples
+
+
+def collect_kainyyy_spoof_negatives(limit: int, out_dir: Path) -> list[FrameSample]:
+    import pyarrow.ipc as ipc
+
+    samples: list[FrameSample] = []
+    if limit <= 0:
+        return samples
+    with open(KAINYYY_ARROW, "rb") as fh:
+        reader = ipc.open_stream(fh)
+        for batch in reader:
+            for row in batch.to_pylist():
+                if int(row["label"]) != 1:
+                    continue
+                image_path = Path(row["image"]["path"])
+                if not image_path.exists():
+                    continue
+                digest = hashlib.sha1(str(image_path).encode("utf-8")).hexdigest()[:16]
+                samples.append(
+                    FrameSample(
+                        attempt_id=f"kainyyy-spoof-{digest}",
+                        label="ExternalSpoof",
+                        image_path=image_path,
+                        manifest_path=out_dir / "_external_groups" / f"kainyyy-spoof-{digest}" / "manifest.json",
+                        source_index=0,
+                        bbox_norm=None,
+                        sharpness=None,
+                        face_area_frac=None,
+                    )
+                )
+                if len(samples) >= limit:
+                    return samples
+    return samples
+
+
+def collect_external_negatives(source: str, limit: int, out_dir: Path) -> list[FrameSample]:
+    if source in {"", "none"} or limit <= 0:
+        return []
+    if source == "kainyyy-spoof":
+        samples = collect_kainyyy_spoof_negatives(limit, out_dir)
+        print(f"external negatives: loaded {len(samples)} Kainyyy spoof sample(s)", flush=True)
+        return samples
+    raise ValueError(f"unsupported external negatives source: {source}")
 
 
 def inventory_report(dataset_dir: Path) -> dict[str, Any]:
@@ -427,6 +475,8 @@ def main() -> int:
     parser.add_argument("--one-class-latent-dim", type=int, default=64)
     parser.add_argument("--one-class-val-frac", type=float, default=0.2)
     parser.add_argument("--disable-one-class", action="store_true")
+    parser.add_argument("--external-negatives", default="none", help="none or kainyyy-spoof")
+    parser.add_argument("--external-negative-limit", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=2000)
     args = parser.parse_args()
 
@@ -442,9 +492,20 @@ def main() -> int:
         samples = samples[: args.max_frames]
 
     if args.encoder != "inventory":
+        external_negatives = collect_external_negatives(
+            args.external_negatives,
+            args.external_negative_limit,
+            out_dir,
+        )
         usable = [s for s in samples if s.label in POSITIVE or s.label in NEGATIVE]
+        usable.extend(external_negatives)
         labels = [1 if s.label in POSITIVE else 0 for s in usable]
         report["used_frames"] = len(usable)
+        report["external_negatives"] = {
+            "source": args.external_negatives,
+            "requested": args.external_negative_limit,
+            "loaded": len(external_negatives),
+        }
         if not usable:
             report["probe"] = {"status": "no_labeled_capture_frames"}
         elif args.encoder in {"da3-base", "depthanything3-base", "depth-anything-3-base"}:
