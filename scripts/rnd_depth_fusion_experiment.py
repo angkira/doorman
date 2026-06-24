@@ -233,8 +233,14 @@ def extract_da3_depth_features(
     for sample in samples:
         grouped.setdefault(sample.manifest_path, []).append(sample)
 
-    for manifest_path in sorted(grouped):
+    manifest_paths = sorted(grouped)
+    for pack_idx, manifest_path in enumerate(manifest_paths, start=1):
         group = sorted(grouped[manifest_path], key=lambda s: s.source_index)
+        print(
+            f"DA3 extraction pack {pack_idx}/{len(manifest_paths)}: "
+            f"{len(group)} frame(s) from {manifest_path.parent.name}",
+            flush=True,
+        )
         images = [Image.open(sample.image_path).convert("RGB") for sample in group]
         prediction = model.inference(
             images,
@@ -254,6 +260,127 @@ def extract_da3_depth_features(
             )
 
     return np.stack([features_by_key[(s.manifest_path, s.source_index)] for s in samples], axis=0)
+
+
+def train_one_class_autoencoder(
+    features: np.ndarray,
+    out_dir: Path,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    latent_dim: int,
+    val_frac: float,
+) -> dict[str, Any]:
+    import torch
+    from torch import nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    if len(features) < 8:
+        return {"status": "not_enough_positive_frames", "positive_frames": int(len(features))}
+
+    x = np.asarray(features, dtype=np.float32)
+    mean = x.mean(axis=0, keepdims=True)
+    std = x.std(axis=0, keepdims=True)
+    std[std < 1e-6] = 1.0
+    x = (x - mean) / std
+
+    rng = np.random.default_rng(42)
+    indices = rng.permutation(len(x))
+    val_count = max(1, int(round(len(x) * val_frac))) if len(x) >= 10 else 0
+    val_idx = indices[:val_count]
+    train_idx = indices[val_count:]
+    if len(train_idx) == 0:
+        train_idx = indices
+        val_idx = np.asarray([], dtype=np.int64)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_dim = x.shape[1]
+    hidden_dim = min(256, max(32, input_dim // 2))
+    latent_dim = min(latent_dim, hidden_dim)
+    model = nn.Sequential(
+        nn.Linear(input_dim, hidden_dim),
+        nn.GELU(),
+        nn.Linear(hidden_dim, latent_dim),
+        nn.GELU(),
+        nn.Linear(latent_dim, hidden_dim),
+        nn.GELU(),
+        nn.Linear(hidden_dim, input_dim),
+    ).to(device)
+
+    train_tensor = torch.from_numpy(x[train_idx])
+    loader = DataLoader(
+        TensorDataset(train_tensor),
+        batch_size=max(1, batch_size),
+        shuffle=True,
+        drop_last=False,
+    )
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    loss_fn = nn.MSELoss()
+    history: list[dict[str, float | int]] = []
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        losses: list[float] = []
+        for (batch,) in loader:
+            batch = batch.to(device)
+            opt.zero_grad(set_to_none=True)
+            recon = model(batch)
+            loss = loss_fn(recon, batch)
+            loss.backward()
+            opt.step()
+            losses.append(float(loss.detach().cpu()))
+
+        train_loss = float(np.mean(losses)) if losses else 0.0
+        row: dict[str, float | int] = {"epoch": epoch, "train_loss": train_loss}
+        if len(val_idx) > 0:
+            model.eval()
+            with torch.inference_mode():
+                val = torch.from_numpy(x[val_idx]).to(device)
+                val_recon = model(val)
+                val_loss = loss_fn(val_recon, val)
+            row["val_loss"] = float(val_loss.detach().cpu())
+            print(
+                f"epoch {epoch:03d}/{epochs}: train_loss={train_loss:.6f} "
+                f"val_loss={row['val_loss']:.6f}",
+                flush=True,
+            )
+        else:
+            print(f"epoch {epoch:03d}/{epochs}: train_loss={train_loss:.6f}", flush=True)
+        history.append(row)
+
+    model.eval()
+    with torch.inference_mode():
+        all_x = torch.from_numpy(x).to(device)
+        recon = model(all_x).detach().cpu().numpy()
+    reconstruction_error = ((recon - x) ** 2).mean(axis=1)
+    threshold = float(np.percentile(reconstruction_error[val_idx] if len(val_idx) else reconstruction_error, 95))
+
+    artifact = {
+        "schema_version": 1,
+        "input_dim": int(input_dim),
+        "hidden_dim": int(hidden_dim),
+        "latent_dim": int(latent_dim),
+        "mean": mean.reshape(-1).astype(np.float32),
+        "std": std.reshape(-1).astype(np.float32),
+        "state_dict": model.cpu().state_dict(),
+        "threshold_p95": threshold,
+    }
+    model_path = out_dir / "one_class_autoencoder.pt"
+    torch.save(artifact, model_path)
+    (out_dir / "one_class_history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+    return {
+        "status": "ok",
+        "model_path": str(model_path),
+        "history_path": str(out_dir / "one_class_history.json"),
+        "epochs": epochs,
+        "train_frames": int(len(train_idx)),
+        "val_frames": int(len(val_idx)),
+        "final_train_loss": float(history[-1]["train_loss"]),
+        "final_val_loss": float(history[-1].get("val_loss", history[-1]["train_loss"])),
+        "reconstruction_error_mean": float(reconstruction_error.mean()),
+        "reconstruction_error_p95": threshold,
+    }
 
 
 def run_linear_probe(features: np.ndarray, labels: list[int]) -> dict[str, Any]:
@@ -294,6 +421,12 @@ def main() -> int:
     parser.add_argument("--da3-model-dir", default="/mnt/datasets/models/depth-anything/DA3-BASE")
     parser.add_argument("--da3-process-res", type=int, default=504)
     parser.add_argument("--da3-patch-size", type=int, default=32)
+    parser.add_argument("--one-class-epochs", type=int, default=50)
+    parser.add_argument("--one-class-batch-size", type=int, default=64)
+    parser.add_argument("--one-class-lr", type=float, default=1e-3)
+    parser.add_argument("--one-class-latent-dim", type=int, default=64)
+    parser.add_argument("--one-class-val-frac", type=float, default=0.2)
+    parser.add_argument("--disable-one-class", action="store_true")
     parser.add_argument("--max-frames", type=int, default=2000)
     args = parser.parse_args()
 
@@ -335,6 +468,17 @@ def main() -> int:
             report["model_dir"] = args.da3_model_dir
             report["feature_kind"] = "da3_depth_face_patch_and_stats"
             report["feature_shape"] = list(features.shape)
+            positive_features = features[np.asarray(labels, dtype=np.int64) == 1]
+            if not args.disable_one_class:
+                report["one_class"] = train_one_class_autoencoder(
+                    positive_features,
+                    out_dir,
+                    args.one_class_epochs,
+                    args.one_class_batch_size,
+                    args.one_class_lr,
+                    args.one_class_latent_dim,
+                    args.one_class_val_frac,
+                )
             report["probe"] = run_linear_probe(features, labels)
         elif args.encoder.startswith("timm:"):
             model_name = args.encoder.split(":", 1)[1]
