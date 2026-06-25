@@ -59,19 +59,15 @@ user="${1:-${USER:-angkira}}"
 locker="${2:-swaylock}"
 socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
 interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"
-max_attempts="${DOORMAN_SWAY_MAX_ATTEMPTS:-30}"
+max_interval="${DOORMAN_SWAY_MAX_INTERVAL:-15}"
 
 {
     echo "[$(date -Is)] start user=$user locker=$locker socket=$socket"
 
     i=0
-    while [ "$i" -lt "$max_attempts" ]; do
+    delay="$interval"
+    while pgrep -u "$user" -x "$locker" >/dev/null 2>&1; do
         i=$((i + 1))
-
-        if ! pgrep -u "$user" -x "$locker" >/dev/null 2>&1; then
-            echo "[$(date -Is)] $locker gone; stop"
-            exit 0
-        fi
 
         out="$(doorman --socket "$socket" test "$user" 2>&1)"
         rc=$?
@@ -89,10 +85,16 @@ max_attempts="${DOORMAN_SWAY_MAX_ATTEMPTS:-30}"
             exit 0
         fi
 
-        sleep "$interval"
+        sleep "$delay"
+        if [ "$delay" -lt "$max_interval" ]; then
+            delay=$((delay + interval))
+            if [ "$delay" -gt "$max_interval" ]; then
+                delay="$max_interval"
+            fi
+        fi
     done
 
-    echo "[$(date -Is)] timeout; password fallback remains"
+    echo "[$(date -Is)] $locker gone; stop"
 } >> "$log" 2>&1
 WATCH
 chmod 0755 "$watch"
