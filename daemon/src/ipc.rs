@@ -168,30 +168,31 @@ async fn wait_for_frame(
     }
 }
 
-/// Collect up to `count` distinct successive frames from the camera producer.
-/// Frames are sampled from the latest-frame watch channel as the producer
-/// publishes them.
-async fn collect_frames(state: &DaemonState, count: usize) -> Vec<image::DynamicImage> {
-    let mut rx = state.latest_frame.clone();
-    let mut frames = Vec::with_capacity(count);
-
-    // Include whatever is currently available.
-    if let Some(frame) = rx.borrow().clone() {
-        frames.push((*frame).clone());
-    }
-
-    while frames.len() < count {
-        match tokio::time::timeout(tokio::time::Duration::from_millis(2000), rx.changed()).await {
+async fn wait_for_auth_frame_until(
+    rx: &mut tokio::sync::watch::Receiver<Option<std::sync::Arc<image::DynamicImage>>>,
+    deadline: std::time::Instant,
+) -> Option<std::sync::Arc<image::DynamicImage>> {
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        match tokio::time::timeout(
+            remaining.min(std::time::Duration::from_millis(250)),
+            rx.changed(),
+        )
+        .await
+        {
             Ok(Ok(())) => {
-                if let Some(frame) = rx.borrow().clone() {
-                    frames.push((*frame).clone());
+                if let Some(frame) = rx.borrow_and_update().clone() {
+                    return Some(frame);
                 }
             }
-            _ => break, // producer stopped or timed out
+            Ok(Err(_)) => return None,
+            Err(_) => continue,
         }
     }
-
-    frames
 }
 
 /// Collect frames from the camera producer for a given duration.
@@ -259,60 +260,61 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         }
     };
 
-    // Collect frames from the camera producer (single source of truth).
-    let auth_frames = state.config.authentication.auth_frames.max(1);
-    let frames = collect_frames(state, auth_frames).await;
     let attempt_id = format!(
         "auth-{}-{}",
         username,
         chrono::Utc::now().timestamp_micros()
     );
 
-    if frames.is_empty() {
-        error!("Failed to capture any frames");
-        log_auth_failure_attempt(
-            state,
-            &attempt_id,
-            username,
-            Outcome::Rejected,
-            None,
-            "no_frames",
-            AttemptConditions::default(),
-        );
-        return Response::Failure {
-            reason: "Failed to capture frames".to_string(),
-        };
-    }
-
-    info!("Captured {} frames for authentication", frames.len());
-
     // Phase 1: collect quality-passed per-frame embeddings, AGGREGATE them
     // (renormalized mean), and score the aggregate ONCE against the stored
-    // template. Averaging suppresses per-frame noise and stabilizes the genuine
-    // cosine versus the old early-exit-on-first-frame-pass behavior.
+    // template. Raw dataset capture is intentionally independent from the
+    // recognition target below: every detector-positive frame observed during
+    // this auth attempt is persisted for offline R&D, while `auth_frames` only
+    // controls how many quality embeddings are needed for the auth decision.
+    let auth_frames = state.config.authentication.auth_frames.max(1);
+    let auth_timeout =
+        std::time::Duration::from_secs(state.config.authentication.timeout_secs.max(1));
+    let deadline = std::time::Instant::now() + auth_timeout;
     let rec = &state.config.recognition;
     let threshold = state.config.authentication.similarity_threshold;
-    let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(frames.len());
+    let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(auth_frames);
+    let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
-    let mut detected_faces: Vec<Option<crate::ml::Face>> = vec![None; frames.len()];
-    // Liveness (FATAL depth gate) runs ONCE per attempt — depth is ~0.5s on CPU
-    // and running it on every frame overran the PAM screen-unlock deadline.
-    // Recognition still aggregates EVERY quality frame (embedding is ~15ms).
     let mut liveness_checked = false;
-    for (i, frame) in frames.iter().enumerate() {
-        let face = match state.ml_pipeline.detect_face(frame).await {
+    let mut frames_seen = 0usize;
+    let mut rx = state.latest_frame.clone();
+    let mut maybe_frame = rx.borrow_and_update().clone();
+
+    while passed_embeddings.len() < auth_frames {
+        let frame = match maybe_frame.take() {
+            Some(frame) => frame,
+            None => match wait_for_auth_frame_until(&mut rx, deadline).await {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
+        let frame = (*frame).clone();
+        let i = frames_seen;
+        frames_seen += 1;
+
+        let face = match state.ml_pipeline.detect_face(&frame).await {
             Ok(Some(f)) => f,
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
+                maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
                 continue;
             }
             Err(e) => {
                 warn!("Frame {}: Detection error: {}", i, e);
+                maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
                 continue;
             }
         };
-        detected_faces[i] = Some(face.clone());
-        if !frame_passes_quality_gate(frame, &face, rec, i, "auth") {
+        raw_face_frames.push(auth_face_capture_frame(i, &frame, &face));
+
+        if !frame_passes_quality_gate(&frame, &face, rec, i, "auth") {
+            maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
             continue;
         }
         if first_quality_face_area_frac.is_none() {
@@ -321,7 +323,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         // First quality face: run the anti-spoofing depth gate ONCE.
         if !liveness_checked {
             liveness_checked = true;
-            match state.ml_pipeline.liveness_gate(frame, &face).await {
+            match state.ml_pipeline.liveness_gate(&frame, &face).await {
                 Ok(true) => {}
                 Ok(false) => {
                     warn!(
@@ -346,11 +348,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                         Some(username),
                         Outcome::SuspectedSpoof,
                         GtSource::PamFaceAuth,
-                        build_auth_face_capture_frames(
-                            &frames,
-                            &detected_faces,
-                            state.config.dataset.raw_face_frame_bundle_size,
-                        ),
+                        raw_face_frames,
                     );
                     return Response::Failure {
                         reason: "Liveness check failed (not a live face).".to_string(),
@@ -379,11 +377,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                         Some(username),
                         Outcome::SuspectedSpoof,
                         GtSource::PamFaceAuth,
-                        build_auth_face_capture_frames(
-                            &frames,
-                            &detected_faces,
-                            state.config.dataset.raw_face_frame_bundle_size,
-                        ),
+                        raw_face_frames,
                     );
                     return Response::Failure {
                         reason: "Liveness check error.".to_string(),
@@ -391,11 +385,39 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                 }
             }
         }
-        match state.ml_pipeline.extract_embedding(frame, &face).await {
+        match state.ml_pipeline.extract_embedding(&frame, &face).await {
             Ok(embedding) => passed_embeddings.push(embedding),
             Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
         }
+        if passed_embeddings.len() >= auth_frames {
+            break;
+        }
+        maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
     }
+
+    if frames_seen == 0 {
+        error!("Failed to capture any frames");
+        log_auth_failure_attempt(
+            state,
+            &attempt_id,
+            username,
+            Outcome::Rejected,
+            None,
+            "no_frames",
+            AttemptConditions::default(),
+        );
+        return Response::Failure {
+            reason: "Failed to capture frames".to_string(),
+        };
+    }
+
+    info!(
+        "Captured {} auth frames; {} had detected faces; {} quality embeddings collected (target {})",
+        frames_seen,
+        raw_face_frames.len(),
+        passed_embeddings.len(),
+        auth_frames
+    );
 
     if passed_embeddings.is_empty() {
         warn!(
@@ -428,11 +450,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             Some(username),
             Outcome::FalseNegative,
             GtSource::PamFaceAuth,
-            build_auth_face_capture_frames(
-                &frames,
-                &detected_faces,
-                state.config.dataset.raw_face_frame_bundle_size,
-            ),
+            raw_face_frames,
         );
         return Response::Failure {
             reason: "No clear face detected. Please ensure good lighting and look at the camera."
@@ -508,11 +526,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             Some(username),
             Outcome::ConfirmedGenuine,
             GtSource::PamFaceAuth,
-            build_auth_face_capture_frames(
-                &frames,
-                &detected_faces,
-                state.config.dataset.raw_face_frame_bundle_size,
-            ),
+            raw_face_frames,
         );
         info!(
             "Authentication successful for {} (similarity: {:.4})",
@@ -547,11 +561,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             Some(username),
             Outcome::FalseNegative,
             GtSource::PamFaceAuth,
-            build_auth_face_capture_frames(
-                &frames,
-                &detected_faces,
-                state.config.dataset.raw_face_frame_bundle_size,
-            ),
+            raw_face_frames,
         );
         Response::Failure {
             reason: format!(
@@ -616,27 +626,31 @@ fn capture_conditions(frame: &image::DynamicImage, face: &crate::ml::Face) -> At
     }
 }
 
+fn auth_face_capture_frame(
+    source_index: usize,
+    frame: &image::DynamicImage,
+    face: &crate::ml::Face,
+) -> dataset::CaptureFrameImage {
+    dataset::CaptureFrameImage {
+        source_index,
+        image: frame.clone(),
+        bbox_norm: Some(face_bbox_norm(face)),
+        conditions: capture_conditions(frame, face),
+    }
+}
+
+#[cfg(test)]
 fn build_auth_face_capture_frames(
     frames: &[image::DynamicImage],
     detected_faces: &[Option<crate::ml::Face>],
-    limit: usize,
 ) -> Vec<dataset::CaptureFrameImage> {
-    if limit == 0 {
-        return Vec::new();
-    }
     frames
         .iter()
         .enumerate()
         .filter_map(|(i, frame)| {
             let face = detected_faces.get(i).and_then(|face| face.as_ref())?;
-            Some(dataset::CaptureFrameImage {
-                source_index: i,
-                image: frame.clone(),
-                bbox_norm: Some(face_bbox_norm(face)),
-                conditions: capture_conditions(frame, face),
-            })
+            Some(auth_face_capture_frame(i, frame, face))
         })
-        .take(limit)
         .collect()
 }
 
@@ -725,7 +739,7 @@ mod tests {
         let frames = vec![test_frame(1), test_frame(2), test_frame(3), test_frame(4)];
         let faces = vec![None, Some(test_face()), Some(test_face()), None];
 
-        let captured = build_auth_face_capture_frames(&frames, &faces, 10);
+        let captured = build_auth_face_capture_frames(&frames, &faces);
 
         assert_eq!(captured.len(), 2);
         assert_eq!(captured[0].source_index, 1);
@@ -736,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_face_capture_pack_applies_detected_face_limit_after_filtering() {
+    fn auth_face_capture_pack_has_no_dataset_specific_frame_limit() {
         let frames = vec![test_frame(1), test_frame(2), test_frame(3), test_frame(4)];
         let faces = vec![
             None,
@@ -745,11 +759,12 @@ mod tests {
             Some(test_face()),
         ];
 
-        let captured = build_auth_face_capture_frames(&frames, &faces, 2);
+        let captured = build_auth_face_capture_frames(&frames, &faces);
 
-        assert_eq!(captured.len(), 2);
+        assert_eq!(captured.len(), 3);
         assert_eq!(captured[0].source_index, 1);
         assert_eq!(captured[1].source_index, 2);
+        assert_eq!(captured[2].source_index, 3);
     }
 }
 

@@ -327,14 +327,6 @@ pub struct DatasetConfig {
     #[serde(default = "default_raw_frame_bundle_size")]
     pub raw_frame_bundle_size: usize,
 
-    /// Maximum number of pre-recognition auth frames with a detected face to
-    /// persist in one raw capture bundle. This is intentionally separate from
-    /// `raw_frame_bundle_size`: R&D data collection wants many detector-positive
-    /// raw frames before recognition, while normal diagnostic bundles can stay
-    /// small.
-    #[serde(default = "default_raw_face_frame_bundle_size")]
-    pub raw_face_frame_bundle_size: usize,
-
     /// Maximum raw capture bundles written per day. `0` disables bundle writes
     /// even when `keep_raw_frames=true`.
     #[serde(default = "default_max_capture_packs_per_day")]
@@ -357,7 +349,6 @@ impl Default for DatasetConfig {
             logging_enabled: false,
             keep_raw_frames: false,
             raw_frame_bundle_size: default_raw_frame_bundle_size(),
-            raw_face_frame_bundle_size: default_raw_face_frame_bundle_size(),
             max_capture_packs_per_day: default_max_capture_packs_per_day(),
             raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
@@ -484,9 +475,6 @@ fn default_dataset_max_attempt_records_per_day() -> usize {
 }
 fn default_raw_frame_bundle_size() -> usize {
     10
-}
-fn default_raw_face_frame_bundle_size() -> usize {
-    120
 }
 fn default_max_capture_packs_per_day() -> usize {
     500
