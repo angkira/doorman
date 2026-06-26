@@ -7,10 +7,10 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Parse error: {0}")]
     Parse(#[from] toml::de::Error),
-    
+
     #[error("Config not found at any standard location")]
     NotFound,
 }
@@ -19,22 +19,22 @@ pub enum ConfigError {
 pub struct Config {
     #[serde(default)]
     pub daemon: DaemonConfig,
-    
+
     #[serde(default)]
     pub camera: CameraConfig,
-    
+
     #[serde(default)]
     pub ml: MLConfig,
-    
+
     #[serde(default)]
     pub authentication: AuthConfig,
-    
+
     #[serde(default)]
     pub enrollment: EnrollmentConfig,
-    
+
     #[serde(default)]
     pub preprocessing: PreprocessingConfig,
-    
+
     #[serde(default)]
     pub models: ModelsConfig,
 
@@ -101,15 +101,15 @@ pub struct DaemonConfig {
 pub struct CameraConfig {
     #[serde(default)]
     pub device_index: u32,
-    
+
     pub video_file: Option<String>,
-    
+
     #[serde(default = "default_camera_width")]
     pub width: u32,
-    
+
     #[serde(default = "default_camera_height")]
     pub height: u32,
-    
+
     #[serde(default = "default_fps")]
     pub fps: u32,
 
@@ -132,23 +132,23 @@ pub struct CameraConfig {
 pub struct MLConfig {
     #[serde(default = "default_models_dir")]
     pub models_dir: String,
-    
+
     #[serde(default = "default_backend")]
     pub backend: String,
-    
+
     #[serde(default = "default_device")]
     pub device: String,
-    
+
     #[serde(default)]
     pub cpu_threads: i32,
-    
+
     #[serde(default)]
     pub gpu_device_id: i32,
-    
+
     /// Docker inference service endpoint (for backend = "docker")
     #[serde(default)]
     pub docker_endpoint: Option<String>,
-    
+
     /// Unix socket path for ML inference (for backend = "socket")
     #[serde(default)]
     pub socket_path: Option<String>,
@@ -180,7 +180,7 @@ pub struct MLConfig {
 pub struct AuthConfig {
     #[serde(default = "default_similarity_threshold")]
     pub similarity_threshold: f32,
-    
+
     #[serde(default = "default_auth_frames")]
     pub auth_frames: usize,
 
@@ -241,7 +241,7 @@ pub struct AuthConfig {
 pub struct EnrollmentConfig {
     #[serde(default = "default_enroll_frames")]
     pub enroll_frames: usize,
-    
+
     #[serde(default = "default_min_valid_frames")]
     pub min_valid_frames: usize,
 }
@@ -250,10 +250,10 @@ pub struct EnrollmentConfig {
 pub struct PreprocessingConfig {
     #[serde(default = "default_image_size")]
     pub image_width: u32,
-    
+
     #[serde(default = "default_image_size")]
     pub image_height: u32,
-    
+
     #[serde(default = "default_filter_type")]
     pub filter_type: String,
 }
@@ -322,10 +322,18 @@ pub struct DatasetConfig {
     #[serde(default)]
     pub keep_raw_frames: bool,
 
-    /// Maximum number of quality-passed frames persisted in one capture bundle.
+    /// Legacy cap for generic raw capture bundles.
     /// Only used when `keep_raw_frames=true`.
     #[serde(default = "default_raw_frame_bundle_size")]
     pub raw_frame_bundle_size: usize,
+
+    /// Maximum number of pre-recognition auth frames with a detected face to
+    /// persist in one raw capture bundle. This is intentionally separate from
+    /// `raw_frame_bundle_size`: R&D data collection wants many detector-positive
+    /// raw frames before recognition, while normal diagnostic bundles can stay
+    /// small.
+    #[serde(default = "default_raw_face_frame_bundle_size")]
+    pub raw_face_frame_bundle_size: usize,
 
     /// Maximum raw capture bundles written per day. `0` disables bundle writes
     /// even when `keep_raw_frames=true`.
@@ -349,6 +357,7 @@ impl Default for DatasetConfig {
             logging_enabled: false,
             keep_raw_frames: false,
             raw_frame_bundle_size: default_raw_frame_bundle_size(),
+            raw_face_frame_bundle_size: default_raw_face_frame_bundle_size(),
             max_capture_packs_per_day: default_max_capture_packs_per_day(),
             raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
@@ -361,27 +370,27 @@ pub struct ModelsConfig {
     // Face detector (BlazeFace)
     #[serde(default = "default_detector_input_width")]
     pub detector_input_width: u32,
-    
+
     #[serde(default = "default_detector_input_height")]
     pub detector_input_height: u32,
-    
+
     #[serde(default = "default_detector_num_anchors")]
     pub detector_num_anchors: usize,
-    
+
     // Liveness detector
     #[serde(default = "default_liveness_input_width")]
     pub liveness_input_width: u32,
-    
+
     #[serde(default = "default_liveness_input_height")]
     pub liveness_input_height: u32,
-    
+
     // Face recognizer (MobileFaceNet)
     #[serde(default = "default_recognizer_input_width")]
     pub recognizer_input_width: u32,
-    
+
     #[serde(default = "default_recognizer_input_height")]
     pub recognizer_input_height: u32,
-    
+
     #[serde(default = "default_recognizer_embedding_size")]
     pub recognizer_embedding_size: usize,
 }
@@ -391,21 +400,51 @@ pub struct ModelsConfig {
 // RuntimeDirectory=doorman, owned by the sandboxed `doorman` user. Placing them
 // in root-owned /run (e.g. /run/doorman.sock) makes the daemon fail to bind
 // under ProtectSystem=strict. `--user` (dev) mode overrides these with XDG paths.
-fn default_socket_path() -> String { "/run/doorman/doorman.sock".to_string() }
-fn default_debug_socket() -> String { "/run/doorman/doorman-debug.sock".to_string() }
-fn default_frame_socket() -> String { "/run/doorman/doorman-frames.sock".to_string() }
-fn default_processing_fps() -> u32 { 10 }
-fn default_start_locked() -> bool { true }
-fn default_data_dir() -> String { "/var/lib/doorman".to_string() }
-fn default_log_level() -> String { "info".to_string() }
-fn default_models_dir() -> String { "/var/lib/doorman/models".to_string() }
-fn default_backend() -> String { "ort".to_string() }
-fn default_device() -> String { "cpu".to_string() }
-fn default_similarity_threshold() -> f32 { 0.4 }
-fn default_auth_frames() -> usize { 10 }
-fn default_liveness_enabled() -> bool { true }
-fn default_proactive_unlock() -> bool { false }
-fn default_adaptive_enroll() -> bool { true }
+fn default_socket_path() -> String {
+    "/run/doorman/doorman.sock".to_string()
+}
+fn default_debug_socket() -> String {
+    "/run/doorman/doorman-debug.sock".to_string()
+}
+fn default_frame_socket() -> String {
+    "/run/doorman/doorman-frames.sock".to_string()
+}
+fn default_processing_fps() -> u32 {
+    10
+}
+fn default_start_locked() -> bool {
+    true
+}
+fn default_data_dir() -> String {
+    "/var/lib/doorman".to_string()
+}
+fn default_log_level() -> String {
+    "info".to_string()
+}
+fn default_models_dir() -> String {
+    "/var/lib/doorman/models".to_string()
+}
+fn default_backend() -> String {
+    "ort".to_string()
+}
+fn default_device() -> String {
+    "cpu".to_string()
+}
+fn default_similarity_threshold() -> f32 {
+    0.4
+}
+fn default_auth_frames() -> usize {
+    10
+}
+fn default_liveness_enabled() -> bool {
+    true
+}
+fn default_proactive_unlock() -> bool {
+    false
+}
+fn default_adaptive_enroll() -> bool {
+    true
+}
 // Calibrated through the daemon at 1024x720 on in-situ genuine vs screen-replay
 // captures (see .session/2026-06-08_liveness-wired.md). On the working
 // (CPU-EP) depth path the relief separates cleanly: genuine 0.068..0.245
@@ -413,36 +452,89 @@ fn default_adaptive_enroll() -> bool { true }
 // [0.019, 0.068] gives APCER=0 (no spoof passes) AND BPCER=0 (no genuine
 // rejected). 0.05 sits with margin on both sides (2.7x over spoof max, 1.36x
 // under genuine min), leaning safe for MAX-security.
-fn default_liveness_depth_threshold() -> f32 { 0.05 }
-fn default_timeout_secs() -> u64 { 3 }
-fn default_enroll_frames() -> usize { 20 }
-fn default_min_valid_frames() -> usize { 5 }
-fn default_aggregation_window() -> usize { 5 }
-fn default_hysteresis_frames() -> u32 { 3 }
+fn default_liveness_depth_threshold() -> f32 {
+    0.05
+}
+fn default_timeout_secs() -> u64 {
+    3
+}
+fn default_enroll_frames() -> usize {
+    20
+}
+fn default_min_valid_frames() -> usize {
+    5
+}
+fn default_aggregation_window() -> usize {
+    5
+}
+fn default_hysteresis_frames() -> u32 {
+    3
+}
 // Sharpness = variance of Laplacian on 112x112 grayscale. Sharp aligned faces
 // measure well above this; obvious motion/Gaussian blur falls below it. Kept
 // conservative so synthesized/real faces pass while clearly blurred frames fail.
-fn default_min_sharpness() -> f32 { 8.0 }
-fn default_min_face_area_frac() -> f32 { 0.02 }
-fn default_dataset_max_attempt_records_per_day() -> usize { 50_000 }
-fn default_raw_frame_bundle_size() -> usize { 10 }
-fn default_max_capture_packs_per_day() -> usize { 500 }
-fn default_raw_frame_jpeg_quality() -> u8 { 92 }
-fn default_image_size() -> u32 { 256 }
-fn default_filter_type() -> String { "lanczos3".to_string() }
-fn default_camera_width() -> u32 { 1280 }
-fn default_camera_height() -> u32 { 720 }
-fn default_fps() -> u32 { 30 }
+fn default_min_sharpness() -> f32 {
+    8.0
+}
+fn default_min_face_area_frac() -> f32 {
+    0.02
+}
+fn default_dataset_max_attempt_records_per_day() -> usize {
+    50_000
+}
+fn default_raw_frame_bundle_size() -> usize {
+    10
+}
+fn default_raw_face_frame_bundle_size() -> usize {
+    120
+}
+fn default_max_capture_packs_per_day() -> usize {
+    500
+}
+fn default_raw_frame_jpeg_quality() -> u8 {
+    92
+}
+fn default_image_size() -> u32 {
+    256
+}
+fn default_filter_type() -> String {
+    "lanczos3".to_string()
+}
+fn default_camera_width() -> u32 {
+    1280
+}
+fn default_camera_height() -> u32 {
+    720
+}
+fn default_fps() -> u32 {
+    30
+}
 
 // Model default values
-fn default_detector_input_width() -> u32 { 128 }
-fn default_detector_input_height() -> u32 { 128 }
-fn default_detector_num_anchors() -> usize { 896 }
-fn default_liveness_input_width() -> u32 { 80 }
-fn default_liveness_input_height() -> u32 { 80 }
-fn default_recognizer_input_width() -> u32 { 112 }
-fn default_recognizer_input_height() -> u32 { 112 }
-fn default_recognizer_embedding_size() -> usize { 128 }
+fn default_detector_input_width() -> u32 {
+    128
+}
+fn default_detector_input_height() -> u32 {
+    128
+}
+fn default_detector_num_anchors() -> usize {
+    896
+}
+fn default_liveness_input_width() -> u32 {
+    80
+}
+fn default_liveness_input_height() -> u32 {
+    80
+}
+fn default_recognizer_input_width() -> u32 {
+    112
+}
+fn default_recognizer_input_height() -> u32 {
+    112
+}
+fn default_recognizer_embedding_size() -> usize {
+    128
+}
 
 impl Default for DaemonConfig {
     fn default() -> Self {

@@ -44,3 +44,14 @@ aggregation_window   = 5
 hysteresis_frames    = 3
 min_sharpness        = 8.0
 min_face_area_frac   = 0.005
+
+[dataset]
+# Off by default for packaged installs. When enabled for local R&D, auth attempts
+# persist detector-positive raw face frames before recognition, capped here.
+logging_enabled = false
+keep_raw_frames = false
+raw_frame_bundle_size = 10
+raw_face_frame_bundle_size = 120
+max_capture_packs_per_day = 500
+raw_frame_jpeg_quality = 92
+max_attempt_records_per_day = 50000
