@@ -98,6 +98,37 @@ def collect_samples(dataset_dir: Path) -> list[FrameSample]:
     return samples
 
 
+def filter_local_samples(
+    samples: list[FrameSample],
+    *,
+    include_labels: set[str],
+    min_face_area_frac: float,
+    require_bbox: bool,
+) -> tuple[list[FrameSample], dict[str, Any]]:
+    kept: list[FrameSample] = []
+    dropped = Counter()
+    for sample in samples:
+        if include_labels and sample.label not in include_labels:
+            dropped[f"label:{sample.label}"] += 1
+            continue
+        if require_bbox and not sample.bbox_norm:
+            dropped["missing_bbox"] += 1
+            continue
+        if min_face_area_frac > 0.0 and (sample.face_area_frac is None or sample.face_area_frac < min_face_area_frac):
+            dropped["small_face_area"] += 1
+            continue
+        kept.append(sample)
+    return kept, {
+        "input_frames": len(samples),
+        "kept_frames": len(kept),
+        "dropped_frames": sum(dropped.values()),
+        "drop_reasons": dict(dropped),
+        "include_labels": sorted(include_labels),
+        "min_face_area_frac": min_face_area_frac,
+        "require_bbox": require_bbox,
+    }
+
+
 def collect_kainyyy_negatives(
     *,
     limit: int,
@@ -187,6 +218,50 @@ def collect_external_negatives(source: str, limit: int, out_dir: Path) -> list[F
     raise ValueError(f"unsupported external negatives source: {source}")
 
 
+def metric_summary(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "min": None, "p10": None, "p50": None, "p90": None, "max": None}
+    arr = np.asarray(values, dtype=np.float64)
+    return {
+        "count": int(arr.size),
+        "min": round(float(np.min(arr)), 6),
+        "p10": round(float(np.quantile(arr, 0.10)), 6),
+        "p50": round(float(np.quantile(arr, 0.50)), 6),
+        "p90": round(float(np.quantile(arr, 0.90)), 6),
+        "max": round(float(np.max(arr)), 6),
+    }
+
+
+def capture_quality_report(samples: list[FrameSample]) -> dict[str, Any]:
+    labels = sorted({sample.label for sample in samples})
+    by_label: dict[str, Any] = {}
+    for label in labels:
+        group = [sample for sample in samples if sample.label == label]
+        sharpness = [float(sample.sharpness) for sample in group if sample.sharpness is not None]
+        face_area = [float(sample.face_area_frac) for sample in group if sample.face_area_frac is not None]
+        by_label[label] = {
+            "frames": len(group),
+            "missing_bbox": sum(1 for sample in group if not sample.bbox_norm),
+            "bbox_frames": sum(1 for sample in group if sample.bbox_norm),
+            "sharpness": metric_summary(sharpness),
+            "face_area_frac": metric_summary(face_area),
+        }
+    return {
+        "labels": by_label,
+        "overall": {
+            "frames": len(samples),
+            "missing_bbox": sum(1 for sample in samples if not sample.bbox_norm),
+            "bbox_frames": sum(1 for sample in samples if sample.bbox_norm),
+            "sharpness": metric_summary(
+                [float(sample.sharpness) for sample in samples if sample.sharpness is not None]
+            ),
+            "face_area_frac": metric_summary(
+                [float(sample.face_area_frac) for sample in samples if sample.face_area_frac is not None]
+            ),
+        },
+    }
+
+
 def inventory_report(dataset_dir: Path) -> dict[str, Any]:
     attempts = []
     labels = []
@@ -205,6 +280,7 @@ def inventory_report(dataset_dir: Path) -> dict[str, Any]:
         "attempt_outcomes": dict(Counter(row.get("outcome", "Unknown") for row in attempts)),
         "label_outcomes": dict(Counter(row.get("outcome", "Unknown") for row in labels)),
         "capture_labels": dict(Counter(s.label for s in samples)),
+        "capture_quality": capture_quality_report(samples),
     }
 
 
@@ -528,6 +604,23 @@ def main() -> int:
     )
     parser.add_argument("--external-negative-limit", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=2000)
+    parser.add_argument(
+        "--include-label",
+        action="append",
+        default=[],
+        help="local capture label to include; repeatable. Default keeps all positive/negative training labels.",
+    )
+    parser.add_argument(
+        "--min-face-area-frac",
+        type=float,
+        default=0.0,
+        help="drop local capture frames with face_area_frac below this value",
+    )
+    parser.add_argument(
+        "--require-bbox",
+        action="store_true",
+        help="drop local capture frames without a captured face bounding box",
+    )
     args = parser.parse_args()
 
     dataset_dir = Path(args.dataset_dir)
@@ -547,10 +640,19 @@ def main() -> int:
             args.external_negative_limit,
             out_dir,
         )
-        usable = [s for s in samples if s.label in POSITIVE or s.label in NEGATIVE]
+        default_labels = POSITIVE | NEGATIVE
+        include_labels = set(args.include_label) if args.include_label else default_labels
+        local_candidates = [s for s in samples if s.label in default_labels]
+        usable, local_filter_report = filter_local_samples(
+            local_candidates,
+            include_labels=include_labels,
+            min_face_area_frac=args.min_face_area_frac,
+            require_bbox=args.require_bbox,
+        )
         usable.extend(external_negatives)
         labels = [1 if s.label in POSITIVE else 0 for s in usable]
         report["used_frames"] = len(usable)
+        report["local_filter"] = local_filter_report
         report["external_negatives"] = {
             "source": args.external_negatives,
             "requested": args.external_negative_limit,
