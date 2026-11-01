@@ -45,6 +45,8 @@ trusted_uids = []
 admin_uids = []
 # Authenticate attempts per uid per sliding minute (0 = unlimited).
 max_auth_attempts_per_minute = 20
+# Open command connections per peer uid (0 = unlimited; global cap is 64).
+max_connections_per_uid = 8
 # Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requests
 # are clamped. See docs/unlock-path.md.
 wait_for_match_max_ms = 60000

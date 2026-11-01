@@ -42,7 +42,21 @@ syslog; the CLI prints the reason and exits non-zero.
 Authenticate and WaitForMatch attempts (one per call, however long the wait)
 are limited per peer uid over a sliding 60 s window
 (`max_auth_attempts_per_minute`, default 20, `0` = off). Root is limited too,
-to bound brute force through PAM. State is in memory and resets on restart.
+to bound brute force through PAM. Every PAM caller runs as uid 0, so for root
+the bucket is keyed by (uid 0, target username): attempts against one account
+cannot exhaust the budget of the others. Non-root callers are keyed by uid
+alone. State is in memory and resets on restart.
+
+### Connection and request-size limits
+
+The socket is world-connectable, so before any authorization:
+
+- A request line is capped at 64 KiB (`MAX_REQUEST_LINE_BYTES`). The read is
+  bounded with `take`, so a peer that never sends a newline cannot make the
+  daemon buffer more; the connection is dropped without a reply.
+- At most 64 connections are open at once (global), and at most
+  `[ipc] max_connections_per_uid` (default 8, `0` = off) per peer uid; extra
+  connections are dropped. A long `WaitForMatch` holds one slot per watcher.
 
 ### Logging
 
@@ -52,9 +66,17 @@ limiting log at warn. Frames and embeddings are never logged.
 ### Protocol version
 
 Requests may carry `"protocol_version": N` next to the usual fields
-(`{"type":"authenticate","username":"u","protocol_version":1}`). Absent means 1,
-so old PAM modules and clients keep working. Any other value is answered with
+(`{"type":"authenticate","username":"u","protocol_version":1}`). Absent means
+`UNVERSIONED_PROTOCOL_VERSION` (1), so old PAM modules and clients keep working
+while the current version is 1. Any other value is answered with
 `UnsupportedProtocol`. The PAM module and CLI send `1`.
+
+Once a protocol v2 exists, a missing `protocol_version` is rejected with
+`UnsupportedProtocol` ("protocol_version is required"): the gate only treats it
+as v1 while `PROTOCOL_VERSION <= UNVERSIONED_PROTOCOL_VERSION`
+(`effective_protocol_version`, covered by
+`missing_protocol_version_is_rejected_once_a_newer_version_exists`). Bumping
+`PROTOCOL_VERSION` therefore cannot leave a downgrade-by-omission path.
 
 ## Frame and debug stream sockets
 
@@ -74,6 +96,7 @@ non-root user it is skipped silently unless the group option is used.
 trusted_uids = []                 # may Authenticate for any user
 admin_uids = []                   # may run admin operations
 max_auth_attempts_per_minute = 20 # 0 disables
+max_connections_per_uid = 8       # 0 disables; global cap is 64
 wait_for_match_max_ms = 60000     # cap for one WaitForMatch, see docs/unlock-path.md
 # stream_socket_group = "doorman"
 ```

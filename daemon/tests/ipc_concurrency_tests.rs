@@ -83,3 +83,107 @@ async fn status_answers_while_authenticate_is_in_flight() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn oversized_line_drops_the_connection_without_a_reply() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("d.sock");
+    let listener = ipc_policy::bind_socket(sock.to_str().unwrap(), 0o666, None).unwrap();
+    let gate = Arc::new(Gatekeeper::new(IpcConfig::default()));
+    let handler = Arc::new(|_peer: PeerCred, _req: Request| async {
+        Response::Success {
+            message: None,
+            data: None,
+        }
+    });
+    let server = tokio::spawn(ipc_policy::serve(listener, gate, handler));
+
+    let mut s = UnixStream::connect(&sock).await.unwrap();
+    let flood = vec![b'a'; 4 * ipc_policy::MAX_REQUEST_LINE_BYTES as usize];
+    // The server stops reading at the cap, so the tail of the write may fail.
+    let _ = tokio::time::timeout(PROMPT, s.write_all(&flood)).await;
+    let mut out = String::new();
+    let n = tokio::time::timeout(PROMPT, BufReader::new(s).read_line(&mut out))
+        .await
+        .expect("connection must be closed promptly")
+        .unwrap_or(0);
+    assert_eq!(n, 0, "no reply to an oversized line: {out:?}");
+    server.abort();
+}
+
+#[tokio::test]
+async fn per_uid_connection_limit_drops_extra_connections() {
+    const LIMIT: u32 = 2;
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("d.sock");
+    let listener = ipc_policy::bind_socket(sock.to_str().unwrap(), 0o666, None).unwrap();
+    let cfg = IpcConfig {
+        trusted_uids: vec![my_uid()],
+        max_connections_per_uid: LIMIT,
+        ..IpcConfig::default()
+    };
+    let gate = Arc::new(Gatekeeper::new(cfg));
+
+    let release = Arc::new(Notify::new());
+    let started = Arc::new(Notify::new());
+    let (r, st) = (release.clone(), started.clone());
+    let handler = Arc::new(move |_peer: PeerCred, req: Request| {
+        let (r, st) = (r.clone(), st.clone());
+        async move {
+            if matches!(req, Request::Authenticate { .. }) {
+                st.notify_one();
+                r.notified().await;
+            }
+            Response::Success {
+                message: Some("done".into()),
+                data: None,
+            }
+        }
+    });
+    let server = tokio::spawn(ipc_policy::serve(listener, gate, handler));
+
+    // LIMIT in-flight authenticates occupy the uid's slots.
+    let mut inflight = Vec::new();
+    for _ in 0..LIMIT {
+        let s = sock.clone();
+        inflight.push(tokio::spawn(async move {
+            ask(&s, r#"{"type":"authenticate","username":"alice"}"#).await
+        }));
+        tokio::time::timeout(PROMPT, started.notified())
+            .await
+            .expect("authenticate reaches the handler");
+    }
+
+    // One more connection from the same uid is dropped without a reply.
+    let mut extra = UnixStream::connect(&sock).await.unwrap();
+    extra.write_all(b"{\"type\":\"status\"}\n").await.unwrap();
+    let mut out = String::new();
+    let n = tokio::time::timeout(PROMPT, BufReader::new(extra).read_line(&mut out))
+        .await
+        .expect("over-limit connection must be closed promptly")
+        .unwrap_or(0);
+    assert_eq!(n, 0, "over-limit connection got a reply: {out:?}");
+
+    // Slots are released when the in-flight requests finish.
+    for _ in 0..LIMIT {
+        release.notify_one();
+    }
+    for t in inflight {
+        tokio::time::timeout(PROMPT, t).await.unwrap().unwrap();
+    }
+    let status = tokio::time::timeout(PROMPT, async {
+        loop {
+            let mut s = UnixStream::connect(&sock).await.unwrap();
+            s.write_all(b"{\"type\":\"status\"}\n").await.unwrap();
+            let mut out = String::new();
+            if BufReader::new(s).read_line(&mut out).await.unwrap_or(0) > 0 {
+                return out;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a slot frees up after the requests finish");
+    assert!(status.contains("done"), "{status}");
+    server.abort();
+}

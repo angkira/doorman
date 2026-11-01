@@ -246,3 +246,38 @@ fn stream_accept_policy() {
     };
     assert!(ipc_policy::stream_peer_allowed(&peer(ALICE), &admin));
 }
+
+#[tokio::test]
+async fn oversized_request_line_without_newline_is_rejected_with_bounded_read() {
+    let gate = gate_with(IpcConfig::default(), Arc::new(Mutex::new(Instant::now())));
+    // Four times the cap, no newline anywhere.
+    let flood = vec![b'a'; 4 * ipc_policy::MAX_REQUEST_LINE_BYTES as usize];
+    let mut reader = BufReader::new(&flood[..]);
+    let err = match ipc_policy::read_gated_request(&mut reader, &peer(ALICE), &gate).await {
+        Ok(_) => panic!("an oversized line must not be accepted"),
+        Err(e) => e,
+    };
+    assert!(format!("{err:#}").contains("exceeds"), "{err:#}");
+    // Never pulled much more than the cap off the wire (cap + one read buffer).
+    let consumed = flood.len() - reader.get_ref().len();
+    let slack = 64 * 1024;
+    assert!(
+        consumed as u64 <= ipc_policy::MAX_REQUEST_LINE_BYTES + 1 + slack,
+        "consumed {consumed} bytes"
+    );
+}
+
+#[tokio::test]
+async fn request_line_at_the_cap_is_still_parsed() {
+    let gate = gate_with(IpcConfig::default(), Arc::new(Mutex::new(Instant::now())));
+    // A valid request padded with whitespace to exactly the cap (incl. newline).
+    let body = r#"{"type":"status"}"#;
+    let pad = ipc_policy::MAX_REQUEST_LINE_BYTES as usize - body.len() - 1;
+    let line = format!("{body}{}\n", " ".repeat(pad));
+    assert_eq!(line.len() as u64, ipc_policy::MAX_REQUEST_LINE_BYTES);
+    let mut reader = BufReader::new(line.as_bytes());
+    let got = ipc_policy::read_gated_request(&mut reader, &peer(ALICE), &gate)
+        .await
+        .unwrap();
+    assert!(matches!(got, Gated::Allowed(_)));
+}
