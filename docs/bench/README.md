@@ -92,8 +92,8 @@ or `--models-dir <dir>`):
 
 Not supported by the harness yet (TODO): ORT spinning on/off, graph optimisation
 level and `optimized_model_filepath` toggles (not exposed by the daemon backend),
-dumping per-image liveness relief values from images (the daemon API returns only
-the pass/fail verdict; items 6/7 need a relief dump), N-of-M / template-scoring
+dumping per-image liveness relief values from images (live relief values come from
+the timing log's `liveness_relief`, see docs/decision-and-liveness.md), N-of-M / template-scoring
 ablations (WS5; the daemon now has `[decision]` settings, but the harness does not drive them yet), camera-open/MJPEG/resolution comparisons (WS4; use the daemon
 timing log, which records `camera_open` and `first_frame`).
 
@@ -141,12 +141,12 @@ One JSON line per authentication attempt, always also emitted at debug level
 `first_frame_ms`, `first_valid_frame_ms`, `detect_sum_ms`/`detect_count`,
 `embed_sum_ms`/`embed_count`, `liveness_ms`, `decision_ms`, `total_ms`),
 `align_ms` (always null, see above), `frames_seen`, `frames_used`, `outcome`,
-`liveness_passed` and `similarity`.
+`liveness_passed`, `liveness_relief`, `liveness_frames` and `similarity`.
 
 Privacy: no username, uid, frame or embedding is written. The final aggregate
 cosine `similarity` IS written because it is the calibration signal for the
-threshold; the raw liveness relief value is not available through the current
-API (only the verdict). The attempt id is a counter plus a timestamp. The file
+threshold; the depth `liveness_relief` is written for the same reason (recipe
+in docs/decision-and-liveness.md). The attempt id is a counter plus a timestamp. The file
 is created with mode 0640.
 
 ## ONNX Runtime: bundled or system?
