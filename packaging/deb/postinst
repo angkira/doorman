@@ -63,6 +63,33 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl restart doormand.service || true
 fi
 
+# gpu-scan-begin
+# Read-only check of operator-owned systemd files (never edited or deleted here).
+# The block between these markers is excluded from tests/test_packaging_gpu_free.py,
+# which tests it separately in tests/test_postinst_gpu_scan.py.
+SYSTEMD_ETC="${DOORMAN_SYSTEMD_ETC:-/etc/systemd/system}"
+GPU_GRANT_PATTERN='char-drm|/dev/dri|/dev/kfd|^[0-9]+:[[:space:]]*(SupplementaryGroups|Group)=([^#]*[[:space:]=])?render([[:space:]]|$)'
+warn_gpu_grants() {
+  local file hits
+  for file in "$SYSTEMD_ETC/doormand.service" "$SYSTEMD_ETC"/doormand.service.d/*.conf; do
+    [ -f "$file" ] || continue
+    # -n keeps the original line numbers; blank and comment lines are dropped.
+    hits=$(grep -nvE '^[[:space:]]*([#;]|$)' "$file" | grep -E "$GPU_GRANT_PATTERN") || continue
+    while IFS= read -r hit; do
+      {
+        echo "WARNING: $file:${hit%%:*} grants GPU access to doormand:"
+        echo "    ${hit#*:}"
+        echo "  The packaged doormand is CPU-only. Remove that line (or the drop-in file),"
+        echo "  then run: systemctl daemon-reload && systemctl restart doormand"
+        echo "  This package does not modify or delete the file."
+      } >&2
+    done <<<"$hits"
+  done
+}
+# gpu-scan-end
+
+warn_gpu_grants || true
+
 cat <<'MSG'
 doorman installed.
 
