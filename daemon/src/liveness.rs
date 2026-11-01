@@ -45,6 +45,25 @@ impl LivenessOutcome {
     }
 }
 
+/// A liveness signal independent of depth relief (for example a screen-flash
+/// reflectance challenge or a head-pose challenge). Interface only: no
+/// implementation exists and `[liveness] signals` rejects every entry until
+/// one does. See docs/decision-and-liveness.md for the known weaknesses of the
+/// candidates.
+pub trait LivenessSignal: Send + Sync {
+    /// Name used in `[liveness] signals` and in logs.
+    fn name(&self) -> &'static str;
+
+    /// Evaluate the signal on the quality frame and its face box (x, y, w, h,
+    /// normalized). An active challenge drives the display or asks the user
+    /// to move before answering; it must fail closed (`Unavailable`).
+    fn evaluate(
+        &self,
+        frame: &image::DynamicImage,
+        face_bbox: (f32, f32, f32, f32),
+    ) -> LivenessOutcome;
+}
+
 /// Progress of a multi-frame liveness evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LivenessProgress {
