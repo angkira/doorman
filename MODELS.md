@@ -16,6 +16,8 @@ Written to both the repo copy `data/models/` and your runtime models dir
 | Recognition | `edgeface_s.onnx`                      | EdgeFace-S (γ=0.5) | 112×112 RGB | 512-d embedding | **CC-BY-NC-SA 4.0 (non-commercial)** |
 | Liveness    | `minifasnet_v2se.onnx`                 | MiniFASNetV2-SE  | 128×128 RGB  | `[1,2]` real/spoof logits | **Apache-2.0** |
 
+Depth-Anything-V2-Small (depth liveness, optional) is documented under License notes below.
+
 An optional INT8 liveness variant (`minifasnet_v2se_int8.onnx`, ~600 KB) is also
 fetched but not used by default.
 
@@ -60,8 +62,8 @@ are aligned to the canonical 5-point 112×112 ArcFace template
 daemon L2-normalizes; matching is cosine similarity (default threshold 0.4).
 
 > **License:** EdgeFace-S weights are **CC-BY-NC-SA 4.0 — non-commercial only**.
-> (The "BSD-3" sometimes cited refers to the Idiap `bob` framework *code*, not
-> these weights.) For commercial use, swap in **AuraFace-v1** (fal) — native
+> (The BSD-3 LICENSE in `otroshi/edgeface` covers the *code*; the weights licence is
+> unverified from the primary card, see License notes.) For commercial use, swap in **AuraFace-v1** (fal) — native
 > ONNX, commercial-OK, same 112×112 aligned-RGB input / 512-d output.
 
 ### MiniFASNetV2-SE (liveness)
@@ -88,16 +90,26 @@ clone still builds and tests.
 - EdgeFace: https://github.com/otroshi/edgeface
 - AuraFace-v1 (commercial alternative): https://huggingface.co/fal/AuraFace-v1
 - MiniFASNetV2-SE: https://github.com/facenox/face-antispoof-onnx
+- Depth-Anything-V2: https://github.com/DepthAnything/Depth-Anything-V2
 
 ## License notes
 
-- **YuNet** detector (OpenCV Zoo): **MIT**.
-- **EdgeFace-S** recognizer (Idiap, γ=0.5): weights **CC-BY-NC-SA 4.0 —
-  NON-COMMERCIAL**. For commercial use, use **AuraFace-v1** (fal).
-- **MiniFASNetV2-SE** liveness (facenox/face-antispoof-onnx, v1.0.0):
-  **Apache-2.0**. Architecture derives from the Silent-Face / MiniFASNet project
-  by Minivision AI (also Apache-2.0).
+Status as of 2026-11-01. "Verified" means read from the primary source named; the
+Hugging Face host was not reachable from the research environment, so HF model cards
+were not read directly.
 
-Ensure you comply with each model's license for your use case. In particular,
-**the default EdgeFace-S recognizer is non-commercial**; swap to AuraFace-v1 for
-commercial deployments.
+| Model | Code licence | Weights licence | Status | Source |
+|---|---|---|---|---|
+| YuNet (OpenCV Zoo, `face_detection_yunet_2023mar.onnx`) | MIT | MIT ("All files in this directory are licensed under MIT License"; LICENSE: MIT, (c) 2020 Shiqi Yu) | verified | https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet , https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_detection_yunet/LICENSE |
+| EdgeFace-S (Idiap, `edgeface_s_gamma_05`) | BSD-3-Clause (repo LICENSE, (c) 2024 Idiap) | **CC BY-NC-SA 4.0, non-commercial** per Idiap HF model cards of other EdgeFace variants (XXS, Base) and a third-party conversion of the S weights; the S-GAMMA card itself was not read. One third-party mirror claims BSD-3 for the weights and is contradicted by Idiap's own cards. | code verified; weights **[unverified]** (treat as non-commercial) | https://github.com/otroshi/edgeface (LICENSE raw: https://raw.githubusercontent.com/otroshi/edgeface/main/LICENSE), https://huggingface.co/Idiap/EdgeFace-Base , https://huggingface.co/Idiap/EdgeFace-XXS |
+| Depth-Anything-V2-Small | Apache-2.0 (repo) | Small: Apache-2.0. Base/Large: CC-BY-NC-4.0 (Giant unreleased at time of reading) | verified from the upstream README license section; HF card not read | https://github.com/DepthAnything/Depth-Anything-V2 |
+| MiniFASNetV2-SE (ONNX export, facenox) | Apache-2.0 (LICENSE of face-antispoof-onnx) | Apache-2.0 for the facenox ONNX release; the original Minivision caffemodels carry no stated licence in their README | facenox verified; upstream weights **[unverified]** | https://github.com/facenox/face-antispoof-onnx , https://github.com/minivision-ai/Silent-Face-Anti-Spoofing (repo licence Apache-2.0, per GitHub sidebar and LICENSE file) |
+
+Notes:
+
+- The default EdgeFace-S recognizer is to be treated as **non-commercial**; swap to
+  AuraFace-v1 for commercial deployments.
+- Depth-Anything-V2-Small is used by the depth-based liveness check but is not fetched
+  by `scripts/fetch_models.sh`. Do not substitute Base/Large without accepting
+  CC-BY-NC-4.0.
+- Ensure you comply with each model's licence for your use case.

@@ -14,12 +14,14 @@ if [ ! -d ".venv" ]; then
     exit 1
 fi
 
+# shellcheck disable=SC1091 # venv path is relative to the invoking cwd
 source .venv/bin/activate
 
 # Set ROCm env
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 export ORT_LOG_LEVEL=3  # Suppress warnings
 
+# shellcheck disable=SC2034 # reserved: documents the default model dir
 MODELS_DIR="$HOME/.local/share/doorman/models"
 
 echo "Step 1/3: Checking which Execution Provider loads..."

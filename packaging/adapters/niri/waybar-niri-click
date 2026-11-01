@@ -6,7 +6,7 @@ printf '%s %s\n' "$(date -Is)" "$name" >> /tmp/waybar-niri-click.log
 
 case "$name" in
   launcher)
-    exec /home/angkira/.local/bin/sway-menu
+    exec "$HOME/.local/bin/sway-menu"
     ;;
   lock)
     exec "$HOME/.local/bin/doorman-lock"

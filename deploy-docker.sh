@@ -162,7 +162,7 @@ for i in {1..30}; do
         break
     fi
     sleep 2
-    if [ $i -eq 30 ]; then
+    if [ "$i" -eq 30 ]; then
         echo "❌ Timeout waiting for socket. Check: docker compose logs"
         exit 1
     fi

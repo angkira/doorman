@@ -79,9 +79,10 @@ layout {
     }
 }
 
-spawn-at-startup "waybar" "-c" "/home/angkira/.config/waybar-niri/config" "-s" "/home/angkira/.config/waybar-niri/style.css"
+spawn-sh-at-startup "exec waybar -c \"$HOME/.config/waybar-niri/config\" -s \"$HOME/.config/waybar-niri/style.css\""
 spawn-at-startup "mako"
-spawn-at-startup "swaybg" "-i" "/home/angkira/Pictures/Wallpapers/daniil-silantev-3pW91fGAKiE-unsplash.jpg" "-m" "fill"
+// Wallpaper: set DOORMAN_WALLPAPER in your session environment, or edit this path.
+spawn-sh-at-startup "exec swaybg -i \"${DOORMAN_WALLPAPER:-$HOME/Pictures/Wallpapers/wallpaper.jpg}\" -m fill"
 spawn-sh-at-startup "command -v Telegram >/dev/null 2>&1 && exec Telegram -autostart"
 spawn-sh-at-startup "command -v blueman-applet >/dev/null 2>&1 && exec blueman-applet"
 spawn-sh-at-startup "command -v nm-applet >/dev/null 2>&1 && exec nm-applet --indicator"
@@ -134,7 +135,7 @@ binds {
         spawn-sh "command -v wezterm >/dev/null 2>&1 && exec wezterm; command -v konsole >/dev/null 2>&1 && exec konsole; command -v foot >/dev/null 2>&1 && exec foot; command -v alacritty >/dev/null 2>&1 && exec alacritty; exec xterm"
     }
     Mod+Shift+Return hotkey-overlay-title="Open fallback terminal" { spawn "foot"; }
-    Mod+D hotkey-overlay-title="Run application" { spawn "/home/angkira/.local/bin/sway-menu"; }
+    Mod+D hotkey-overlay-title="Run application" { spawn-sh "exec \"$HOME/.local/bin/sway-menu\""; }
     Mod+Tab hotkey-overlay-title="Overview" { toggle-overview; }
     Mod+L allow-inhibiting=false hotkey-overlay-title="Lock" { spawn-sh "exec \"$HOME/.local/bin/doorman-lock\""; }
     Mod+Escape allow-inhibiting=false { toggle-keyboard-shortcuts-inhibit; }
