@@ -167,10 +167,26 @@ fn rocm_ep_selected(config: &Config) -> bool {
     })
 }
 
+/// Which ONNX Runtime is loaded, for startup logs and benchmark reports.
+///
+/// `backend-ort`/`-cuda` statically link the runtime that ort-sys downloads at
+/// build time (bundled); `backend-ort-rocm` loads a system libonnxruntime.so
+/// chosen via ORT_DYLIB_PATH. The build string carries the runtime's version.
+#[cfg(feature = "_ort")]
+pub fn runtime_info() -> String {
+    let linkage = if cfg!(feature = "backend-ort-rocm") {
+        "system libonnxruntime.so (ort load-dynamic)"
+    } else {
+        "bundled (ort download-binaries)"
+    };
+    format!("{linkage}; {}", ort::info())
+}
+
 #[cfg(feature = "_ort")]
 impl OrtBackend {
         pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend with session pooling...");
+        info!("ONNX Runtime: {}", runtime_info());
         info!("Device: {}", config.ml.device);
 
         // GPU-aware pool size: a single GPU session already opens its own

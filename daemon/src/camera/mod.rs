@@ -199,6 +199,11 @@ impl Camera {
         frames
     }
 
+    /// `true` when frames are synthetic (no real camera could be opened).
+    pub fn is_mock(&self) -> bool {
+        matches!(self.inner, CameraBackendInner::Mock(_))
+    }
+
     #[allow(dead_code)]
     pub fn is_open(&self) -> bool {
         match &self.inner {

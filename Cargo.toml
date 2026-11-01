@@ -4,6 +4,7 @@ members = [
     "pam_module",
     "daemon",
     "shared",
+    "bench",
 ]
 
 [workspace.package]

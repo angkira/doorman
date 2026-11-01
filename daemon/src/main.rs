@@ -10,6 +10,7 @@ mod lock_supervisor;
 mod ml;
 mod pipeline;
 mod storage;
+mod timing;
 
 use anyhow::Result;
 use doorman_shared::Config;

@@ -1,0 +1,32 @@
+[package]
+name = "doorman-bench"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "doorman-bench"
+path = "src/main.rs"
+
+[dependencies]
+doormand = { path = "../daemon", default-features = false }
+doorman-shared = { path = "../shared" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+image = "0.25"
+chrono = "0.4"
+
+[features]
+# Mirrors the daemon defaults. Build with `--no-default-features` for the
+# model-free subset (metrics, synth, scores-CSV reports): `latency` and the
+# directory mode of `accuracy` then fail with an explicit error.
+default = ["ort", "camera-ffmpeg"]
+# Run the daemon's real ONNX Runtime backend (bundled CPU runtime).
+ort = ["doormand/backend-ort"]
+camera-ffmpeg = ["doormand/camera-ffmpeg"]
+
+[dev-dependencies]
+tempfile = "3.13"
