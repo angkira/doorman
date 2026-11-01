@@ -113,6 +113,27 @@ pub fn is_fresh(captured: Instant, request_start: Instant) -> bool {
     captured >= request_start
 }
 
+/// How long `acquire_camera` may wait for a frame: the default wait, capped by
+/// the time left until the strict deadline. `None` once the deadline has passed
+/// (the caller must fail at once instead of opening the camera).
+pub fn camera_acquire_wait(
+    default_wait: Duration,
+    strict_deadline: Option<Instant>,
+    now: Instant,
+) -> Option<Duration> {
+    match strict_deadline {
+        None => Some(default_wait),
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining.is_zero() {
+                None
+            } else {
+                Some(default_wait.min(remaining))
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct UserFailures {
     /// Failure times inside the counting window.
@@ -240,6 +261,30 @@ pub fn audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_acquire_wait_is_bounded_by_strict_deadline() {
+        let now = Instant::now();
+        let default_wait = Duration::from_secs(8);
+        // Non-strict: unchanged default.
+        assert_eq!(camera_acquire_wait(default_wait, None, now), Some(default_wait));
+        // Strict, plenty of time beyond the default: default wins.
+        let far = now + Duration::from_secs(20);
+        assert_eq!(camera_acquire_wait(default_wait, Some(far), now), Some(default_wait));
+        // Strict 4 s deadline, 1 s already spent: 3 s left.
+        let deadline = now + Duration::from_secs(4);
+        let later = now + Duration::from_secs(1);
+        assert_eq!(
+            camera_acquire_wait(default_wait, Some(deadline), later),
+            Some(Duration::from_secs(3))
+        );
+        // Deadline reached or passed: no wait at all.
+        assert_eq!(camera_acquire_wait(default_wait, Some(deadline), deadline), None);
+        assert_eq!(
+            camera_acquire_wait(default_wait, Some(deadline), deadline + Duration::from_secs(1)),
+            None
+        );
+    }
 
     fn cfg(enabled: bool) -> Config {
         let mut c = Config::default();

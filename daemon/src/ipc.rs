@@ -18,6 +18,10 @@ use image::GenericImageView;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// Longest an authentication waits for the camera to deliver its first frame
+/// (the strict sudo profile caps this further by its own deadline).
+const AUTH_CAMERA_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// Select diverse embeddings from a larger set using maximal distance approach
 /// This ensures we capture different angles/variations of the face
 pub(crate) fn select_diverse_embeddings(embeddings: Vec<Vec<f32>>, count: usize) -> Vec<Vec<f32>> {
@@ -372,10 +376,18 @@ async fn run_authenticate(
     // Turn the camera ON on-demand (works even when the screen is unlocked and the
     // camera is otherwise gated off) and wait for frames. The lease is held for the
     // rest of this call so the camera stays up through the capture.
-    let _camera_lease = match state
-        .acquire_camera(std::time::Duration::from_secs(8))
-        .await
-    {
+    // The strict sudo profile bounds the wait by its remaining deadline, so a slow
+    // camera cannot outlast the strict timeout or the PAM module's give-up time.
+    let acquire_wait = sudo_policy::camera_acquire_wait(
+        AUTH_CAMERA_ACQUIRE_TIMEOUT,
+        strict.map(|(profile, request_start)| request_start + profile.timeout),
+        std::time::Instant::now(),
+    );
+    let acquired = match acquire_wait {
+        Some(wait) => state.acquire_camera(wait).await,
+        None => Err("Camera wait skipped: strict sudo deadline already passed.".to_string()),
+    };
+    let _camera_lease = match acquired {
         Ok(lease) => lease,
         Err(err_msg) => {
             error!("{}", err_msg);
