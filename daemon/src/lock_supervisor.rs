@@ -108,6 +108,9 @@ impl Unlocker {
 pub struct LockSupervisor {
     /// `armed = LockedHint && !IdleHint`. Pipeline gate.
     pub armed_rx: watch::Receiver<bool>,
+    /// Raw `LockedHint` (screen locked), regardless of `IdleHint`. Lets the
+    /// camera gate pre-open on lock while the display is still flagged idle.
+    pub locked_rx: watch::Receiver<bool>,
     /// Monotonic counter bumped on every `Lock` signal. The proactive-unlock
     /// one-shot watches this to re-arm after a fresh lock.
     pub lock_gen_rx: watch::Receiver<u64>,
@@ -124,6 +127,7 @@ pub struct LockSupervisor {
 /// `None`); it logs a warning and never errors out, so the daemon always starts.
 pub async fn spawn() -> LockSupervisor {
     let (armed_tx, armed_rx) = watch::channel(false);
+    let (locked_tx, locked_rx) = watch::channel(false);
     let (lock_gen_tx, lock_gen_rx) = watch::channel(0u64);
 
     let conn = match Connection::system().await {
@@ -132,7 +136,7 @@ pub async fn spawn() -> LockSupervisor {
             warn!(
                 "lock-supervisor: cannot connect to system D-Bus ({e}); pipeline lock-gating disabled (armed=false)"
             );
-            return LockSupervisor { armed_rx, lock_gen_rx, unlocker: None };
+            return LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker: None };
         }
     };
 
@@ -142,7 +146,7 @@ pub async fn spawn() -> LockSupervisor {
             warn!(
                 "lock-supervisor: no active graphical seat0 session found; pipeline lock-gating disabled (armed=false)"
             );
-            return LockSupervisor { armed_rx, lock_gen_rx, unlocker: None };
+            return LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker: None };
         }
     };
 
@@ -154,10 +158,17 @@ pub async fn spawn() -> LockSupervisor {
     // emits armed=false and exits (daemon keeps running, pipeline stays gated
     // off / preview-only).
     let armed_tx = Arc::new(armed_tx);
+    let locked_tx = Arc::new(locked_tx);
     let lock_gen_tx = Arc::new(lock_gen_tx);
-    tokio::spawn(run_watcher(conn, session_path, armed_tx, lock_gen_tx));
+    tokio::spawn(run_watcher(
+        conn,
+        session_path,
+        armed_tx,
+        locked_tx,
+        lock_gen_tx,
+    ));
 
-    LockSupervisor { armed_rx, lock_gen_rx, unlocker }
+    LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker }
 }
 
 async fn build_session_proxy(
@@ -214,8 +225,15 @@ async fn resolve_graphical_session(conn: &Connection) -> Option<OwnedObjectPath>
     fallback
 }
 
-/// Compute and publish `armed`, deduping repeated identical values.
-fn publish_armed(armed_tx: &watch::Sender<bool>, locked: bool, idle: bool) {
+/// Compute and publish `armed` (and the raw `locked` hint), deduping repeated
+/// identical values.
+fn publish_armed(
+    armed_tx: &watch::Sender<bool>,
+    locked_tx: &watch::Sender<bool>,
+    locked: bool,
+    idle: bool,
+) {
+    locked_tx.send_if_modified(|cur| std::mem::replace(cur, locked) != locked);
     let armed = locked && !idle;
     if *armed_tx.borrow() != armed {
         info!("lock-supervisor: armed={armed} (LockedHint={locked}, IdleHint={idle})");
@@ -227,6 +245,7 @@ async fn run_watcher(
     conn: Connection,
     session_path: OwnedObjectPath,
     armed_tx: Arc<watch::Sender<bool>>,
+    locked_tx: Arc<watch::Sender<bool>>,
     lock_gen_tx: Arc<watch::Sender<u64>>,
 ) {
     use futures::StreamExt;
@@ -236,6 +255,7 @@ async fn run_watcher(
         Err(e) => {
             warn!("lock-supervisor: cannot build session proxy ({e}); armed pinned false");
             let _ = armed_tx.send(false);
+            let _ = locked_tx.send(false);
             return;
         }
     };
@@ -243,7 +263,7 @@ async fn run_watcher(
     // Seed initial state.
     let mut locked = session.locked_hint().await.unwrap_or(false);
     let mut idle = session.idle_hint().await.unwrap_or(false);
-    publish_armed(&armed_tx, locked, idle);
+    publish_armed(&armed_tx, &locked_tx, locked, idle);
 
     // Subscribe to the lock/unlock signals and the relevant property changes.
     let mut lock_stream = match session.receive_lock().await {
@@ -251,6 +271,7 @@ async fn run_watcher(
         Err(e) => {
             warn!("lock-supervisor: cannot subscribe Lock signal ({e}); armed pinned false");
             let _ = armed_tx.send(false);
+            let _ = locked_tx.send(false);
             return;
         }
     };
@@ -259,6 +280,7 @@ async fn run_watcher(
         Err(e) => {
             warn!("lock-supervisor: cannot subscribe Unlock signal ({e})");
             let _ = armed_tx.send(false);
+            let _ = locked_tx.send(false);
             return;
         }
     };
@@ -277,32 +299,33 @@ async fn run_watcher(
                 let next = lock_gen_tx.borrow().wrapping_add(1);
                 let _ = lock_gen_tx.send(next);
                 info!("lock-supervisor: Lock signal (gen={next})");
-                publish_armed(&armed_tx, locked, idle);
+                publish_armed(&armed_tx, &locked_tx, locked, idle);
             }
             // Explicit Unlock signal (PAM/our own unlock succeeded).
             Some(_) = unlock_stream.next() => {
                 locked = false;
                 info!("lock-supervisor: Unlock signal");
-                publish_armed(&armed_tx, locked, idle);
+                publish_armed(&armed_tx, &locked_tx, locked, idle);
             }
             // LockedHint property changed (covers lockers that only set the hint).
             Some(change) = locked_changed.next() => {
                 if let Ok(v) = change.get().await {
                     locked = v;
-                    publish_armed(&armed_tx, locked, idle);
+                    publish_armed(&armed_tx, &locked_tx, locked, idle);
                 }
             }
             // IdleHint property changed (display blank/idle => disarm).
             Some(change) = idle_changed.next() => {
                 if let Ok(v) = change.get().await {
                     idle = v;
-                    publish_armed(&armed_tx, locked, idle);
+                    publish_armed(&armed_tx, &locked_tx, locked, idle);
                 }
             }
             else => {
                 // All streams ended (session went away). Fail safe.
                 warn!("lock-supervisor: signal streams closed (session gone?); armed=false");
                 let _ = armed_tx.send(false);
+                let _ = locked_tx.send(false);
                 break;
             }
         }
