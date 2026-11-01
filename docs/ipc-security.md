@@ -21,6 +21,11 @@ connection is dropped (fail closed).
 | `Enroll`, `RemoveUser`, `ListUsers`, `DetectAndRecognize`, `GetLatestDetection`, `Shutdown` | root or `admin_uids` |
 | `Status` | anyone (no biometric data, no user names) |
 
+`Authenticate` may also carry `service` and `tty` (the PAM module's
+`PAM_SERVICE` / `PAM_TTY`; additive, protocol version stays 1). A service listed
+in `[pam.sudo] service_names` selects the strict sudo profile, see
+`docs/SUDO.md`; other services are unaffected.
+
 Every request variant is classified in an exhaustive `match`; adding a variant
 does not compile until it is classified. An unknown username gets the same
 `Denied` message as another user's account, so user existence is not leaked.
