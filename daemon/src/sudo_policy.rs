@@ -6,6 +6,7 @@
 //! helpers. `ipc.rs` applies them around the shared decision core.
 //! See docs/SUDO.md.
 
+use crate::decision::AuthOutcome;
 use doorman_shared::Config;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -181,6 +182,33 @@ impl SudoGuard {
     }
 }
 
+/// Audit reason code of a finished decision.
+pub fn outcome_code(outcome: &AuthOutcome) -> &'static str {
+    match outcome {
+        AuthOutcome::Matched => code::MATCHED,
+        AuthOutcome::NotMatched => code::NOT_MATCHED,
+        AuthOutcome::NotEnrolled => code::NOT_ENROLLED,
+        AuthOutcome::CameraUnavailable { .. } => code::CAMERA_UNAVAILABLE,
+        AuthOutcome::NoFrames => code::NO_FRAMES,
+        AuthOutcome::NoClearFace => code::NO_CLEAR_FACE,
+        AuthOutcome::LivenessRejected => code::LIVENESS_REJECTED,
+        AuthOutcome::LivenessError => code::LIVENESS_UNAVAILABLE,
+    }
+}
+
+/// Whether a finished decision counts towards the suspension: the face (or
+/// its absence or liveness) was judged. Missing enrollment and camera or
+/// frame problems are infrastructure, not failed attempts.
+pub fn counts_as_failure(outcome: &AuthOutcome) -> bool {
+    matches!(
+        outcome,
+        AuthOutcome::NotMatched
+            | AuthOutcome::NoClearFace
+            | AuthOutcome::LivenessRejected
+            | AuthOutcome::LivenessError
+    )
+}
+
 /// `similarity` rounded to [`AUDIT_SIMILARITY_STEP`], for the audit line.
 pub fn similarity_bucket(similarity: f32) -> f32 {
     (similarity / AUDIT_SIMILARITY_STEP).round() * AUDIT_SIMILARITY_STEP
@@ -331,6 +359,21 @@ mod tests {
         g.record_failure("alice", t0);
         g.record_failure("alice", t0 + WINDOW);
         assert!(g.check("alice", t0 + WINDOW).is_ok());
+    }
+
+    #[test]
+    fn only_judged_faces_count_as_failures() {
+        assert!(counts_as_failure(&AuthOutcome::NotMatched));
+        assert!(counts_as_failure(&AuthOutcome::NoClearFace));
+        assert!(counts_as_failure(&AuthOutcome::LivenessRejected));
+        assert!(counts_as_failure(&AuthOutcome::LivenessError));
+        assert!(!counts_as_failure(&AuthOutcome::Matched));
+        assert!(!counts_as_failure(&AuthOutcome::NotEnrolled));
+        assert!(!counts_as_failure(&AuthOutcome::NoFrames));
+        assert!(!counts_as_failure(&AuthOutcome::CameraUnavailable {
+            message: String::new()
+        }));
+        assert_eq!(outcome_code(&AuthOutcome::LivenessError), code::LIVENESS_UNAVAILABLE);
     }
 
     #[test]

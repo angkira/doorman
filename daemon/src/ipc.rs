@@ -8,6 +8,7 @@ use doorman_shared::{
 };
 use async_trait::async_trait;
 use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
+use doormand::sudo_policy::{self, Profile, StrictProfile};
 use crate::pipeline::{LivenessState, SequentialDecider, Step};
 use doorman_shared::config::DecisionMode;
 use doormand::decision::{AuthDecision, AuthOutcome};
@@ -89,9 +90,9 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
     let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
-        Request::Authenticate { username, .. } => {
-            run_authenticate(state, &username).await.into_response()
-        }
+        Request::Authenticate {
+            username, service, ..
+        } => handle_authenticate(state, &peer, &username, service.as_deref()).await,
         Request::Enroll { username, add } => handle_enroll(state, &username, add).await,
         Request::ListUsers => handle_list_users(state).await,
         Request::RemoveUser { username } => handle_remove_user(state, &username).await,
@@ -152,7 +153,7 @@ impl DecisionSource for AuthenticateSource<'_> {
         {
             return AttemptOutcome::NotEnrolled;
         }
-        run_authenticate(self.state, username)
+        run_authenticate(self.state, username, None)
             .await
             .attempt_outcome()
     }
@@ -277,9 +278,81 @@ async fn collect_frames_for_duration(
     frames
 }
 
+/// `Authenticate`: select the policy profile from the PAM service hint. Every
+/// service outside `[pam.sudo] service_names` runs the unchanged default path.
+async fn handle_authenticate(
+    state: &DaemonState,
+    peer: &PeerCred,
+    username: &str,
+    service: Option<&str>,
+) -> Response {
+    let request_start = std::time::Instant::now();
+    let strict = match sudo_policy::select_profile(service, &state.config) {
+        Profile::Default => return run_authenticate(state, username, None).await.into_response(),
+        Profile::Denied(reason) => {
+            sudo_policy::audit(
+                service.unwrap_or_default(),
+                peer.uid,
+                username,
+                false,
+                sudo_policy::code::DISABLED,
+                None,
+            );
+            return Response::Denied {
+                reason: reason.to_string(),
+            };
+        }
+        Profile::Strict(profile) => profile,
+    };
+    let service = service.unwrap_or_default();
+    let refuse = |code: &str, reason: &str| {
+        sudo_policy::audit(service, peer.uid, username, false, code, None);
+        Response::Denied {
+            reason: reason.to_string(),
+        }
+    };
+    if let Err((code, reason)) = sudo_policy::check_presence(state.presence()) {
+        return refuse(code, reason);
+    }
+    if state.sudo_guard.check(username, request_start).is_err() {
+        return refuse(
+            sudo_policy::code::SUSPENDED,
+            sudo_policy::DENIED_SUDO_SUSPENDED,
+        );
+    }
+
+    let decision = run_authenticate(state, username, Some((&strict, request_start))).await;
+    let matched = decision.outcome == AuthOutcome::Matched;
+    if matched {
+        state.sudo_guard.record_success(username);
+    } else if sudo_policy::counts_as_failure(&decision.outcome) {
+        state
+            .sudo_guard
+            .record_failure(username, std::time::Instant::now());
+    }
+    sudo_policy::audit(
+        service,
+        peer.uid,
+        username,
+        matched,
+        sudo_policy::outcome_code(&decision.outcome),
+        decision.similarity,
+    );
+    decision.into_response()
+}
+
 /// Decision core of `Authenticate` and `WaitForMatch`; callers build the wire
 /// response (or the wait outcome) from the returned [`AuthDecision`].
-async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
+///
+/// `strict` is the sudo profile together with the request arrival time: it
+/// forces the `n_of_m` decision with the profile's N/M and threshold, its
+/// multi-frame liveness and its timeout (counted from the arrival), and uses
+/// only frames captured after the arrival.
+async fn run_authenticate(
+    state: &DaemonState,
+    username: &str,
+    strict: Option<(&StrictProfile, std::time::Instant)>,
+) -> AuthDecision {
     info!("Authentication request for user: {}", username);
     // Emits one timing record (debug log + optional JSONL file) when dropped.
     let mut timing = crate::timing::AttemptTiming::start(&state.config.telemetry);
@@ -327,25 +400,35 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
     let auth_frames = state.config.authentication.auth_frames.max(1);
     let auth_timeout =
         std::time::Duration::from_secs(state.config.authentication.timeout_secs.max(1));
-    let deadline = std::time::Instant::now() + auth_timeout;
+    let deadline = match strict {
+        Some((profile, request_start)) => request_start + profile.timeout,
+        None => std::time::Instant::now() + auth_timeout,
+    };
     let rec = &state.config.recognition;
-    let threshold = state.config.authentication.similarity_threshold;
+    let threshold = strict.map_or(state.config.authentication.similarity_threshold, |(p, _)| {
+        p.threshold
+    });
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(auth_frames);
     // `n_of_m` mode: score every frame as it arrives and stop at the first
     // terminal step. `mean` mode leaves the decider unset.
     let dec = &state.config.decision;
-    let mut sequential = (dec.mode == DecisionMode::NOfM)
-        .then(|| SequentialDecider::new(threshold, dec.accept_n, dec.window_m, auth_frames));
+    let n_of_m = match strict {
+        Some((p, _)) => Some((p.accept_n, p.window_m)),
+        None => (dec.mode == DecisionMode::NOfM).then_some((dec.accept_n, dec.window_m)),
+    };
+    let mut sequential =
+        n_of_m.map(|(n, m)| SequentialDecider::new(threshold, n, m, auth_frames));
     let mut sequential_step = Step::Continue;
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
     // Liveness: the aggregator exists while the check is enabled; `liveness`
     // holds its final verdict once decided (None = disabled or still pending).
+    let liveness_frames = strict.map_or(state.config.liveness.frames, |(p, _)| p.liveness_frames);
     let mut liveness_agg = state
         .config
         .authentication
         .liveness_enabled
-        .then(|| LivenessAggregator::new(state.config.liveness.frames));
+        .then(|| LivenessAggregator::new(liveness_frames));
     let mut liveness: Option<LivenessOutcome> = None;
     let mut frames_seen = 0usize;
     let mut rx = state.latest_frame.clone();
@@ -359,6 +442,12 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
                 None => break,
             },
         };
+        if let Some((_, request_start)) = strict {
+            if !sudo_policy::is_fresh(frame.timestamp, request_start) {
+                debug!("Skipping a frame captured before the sudo request arrived");
+                continue; // `maybe_frame` is empty: waits for the next frame
+            }
+        }
         let frame = (*frame.image).clone();
         let i = frames_seen;
         frames_seen += 1;
