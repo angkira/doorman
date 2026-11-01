@@ -131,6 +131,32 @@ impl LivenessAggregator {
     }
 }
 
+/// Binds liveness to the frame that completes an accepting decision.
+///
+/// The first quality frames are liveness-checked before the embeddings that
+/// decide the match are collected, so a live face followed by a photo would
+/// otherwise pass. Before accepting, the deciding frame (the last quality frame
+/// scored) must itself be live: `deciding_frame_checked` says it already was
+/// (no second inference); otherwise `recheck` evaluates it. `recheck` yields
+/// `None` when the check is disabled. A failed or unavailable recheck is
+/// returned as `Err` so the caller rejects fail-closed.
+pub async fn confirm_on_deciding_frame<F, Fut>(
+    deciding_frame_checked: bool,
+    recheck: F,
+) -> Result<(), LivenessOutcome>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<LivenessOutcome>>,
+{
+    if deciding_frame_checked {
+        return Ok(());
+    }
+    match recheck().await {
+        None | Some(LivenessOutcome::Pass { .. }) => Ok(()),
+        Some(not_live) => Err(not_live),
+    }
+}
+
 /// Linear-interpolated percentile (`q` in 0..=1) of `values`; 0.0 when empty.
 fn percentile(values: &[f32], q: f32) -> f32 {
     if values.is_empty() {
@@ -368,5 +394,32 @@ mod tests {
         assert!(!u.is_pass());
         assert_eq!(u.relief(), None);
         assert_eq!(LivenessOutcome::Fail { relief: 0.01 }.relief(), Some(0.01));
+    }
+
+    #[tokio::test]
+    async fn already_checked_deciding_frame_costs_no_second_inference() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let r = confirm_on_deciding_frame(true, || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        })
+        .await;
+        assert!(r.is_ok());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unavailable_or_failed_recheck_is_an_error_and_disabled_is_ok() {
+        let unavailable = LivenessOutcome::Unavailable {
+            reason: "no model".into(),
+        };
+        assert!(
+            confirm_on_deciding_frame(false, || async { Some(unavailable) })
+                .await
+                .is_err()
+        );
+        assert!(confirm_on_deciding_frame(false, || async { None })
+            .await
+            .is_ok());
     }
 }
