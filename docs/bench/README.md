@@ -94,12 +94,36 @@ Not supported by the harness yet (TODO): ORT spinning on/off, graph optimisation
 level and `optimized_model_filepath` toggles (not exposed by the daemon backend),
 dumping per-image liveness relief values from images (the daemon API returns only
 the pass/fail verdict; items 6/7 need a relief dump), N-of-M / template-scoring
-ablations (WS5), camera-open/MJPEG/resolution comparisons (WS4; use the daemon
+ablations (WS5; the daemon now has `[decision]` settings, but the harness does not drive them yet), camera-open/MJPEG/resolution comparisons (WS4; use the daemon
 timing log, which records `camera_open` and `first_frame`).
 
 Stage granularity of `latency`: `detect`, `embed (incl. align)` and `liveness
 (depth gate)`. Face alignment runs inside the backend's embedding call and
 cannot be timed separately without changing the daemon.
+
+## Calibrating the cosine threshold for a target FAR
+
+The daemon keeps a plain configured threshold
+(`[authentication] similarity_threshold`, default 0.4); nothing adapts at
+runtime. To derive it from data:
+
+1. Build an accuracy scores CSV (`label,score[,condition]`) from your genuine
+   captures and an impostor set, either with directory mode
+   (`doorman-bench accuracy --enroll ... --genuine ... --impostor ...`, which
+   writes `scores.csv` into the report directory) or from your own scorer.
+   Score each probe the way the daemon does: with the same `[decision]
+   template_score` you run (see docs/decision-and-liveness.md).
+2. Run `doorman-bench accuracy --scores scores.csv --far 1e-3,1e-4 --out report/`.
+3. Read `accuracy.md`: the table lists, per FAR target, the threshold that
+   allows at most `floor(FAR*N)` impostor scores above it, and the TAR (genuine
+   accept rate) at that threshold. Targets with `resolvable = no` need more
+   impostor scores (FAR 1e-4 needs at least 10,000). Pick the threshold for the
+   FAR you accept and put it in `similarity_threshold`.
+4. Check the per-condition table: the worst genuine condition at that threshold
+   is the one that will fail at the lock screen first.
+
+For `n_of_m` the per-frame score is the quantity compared with the threshold,
+so calibrate on per-frame scores, not on scores of averaged embeddings.
 
 ## Daemon timing log
 
