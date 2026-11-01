@@ -106,6 +106,9 @@ pub struct Config {
 
     #[serde(default)]
     pub liveness: LivenessConfig,
+
+    #[serde(default)]
+    pub pam: PamConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -582,6 +585,188 @@ impl LivenessConfig {
     }
 }
 
+/// Default `[pam.sudo] service_names`: the PAM service name sudo and sudo-rs
+/// use (`sudo-i`, used for `-i` where the distribution configures it, is a
+/// separate opt-in).
+pub const DEFAULT_SUDO_SERVICE: &str = "sudo";
+/// Default `[pam.sudo] accept_n`: stricter than the lock screen (3 of 5).
+pub const DEFAULT_SUDO_ACCEPT_N: usize = 4;
+/// Default `[pam.sudo] window_m`.
+pub const DEFAULT_SUDO_WINDOW_M: usize = 5;
+/// Default and minimum `[pam.sudo] liveness_frames`: liveness is never a
+/// single-frame check for sudo.
+pub const MIN_SUDO_LIVENESS_FRAMES: usize = 3;
+/// Default `[pam.sudo] timeout_ms`.
+pub const DEFAULT_SUDO_TIMEOUT_MS: u64 = 4000;
+/// Upper bound (inclusive) for `[pam.sudo] timeout_ms`: past it the password
+/// prompt would be delayed too long.
+pub const MAX_SUDO_TIMEOUT_MS: u64 = 4000;
+/// Default `[pam.sudo] max_failures`.
+pub const DEFAULT_SUDO_MAX_FAILURES: u32 = 3;
+/// Default `[pam.sudo] suspend_secs` (10 minutes).
+pub const DEFAULT_SUDO_SUSPEND_SECS: u64 = 600;
+
+/// `[pam]`: per-PAM-service policies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PamConfig {
+    #[serde(default)]
+    pub sudo: SudoConfig,
+}
+
+/// `[pam.sudo]`: opt-in strict face authentication for sudo. Disabled by
+/// default; see docs/SUDO.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SudoConfig {
+    /// Master switch. While `false` an Authenticate that names a service in
+    /// `service_names` is denied (the PAM module falls through to the password).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// PAM service names (`PAM_SERVICE`) that get the strict profile.
+    #[serde(default = "default_sudo_service_names")]
+    pub service_names: Vec<String>,
+
+    /// Cosine threshold for sudo. `None` = `authentication.similarity_threshold`;
+    /// when set it must be at least that value.
+    #[serde(default)]
+    pub similarity_threshold: Option<f32>,
+
+    /// Frames that must reach the threshold (decision is always `n_of_m`).
+    #[serde(default = "default_sudo_accept_n")]
+    pub accept_n: usize,
+
+    /// Sliding window of recent quality frames.
+    #[serde(default = "default_sudo_window_m")]
+    pub window_m: usize,
+
+    /// Liveness frames (odd, `MIN_SUDO_LIVENESS_FRAMES..=MAX_LIVENESS_FRAMES`).
+    /// Liveness itself is not optional for sudo.
+    #[serde(default = "default_sudo_liveness_frames")]
+    pub liveness_frames: usize,
+
+    /// Total time for one sudo attempt, 1..=`MAX_SUDO_TIMEOUT_MS`.
+    #[serde(default = "default_sudo_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Consecutive failed sudo attempts of one user that suspend face auth.
+    #[serde(default = "default_sudo_max_failures")]
+    pub max_failures: u32,
+
+    /// Suspension length, and the window in which failures are counted.
+    #[serde(default = "default_sudo_suspend_secs")]
+    pub suspend_secs: u64,
+}
+
+fn default_sudo_service_names() -> Vec<String> {
+    vec![DEFAULT_SUDO_SERVICE.to_string()]
+}
+fn default_sudo_accept_n() -> usize {
+    DEFAULT_SUDO_ACCEPT_N
+}
+fn default_sudo_window_m() -> usize {
+    DEFAULT_SUDO_WINDOW_M
+}
+fn default_sudo_liveness_frames() -> usize {
+    MIN_SUDO_LIVENESS_FRAMES
+}
+fn default_sudo_timeout_ms() -> u64 {
+    DEFAULT_SUDO_TIMEOUT_MS
+}
+fn default_sudo_max_failures() -> u32 {
+    DEFAULT_SUDO_MAX_FAILURES
+}
+fn default_sudo_suspend_secs() -> u64 {
+    DEFAULT_SUDO_SUSPEND_SECS
+}
+
+impl Default for SudoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_names: default_sudo_service_names(),
+            similarity_threshold: None,
+            accept_n: DEFAULT_SUDO_ACCEPT_N,
+            window_m: DEFAULT_SUDO_WINDOW_M,
+            liveness_frames: MIN_SUDO_LIVENESS_FRAMES,
+            timeout_ms: DEFAULT_SUDO_TIMEOUT_MS,
+            max_failures: DEFAULT_SUDO_MAX_FAILURES,
+            suspend_secs: DEFAULT_SUDO_SUSPEND_SECS,
+        }
+    }
+}
+
+impl SudoConfig {
+    /// The cosine threshold of the strict profile.
+    pub fn effective_threshold(&self, auth: &AuthConfig) -> f32 {
+        self.similarity_threshold
+            .unwrap_or(auth.similarity_threshold)
+    }
+
+    /// Range checks always; cross-section checks (liveness on, frame budget)
+    /// only when `enabled`, so an unused section never blocks startup.
+    pub fn validate(&self, auth: &AuthConfig) -> Result<(), ConfigError> {
+        let invalid = |msg: String| Err(ConfigError::Invalid(msg));
+        if let Some(t) = self.similarity_threshold {
+            if !(t.is_finite() && t <= 1.0 && t >= auth.similarity_threshold) {
+                return invalid(format!(
+                    "pam.sudo.similarity_threshold = {t} must be at most 1.0 and at least authentication.similarity_threshold = {}",
+                    auth.similarity_threshold
+                ));
+            }
+        }
+        if self.accept_n < 1 || self.accept_n > self.window_m {
+            return invalid(format!(
+                "pam.sudo.accept_n = {} and pam.sudo.window_m = {} must satisfy 1 <= accept_n <= window_m",
+                self.accept_n, self.window_m
+            ));
+        }
+        if self.liveness_frames.is_multiple_of(2)
+            || !(MIN_SUDO_LIVENESS_FRAMES..=MAX_LIVENESS_FRAMES).contains(&self.liveness_frames)
+        {
+            return invalid(format!(
+                "pam.sudo.liveness_frames = {} must be odd and within {MIN_SUDO_LIVENESS_FRAMES}..={MAX_LIVENESS_FRAMES}",
+                self.liveness_frames
+            ));
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > MAX_SUDO_TIMEOUT_MS {
+            return invalid(format!(
+                "pam.sudo.timeout_ms = {} must be within 1..={MAX_SUDO_TIMEOUT_MS}",
+                self.timeout_ms
+            ));
+        }
+        if self.max_failures == 0 || self.suspend_secs == 0 {
+            return invalid(format!(
+                "pam.sudo.max_failures = {} and pam.sudo.suspend_secs = {} must both be at least 1",
+                self.max_failures, self.suspend_secs
+            ));
+        }
+        if let Some(name) = self
+            .service_names
+            .iter()
+            .find(|n| n.is_empty() || n.chars().any(char::is_whitespace))
+        {
+            return invalid(format!(
+                "pam.sudo.service_names contains {name:?}: names must be non-empty without whitespace"
+            ));
+        }
+        if self.enabled {
+            if self.service_names.is_empty() {
+                return invalid("pam.sudo.enabled = true needs at least one pam.sudo.service_names entry".to_string());
+            }
+            if !auth.liveness_enabled {
+                return invalid("pam.sudo.enabled = true requires authentication.liveness_enabled = true (liveness is never advisory for sudo)".to_string());
+            }
+            if auth.auth_frames < self.accept_n {
+                return invalid(format!(
+                    "authentication.auth_frames = {} is the frame budget of the sudo profile and must be >= pam.sudo.accept_n = {}",
+                    auth.auth_frames, self.accept_n
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Default per-uid Authenticate budget per sliding minute.
 pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
 /// Default cap for a single `WaitForMatch` (milliseconds).
@@ -1036,6 +1221,7 @@ impl Default for Config {
             telemetry: TelemetryConfig::default(),
             decision: DecisionConfig::default(),
             liveness: LivenessConfig::default(),
+            pam: PamConfig::default(),
         }
     }
 }
@@ -1046,6 +1232,7 @@ impl Config {
         self.camera.validate()?;
         self.decision.validate()?;
         self.liveness.validate()?;
+        self.pam.sudo.validate(&self.authentication)?;
         let brightness = self.recognition.min_brightness;
         if !(0.0..=MAX_LUMA).contains(&brightness) {
             return Err(ConfigError::Invalid(format!(
@@ -1325,5 +1512,41 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("fourcc"));
+    }
+
+    #[test]
+    fn sudo_defaults_are_disabled_and_old_configs_parse() {
+        let old: Config = toml::from_str("[ml]\ndevice = \"cpu\"\n").unwrap();
+        let sudo = &old.pam.sudo;
+        assert!(!sudo.enabled);
+        assert_eq!(sudo.service_names, vec!["sudo".to_string()]);
+        assert_eq!((sudo.accept_n, sudo.window_m), (4, 5));
+        assert_eq!(sudo.liveness_frames, 3);
+        assert_eq!((sudo.timeout_ms, sudo.max_failures, sudo.suspend_secs), (4000, 3, 600));
+        assert_eq!(sudo.effective_threshold(&old.authentication), 0.4);
+        assert!(old.validate().is_ok());
+    }
+
+    #[test]
+    fn sudo_validation_rejects_weaker_or_inconsistent_settings() {
+        let bad = |toml: &str| {
+            let cfg: Config = toml::from_str(toml).unwrap();
+            cfg.validate().unwrap_err().to_string()
+        };
+        assert!(bad("[pam.sudo]\nsimilarity_threshold = 0.3").contains("similarity_threshold"));
+        assert!(bad("[pam.sudo]\naccept_n = 6").contains("accept_n"));
+        assert!(bad("[pam.sudo]\nliveness_frames = 1").contains("liveness_frames"));
+        assert!(bad("[pam.sudo]\nliveness_frames = 4").contains("liveness_frames"));
+        assert!(bad("[pam.sudo]\ntimeout_ms = 4001").contains("timeout_ms"));
+        assert!(bad("[pam.sudo]\nmax_failures = 0").contains("max_failures"));
+        assert!(bad("[pam.sudo]\nservice_names = [\"su do\"]").contains("service_names"));
+        assert!(bad("[pam.sudo]\nenabled = true\nservice_names = []").contains("service_names"));
+        assert!(bad("[authentication]\nliveness_enabled = false\n[pam.sudo]\nenabled = true")
+            .contains("liveness_enabled"));
+        assert!(bad("[authentication]\nauth_frames = 3\n[pam.sudo]\nenabled = true")
+            .contains("auth_frames"));
+        let ok: Config = toml::from_str("[pam.sudo]\nenabled = true\nsimilarity_threshold = 0.5").unwrap();
+        assert!(ok.validate().is_ok());
+        assert_eq!(ok.pam.sudo.effective_threshold(&ok.authentication), 0.5);
     }
 }
