@@ -12,7 +12,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "doorman-sudo-pam.sh"
-ACK = "--i-have-a-root-shell-open"
+ACK = "--i-acknowledge-root-shell-open"
 MODULE_LINE = "auth sufficient pam_doorman.so"
 
 DEBIAN_SUDO = """#%PAM-1.0
@@ -185,3 +185,49 @@ def test_leaves_no_temp_files_behind(env):
     run(env, "disable", ACK)
     leftovers = [p.name for p in Path(env["PAM_DIR"]).iterdir() if p.name.startswith(".sudo.")]
     assert leftovers == []
+
+
+def stub_session_tools(tmp_path, env, who_output="", loginctl_output=""):
+    """Put fake `who` / `loginctl` first on PATH, printing the given text."""
+    bindir = tmp_path / "stubs"
+    bindir.mkdir()
+    for name, output in (("who", who_output), ("loginctl", loginctl_output)):
+        stub = bindir / name
+        stub.write_text(f"#!/bin/sh\ncat <<'END'\n{output}\nEND\n")
+        stub.chmod(0o755)
+    return {**env, "PATH": f"{bindir}:{env['PATH']}"}
+
+
+def test_old_flag_name_is_no_longer_accepted(env):
+    sudo_file(env).write_text(DEBIAN_SUDO)
+    result = run(env, "enable", "--i-have-a-root-shell-open")
+    assert result.returncode == REFUSED
+    assert ACK in result.stderr
+    assert sudo_file(env).read_text() == DEBIAN_SUDO
+
+
+def test_warns_but_proceeds_when_no_root_session_is_visible(env, tmp_path):
+    sudo_file(env).write_text(DEBIAN_SUDO)
+    env = stub_session_tools(tmp_path, env, who_output="alice  tty1  2026-11-01 10:00")
+    result = run(env, "enable", ACK)
+    assert result.returncode == 0, result.stderr
+    assert "no other root session found" in result.stderr
+    assert MODULE_LINE in sudo_file(env).read_text()
+
+
+def test_no_warning_when_who_shows_a_root_session(env, tmp_path):
+    sudo_file(env).write_text(DEBIAN_SUDO)
+    env = stub_session_tools(tmp_path, env, who_output="root  pts/3  2026-11-01 10:00")
+    result = run(env, "enable", ACK)
+    assert result.returncode == 0, result.stderr
+    assert "no other root session found" not in result.stderr
+
+
+def test_no_warning_when_loginctl_shows_a_root_session(env, tmp_path):
+    sudo_file(env).write_text(DEBIAN_SUDO)
+    env = stub_session_tools(
+        tmp_path, env, loginctl_output="  c2  0  root  seat0  tty2"
+    )
+    result = run(env, "enable", ACK)
+    assert result.returncode == 0, result.stderr
+    assert "no other root session found" not in result.stderr
