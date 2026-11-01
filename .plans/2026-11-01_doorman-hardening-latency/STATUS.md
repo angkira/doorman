@@ -36,7 +36,7 @@ Branch: `claude/great-ride-i3oqn6` (all workstreams merged sequentially; no per-
 7. sudo last, with a second root shell open: `docs/SUDO.md`.
 
 ## Round 2 (owner review, `ROUND2.md`)
-Process: owner chose to keep ONE branch (`claude/great-ride-i3oqn6`) with a single PR to `main`. A 12-PR stack (#1–#12) was briefly opened and then closed unmerged; its `pr/*` branches were deleted.
+Process: owner chose to keep ONE branch (`claude/great-ride-i3oqn6`) with a single PR to `main`. A 12-PR stack (#1–#12) was briefly opened and then closed unmerged; it is superseded by PR #13. Its `pr/*` branches still exist on origin: the cloud session's git proxy refuses branch deletion. Owner may delete them (`git push origin --delete pr/01-ort-pin … pr/12-round2-review-fixes`); nothing on them is needed.
 
 Done (commits after `a0edca4`, tests in each commit):
 - Task 1: `owner/host-facts` merged into this branch (`a0edca4`).
@@ -44,8 +44,10 @@ Done (commits after `a0edca4`, tests in each commit):
 - Task 3: M1 (64 KiB line cap, `max_connections_per_uid=8`), M2 (deciding frame must pass depth; residual risk: middle frames unchecked, mean mode weaker than n_of_m), M3 (0600 at creation, fsync, `StateDirectoryMode=0700`), M4 (`embeddings.bin.v1.bak` once), Low 5–8. Optional Low items not done.
 - Task 4, answered with evidence in `docs/host-facts-answers.md`:
   1. V4L2 0.1 ms failure: CONFIRMED. 5f78657 requested `Closest(YUYV 1280x720@30)`; host YUYV offers only 640x480/640x360; error chain logged with `{}` hid the detail. HEAD selects MJPG 1280x720@30 (table test on the host format list).
-  2. Depth gate: in-process Depth-Anything-V2-Small on ORT CPU (`backend="ort"`, `device="cpu"`); no fallback path. "models_dir does not exist" NOT established (the host listing was truncated by `head -3`); `doorman install` copies the depth model to `/var/lib/doorman/models`. Host check: `ls -l /var/lib/doorman/models`.
+  2. Depth gate: in-process Depth-Anything-V2-Small on ORT CPU (`backend="ort"`, `device="cpu"`); no fallback path. `/var/lib/doorman/models` exists (owner confirmed in ROUND3/HOST-FACTS §8) and holds `depth_anything_v2_small_fp32.onnx` plus `depth.ncnn.*`; which depth path the config selects is answered in `docs/host-facts-answers.md` "Round 3".
   3. ORT: deb build uses `ort/download-binaries` ⇒ statically linked; distro 1.21 and `/usr/lib/doorman/libonnxruntime.so` are not loaded unless the ROCm EP was installed. Startup now logs any `libonnxruntime` mapping from `/proc/self/maps`. Host check: `grep -i onnx /proc/$(pidof doormand)/maps`.
 - Correction to round 1: the "ORT bundled" claim stands; the earlier note that the host config has `keep_raw_frames=true` comes from the audit and still applies.
 
-Not verified anywhere yet: default-feature build and GitHub CI runs (see PR checks), all host checklists.
+CI on PR #13 @81a9686 (owner-verified): `check`, `ort-typecheck`, `deb` pass — so the default-feature build compiles and tests on GitHub. `shellcheck` failed (selected `.plans/HOST-FACTS.md` as a script) and `python` failed (numpy missing) — both fixed in round 3.
+
+Still unverified: all host checklists; ORT linkage on the running daemon (owner: `sudo grep -ci onnx /proc/$(pidof doormand)/maps`).
