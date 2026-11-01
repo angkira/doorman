@@ -347,6 +347,11 @@ pub struct EnrollmentConfig {
 
     #[serde(default = "default_min_valid_frames")]
     pub min_valid_frames: usize,
+
+    /// Enrolment drops a captured template whose cosine to an already kept one
+    /// is at or above this value (near-duplicate pruning). Range (0, 1].
+    #[serde(default = "default_prune_cosine")]
+    pub prune_cosine: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -726,6 +731,9 @@ fn default_enroll_frames() -> usize {
 fn default_min_valid_frames() -> usize {
     5
 }
+fn default_prune_cosine() -> f32 {
+    0.95
+}
 fn default_aggregation_window() -> usize {
     5
 }
@@ -866,6 +874,7 @@ impl Default for EnrollmentConfig {
         Self {
             enroll_frames: default_enroll_frames(),
             min_valid_frames: default_min_valid_frames(),
+            prune_cosine: default_prune_cosine(),
         }
     }
 }
@@ -919,6 +928,12 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.camera.validate()?;
         self.decision.validate()?;
+        let prune = self.enrollment.prune_cosine;
+        if !(prune > 0.0 && prune <= 1.0) {
+            return Err(ConfigError::Invalid(format!(
+                "enrollment.prune_cosine = {prune} is out of range (0, 1]"
+            )));
+        }
         if self.decision.mode == DecisionMode::NOfM
             && self.authentication.auth_frames < self.decision.accept_n
         {
@@ -1053,6 +1068,18 @@ mod tests {
         assert_eq!(new.decision.mode, DecisionMode::NOfM);
         assert_eq!(new.decision.template_score, TemplateScore::Top3Mean);
         assert!(new.validate().is_ok());
+    }
+
+    #[test]
+    fn enrollment_prune_cosine_defaults_and_is_validated() {
+        let old: Config = toml::from_str("[enrollment]\nenroll_frames = 20\n").unwrap();
+        assert_eq!(old.enrollment.prune_cosine, 0.95);
+        for bad in ["0.0", "1.5", "-0.1"] {
+            let cfg: Config =
+                toml::from_str(&format!("[enrollment]\nprune_cosine = {bad}\n")).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("prune_cosine"), "{err}");
+        }
     }
 
     #[test]

@@ -1009,23 +1009,30 @@ async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
     //      farthest-point selection, so the stored set is spread across conditions
     //      rather than clustered on one.
     const TARGET_EMBEDDINGS: usize = 30;
-    let mut pool = valid_embeddings;
-    {
+    let existing_templates: Vec<Vec<f32>> = {
         let storage = state.storage.read().await;
-        if let Some(existing) = storage.get_embeddings(username) {
-            info!(
-                "Capacious enroll: merging {} new + {} existing embeddings for {}",
-                pool.len(),
-                existing.len(),
-                username
-            );
-            pool.extend(existing.iter().cloned());
-        }
+        storage
+            .get_embeddings(username)
+            .cloned()
+            .unwrap_or_default()
+    };
+    if !existing_templates.is_empty() {
+        info!(
+            "Capacious enroll: merging {} new + {} existing embeddings for {}",
+            valid_embeddings.len(),
+            existing_templates.len(),
+            username
+        );
     }
-    let selected_embeddings = if pool.len() <= TARGET_EMBEDDINGS {
-        pool
-    } else {
-        select_diverse_embeddings(pool, TARGET_EMBEDDINGS)
+    let selected_embeddings = match crate::pipeline::plan_templates(
+        valid_embeddings,
+        &existing_templates,
+        crate::pipeline::EnrollMode::Merge,
+        state.config.enrollment.prune_cosine,
+        TARGET_EMBEDDINGS,
+    ) {
+        Ok(templates) => templates,
+        Err(reason) => return Response::Failure { reason },
     };
 
     info!(
