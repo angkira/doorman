@@ -308,10 +308,35 @@ where
     .await
     .context("timed out waiting for the request line")??;
     let response = match gated {
+        // A WaitForMatch can run for a minute and holds the camera on; its
+        // client cancels it by closing the connection, so stop working then.
+        Gated::Allowed(request @ Request::WaitForMatch { .. }) => {
+            tokio::select! {
+                response = handler(peer, request) => response,
+                () = peer_closed(&mut reader) => {
+                    info!(peer_uid = peer.uid, "WaitForMatch cancelled: client disconnected");
+                    return Ok(());
+                }
+            }
+        }
         Gated::Allowed(request) => handler(peer, request).await,
         Gated::Rejected(response) => response,
     };
     write_response(reader.get_mut(), &response).await
+}
+
+/// Resolves when the peer closes (or breaks) the connection; stray bytes after
+/// the request line are discarded.
+async fn peer_closed(reader: &mut BufReader<UnixStream>) {
+    loop {
+        match reader.fill_buf().await {
+            Ok([]) | Err(_) => return,
+            Ok(stray) => {
+                let n = stray.len();
+                reader.consume(n);
+            }
+        }
+    }
 }
 
 /// Accept loop for the command socket. Every connection is served in its own

@@ -5,6 +5,7 @@ pub mod ipc_policy;
 pub mod ml;
 pub mod storage;
 pub mod training;
+pub mod unlock_wait;
 
 // Re-export commonly used types
 pub use camera::Camera;

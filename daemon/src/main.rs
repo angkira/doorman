@@ -35,6 +35,10 @@ pub struct DaemonState {
     pub debug_broadcaster: Arc<debug_stream::DebugStreamBroadcaster>,
     pub frame_broadcaster: Option<Arc<frame_stream::FrameStreamBroadcaster>>,
     pub system_locked: Arc<RwLock<bool>>,
+    /// Lock supervisor gate `locked && !idle`. `None` when the daemon is not
+    /// lock-gated (`--user`/preview/dev mode). `WaitForMatch` only attempts
+    /// recognition while this is `true`.
+    pub armed: Option<tokio::sync::watch::Receiver<bool>>,
     /// On-demand camera capture leases. IPC operations that need live frames
     /// (enroll, `test`/PAM auth) increment this; the camera gate keeps the camera ON
     /// while it is > 0, so capture works even when the screen is unlocked and the
@@ -428,6 +432,21 @@ async fn main() -> Result<()> {
     info!("Initializing frame stream broadcaster...");
     let frame_broadcaster = Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30)));  // Buffer 30 frames
 
+    // Lock supervisor (SYSTEM-daemon mode only). Connects to logind on the
+    // system bus, resolves the active graphical seat0 session, and exposes
+    // `armed = LockedHint && !IdleHint` plus a lock-generation counter and an
+    // `Unlocker` handle. Robust by construction: any failure (no bus, no
+    // session) yields `armed=false` and `unlocker=None` without crashing.
+    //
+    // We skip it in `--user`/dev mode: that path targets a developer's own
+    // session and has no need to lock-gate or proactively unlock. Spawned before
+    // the state so `WaitForMatch` can share the `armed` gate.
+    let lock_sup = if config.daemon.preview_mode || config.daemon.user_mode {
+        None
+    } else {
+        Some(lock_supervisor::spawn().await)
+    };
+
     let state = DaemonState {
         latest_frame: latest_frame_rx,
         ml_pipeline,
@@ -438,6 +457,7 @@ async fn main() -> Result<()> {
         debug_broadcaster: debug_broadcaster.clone(),
         frame_broadcaster: frame_broadcaster.clone(),
         system_locked: Arc::new(RwLock::new(initial_locked)),
+        armed: lock_sup.as_ref().map(|sup| sup.armed_rx.clone()),
         capture_requests: capture_requests.clone(),
     };
 
@@ -529,18 +549,7 @@ async fn main() -> Result<()> {
     } else {
         info!("Detection/recognition pipeline idle (production mode - starts on preview connect, auth runs on-demand detection)");
 
-        // Lock supervisor (SYSTEM-daemon mode only). Connects to logind on the
-        // system bus, resolves the active graphical seat0 session, and exposes
-        // `armed = LockedHint && !IdleHint` plus a lock-generation counter and an
-        // `Unlocker` handle. Robust by construction: any failure (no bus, no
-        // session) yields `armed=false` and `unlocker=None` without crashing.
-        //
-        // We skip it in `--user`/dev mode: that path targets a developer's own
-        // session and has no need to lock-gate or proactively unlock.
-        let (armed_rx, unlock_ctx) = if config.daemon.user_mode {
-            (None, None)
-        } else {
-            let sup = lock_supervisor::spawn().await;
+        let (armed_rx, unlock_ctx) = if let Some(sup) = lock_sup.as_ref() {
             // Build the Stage-B unlock context only when proactive unlock is
             // enabled AND a session was actually resolved (so we have an Unlocker).
             // When disabled, the pipeline is still lock-GATED via `armed_rx`; it
@@ -555,6 +564,8 @@ async fn main() -> Result<()> {
                 None
             };
             (Some(sup.armed_rx.clone()), unlock_ctx)
+        } else {
+            (None, None)
         };
 
         // Camera capture gate (system mode): drive `capture_active` from armed

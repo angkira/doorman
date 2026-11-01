@@ -6,7 +6,9 @@ use doorman_shared::{
     DaemonInfo, ENROLL_DURATION_SECS, EnrollmentPhase, Request, Response, ResponseData,
     SIMILARITY_THRESHOLD, StreamMessage,
 };
+use async_trait::async_trait;
 use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
+use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
 use image::GenericImageView;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -95,9 +97,10 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
                 reason: "GetLatestDetection not implemented".to_string(),
             }
         }
-        Request::WaitForMatch { .. } => Response::Failure {
-            reason: "WaitForMatch not implemented".to_string(),
-        },
+        Request::WaitForMatch {
+            username,
+            timeout_ms,
+        } => handle_wait_for_match(state, &username, timeout_ms).await,
         Request::Shutdown => {
             info!("Shutdown requested");
             Response::Success {
@@ -120,6 +123,68 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
         );
     }
 
+    response
+}
+
+/// `WaitForMatch` decision source: every attempt is a complete `Authenticate`
+/// (quality gate, liveness, aggregated threshold), so a `Matched` is never
+/// weaker than an `Authenticate` success.
+struct AuthenticateSource<'a> {
+    state: &'a DaemonState,
+}
+
+#[async_trait]
+impl DecisionSource for AuthenticateSource<'_> {
+    async fn attempt(&self, username: &str) -> AttemptOutcome {
+        if self
+            .state
+            .storage
+            .read()
+            .await
+            .get_embeddings(username)
+            .is_none()
+        {
+            return AttemptOutcome::NotEnrolled;
+        }
+        match handle_authenticate(self.state, username).await {
+            Response::Success { message, .. } => {
+                match message
+                    .as_deref()
+                    .and_then(unlock_wait::parse_authenticated_similarity)
+                {
+                    Some(similarity) => AttemptOutcome::Matched { similarity },
+                    None => {
+                        // Fail closed: a success we cannot read is not a match.
+                        error!("Authenticate succeeded with an unparsable message: {message:?}");
+                        AttemptOutcome::NotMatched
+                    }
+                }
+            }
+            _ => AttemptOutcome::NotMatched,
+        }
+    }
+}
+
+async fn handle_wait_for_match(state: &DaemonState, username: &str, timeout_ms: u64) -> Response {
+    let timeout =
+        unlock_wait::effective_timeout(timeout_ms, state.config.ipc.wait_for_match_max_ms);
+    info!(
+        timeout_ms = timeout.as_millis() as u64,
+        "WaitForMatch request"
+    );
+    let response = unlock_wait::wait_for_match(
+        &AuthenticateSource { state },
+        state.armed.clone(),
+        username,
+        timeout,
+    )
+    .await;
+    match &response {
+        Response::Matched { similarity, .. } => {
+            info!(similarity, "WaitForMatch decision: matched")
+        }
+        other => info!("WaitForMatch decision: {other:?}"),
+    }
     response
 }
 
@@ -522,10 +587,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             username, best_similarity
         );
         Response::Success {
-            message: Some(format!(
-                "Authenticated (confidence: {:.2}%)",
-                best_similarity * 100.0
-            )),
+            message: Some(unlock_wait::authenticated_message(best_similarity)),
             data: None,
         }
     } else {
