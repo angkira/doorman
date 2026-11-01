@@ -9,7 +9,7 @@
 #
 # Prerequisites created by `make install`:
 #   - system user/group `doorman` (member of `video` for camera access)
-#   - /var/lib/doorman           (0750, owned by doorman:doorman) — embeddings
+#   - /var/lib/doorman           (0700, owned by doorman:doorman) — embeddings
 #   - /var/lib/doorman/models    — ONNX models (or symlink to /usr/share/doorman/models)
 #
 # NOTE: this is the SYSTEM unit. For single-user dev on a desktop with PipeWire,
@@ -64,6 +64,7 @@ RestrictNamespaces=true
 # Writable paths: embeddings/state and the listening socket.
 # systemd creates /run/doorman (RuntimeDirectory) as doorman:doorman.
 StateDirectory=doorman
+StateDirectoryMode=0700
 RuntimeDirectory=doorman
 ReadWritePaths=/var/lib/doorman
 
