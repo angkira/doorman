@@ -270,7 +270,12 @@ mod tests {
             ("sudo-i not listed", Some("sudo-i"), &on, Profile::Default),
             ("case differs", Some("Sudo"), &on, Profile::Default),
             ("empty service", Some(""), &on, Profile::Default),
-            ("sudo, off", Some("sudo"), &off, Profile::Denied(DENIED_SUDO_DISABLED)),
+            (
+                "sudo, off",
+                Some("sudo"),
+                &off,
+                Profile::Denied(DENIED_SUDO_DISABLED),
+            ),
             ("sudo, on", Some("sudo"), &on, strict_default),
             (
                 "sudo-i listed, threshold override",
@@ -373,7 +378,10 @@ mod tests {
         assert!(!counts_as_failure(&AuthOutcome::CameraUnavailable {
             message: String::new()
         }));
-        assert_eq!(outcome_code(&AuthOutcome::LivenessError), code::LIVENESS_UNAVAILABLE);
+        assert_eq!(
+            outcome_code(&AuthOutcome::LivenessError),
+            code::LIVENESS_UNAVAILABLE
+        );
     }
 
     #[test]

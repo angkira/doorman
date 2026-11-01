@@ -47,8 +47,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -272,7 +272,10 @@ fn guarded(body: impl FnOnce() -> libc::c_int) -> libc::c_int {
 }
 
 /// A string PAM item (`PAM_SERVICE`, `PAM_TTY`), or `None` when unset or not UTF-8.
-unsafe fn pam_item_string(pamh: *mut pam_sys::PamHandle, item: pam_sys::PamItemType) -> Option<String> {
+unsafe fn pam_item_string(
+    pamh: *mut pam_sys::PamHandle,
+    item: pam_sys::PamItemType,
+) -> Option<String> {
     let mut ptr: *const libc::c_void = std::ptr::null();
     let ret = pam_sys::raw::pam_get_item(pamh, item as libc::c_int, &mut ptr);
     if ret != PAM_SUCCESS || ptr.is_null() {
@@ -285,6 +288,8 @@ unsafe fn pam_item_string(pamh: *mut pam_sys::PamHandle, item: pam_sys::PamItemT
         .filter(|s| !s.is_empty())
 }
 
+// `pamh` is an opaque handle that is only handed back to libpam, never dereferenced here.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut pam_sys::PamHandle,
@@ -360,10 +365,7 @@ mod tests {
 
     /// Mock daemon: answers one connection with `reply` (nothing for `None`,
     /// holding the connection open), and returns the request line it received.
-    fn mock_daemon(
-        path: &Path,
-        reply: Option<&'static str>,
-    ) -> thread::JoinHandle<String> {
+    fn mock_daemon(path: &Path, reply: Option<&'static str>) -> thread::JoinHandle<String> {
         let listener = UnixListener::bind(path).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -403,8 +405,16 @@ mod tests {
     fn return_codes_for_each_daemon_reply() {
         let cases: [(&str, &'static str, libc::c_int); 7] = [
             ("success", r#"{"status":"success"}"#, PAM_SUCCESS),
-            ("failure", r#"{"status":"failure","reason":"x"}"#, PAM_AUTH_ERR),
-            ("denied", r#"{"status":"denied","reason":"x"}"#, PAM_AUTHINFO_UNAVAIL),
+            (
+                "failure",
+                r#"{"status":"failure","reason":"x"}"#,
+                PAM_AUTH_ERR,
+            ),
+            (
+                "denied",
+                r#"{"status":"denied","reason":"x"}"#,
+                PAM_AUTHINFO_UNAVAIL,
+            ),
             (
                 "rate limited",
                 r#"{"status":"rate_limited","retry_after_s":5}"#,
@@ -481,13 +491,20 @@ mod tests {
         let daemon = mock_daemon(&path, None);
         let started = Instant::now();
         assert_eq!(run(&path, Some("sudo")), PAM_AUTHINFO_UNAVAIL);
-        assert!(started.elapsed() < TEST_DEADLINE + FAST, "took {:?}", started.elapsed());
+        assert!(
+            started.elapsed() < TEST_DEADLINE + FAST,
+            "took {:?}",
+            started.elapsed()
+        );
         daemon.join().unwrap();
     }
 
     #[test]
     fn sudo_gets_the_longer_reply_budget() {
-        assert_eq!(read_timeout(Some("login")), Duration::from_secs(AUTH_TIMEOUT_SECS));
+        assert_eq!(
+            read_timeout(Some("login")),
+            Duration::from_secs(AUTH_TIMEOUT_SECS)
+        );
         assert_eq!(read_timeout(None), Duration::from_secs(AUTH_TIMEOUT_SECS));
         assert!(read_timeout(Some("sudo")) > Duration::from_millis(MAX_SUDO_TIMEOUT_MS));
         assert_eq!(read_timeout(Some("sudo-i")), read_timeout(Some("sudo")));
