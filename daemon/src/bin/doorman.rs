@@ -223,19 +223,23 @@ enum Command {
         /// Skip the confirmation prompt.
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Auto-detect the execution provider (default).
-        #[arg(long, conflicts_with_all = ["cpu", "rocm", "ncnn"])]
+        /// Default: CPU on Linux (CoreML on macOS). A GPU is never picked
+        /// automatically; use --rocm, --cuda or --ncnn to opt in.
+        #[arg(long, conflicts_with_all = ["cpu", "rocm", "cuda", "ncnn"])]
         auto: bool,
         /// Force the CPU backend.
-        #[arg(long, conflicts_with_all = ["auto", "rocm", "ncnn"])]
+        #[arg(long, conflicts_with_all = ["auto", "rocm", "cuda", "ncnn"])]
         cpu: bool,
-        /// Force the AMD ROCm backend (iGPU).
-        #[arg(long, conflicts_with_all = ["auto", "cpu", "ncnn"])]
+        /// Opt in to the AMD ROCm backend (iGPU).
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "cuda", "ncnn"])]
         rocm: bool,
+        /// Opt in to the NVIDIA CUDA backend.
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm", "ncnn"])]
+        cuda: bool,
         /// Force the ncnn-Vulkan hybrid: depth-liveness on the iGPU via Vulkan,
         /// detection + recognition on the CPU (ORT). Builds libncnn + converts the
         /// depth model at install time.
-        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm"])]
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm", "cuda"])]
         ncnn: bool,
         /// Integrate with screen unlock only (default, safest).
         #[arg(long, conflicts_with_all = ["login", "sudo", "no_pam"])]
@@ -408,6 +412,7 @@ fn main() {
             auto: _,
             cpu,
             rocm,
+            cuda,
             ncnn,
             screen_unlock: _,
             login,
@@ -420,6 +425,7 @@ fn main() {
             *yes,
             *cpu,
             *rocm,
+            *cuda,
             *ncnn,
             *login,
             *sudo,
@@ -621,6 +627,7 @@ fn cmd_install(
     yes: bool,
     cpu: bool,
     rocm: bool,
+    cuda: bool,
     ncnn: bool,
     login: bool,
     sudo: bool,
@@ -632,6 +639,8 @@ fn cmd_install(
         EpChoice::Cpu
     } else if rocm {
         EpChoice::Rocm
+    } else if cuda {
+        EpChoice::Cuda
     } else if ncnn {
         EpChoice::Ncnn
     } else {

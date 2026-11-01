@@ -34,6 +34,7 @@ pub enum EpChoice {
     Auto,
     Cpu,
     Rocm,
+    Cuda,
     /// ncnn-Vulkan hybrid: depth-liveness on the iGPU via ncnn, detection +
     /// embedding + liveness on the ORT CPU backend.
     Ncnn,
@@ -291,25 +292,30 @@ pub fn pick_ep(
             };
             (Ep::Rocm, note)
         }
+        EpChoice::Cuda => (Ep::Cuda, "forced --cuda".to_string()),
+        // Auto never selects a Linux GPU: a GPU backend needs an explicit
+        // `--rocm`, `--cuda` or `--ncnn`. Detection only changes the hint.
         EpChoice::Auto => {
             if is_macos {
                 (Ep::CoreMl, "macOS -> CoreML EP".to_string())
             } else if has_kfd && rocm_so_present {
                 (
-                    Ep::Rocm,
-                    "AMD ROCm (/sys/class/kfd present + ROCm ORT .so found) -> iGPU EP".to_string(),
+                    Ep::Cpu,
+                    "AMD ROCm available, but a GPU is opt-in -> CPU (pass --rocm to use it)"
+                        .to_string(),
                 )
-            } else if has_kfd && !rocm_so_present {
+            } else if has_kfd {
                 (
                     Ep::Cpu,
-                    "AMD GPU present but ROCm ONNX Runtime .so missing -> falling back to CPU \
-                     (build it with build_onnxruntime_rocm.sh, then --rocm)"
+                    "AMD GPU present, GPU is opt-in -> CPU (build ROCm ONNX Runtime with \
+                     build_onnxruntime_rocm.sh, then pass --rocm)"
                         .to_string(),
                 )
             } else if has_nvidia {
                 (
-                    Ep::Cuda,
-                    "NVIDIA detected (nvidia-smi) -> CUDA EP".to_string(),
+                    Ep::Cpu,
+                    "NVIDIA detected, but a GPU is opt-in -> CPU (pass --cuda to use it)"
+                        .to_string(),
                 )
             } else {
                 (Ep::Cpu, "no supported GPU detected -> CPU".to_string())
@@ -2735,21 +2741,41 @@ mod tests {
     }
 
     #[test]
-    fn ep_auto_amd_with_so_picks_rocm() {
-        let (ep, _) = pick_ep(EpChoice::Auto, true, true, true, false);
-        assert_eq!(ep, Ep::Rocm); // NVIDIA present but dGPU reserved -> ROCm wins
+    fn ep_auto_never_picks_a_linux_gpu_without_opt_in() {
+        for has_kfd in [false, true] {
+            for rocm_so in [false, true] {
+                for has_nvidia in [false, true] {
+                    let (ep, _) = pick_ep(EpChoice::Auto, has_kfd, rocm_so, has_nvidia, false);
+                    assert_eq!(
+                        ep,
+                        Ep::Cpu,
+                        "kfd={has_kfd} rocm_so={rocm_so} nvidia={has_nvidia}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ep_gpu_is_selected_only_by_explicit_flags() {
+        assert_eq!(
+            pick_ep(EpChoice::Rocm, false, false, false, false).0,
+            Ep::Rocm
+        );
+        assert_eq!(
+            pick_ep(EpChoice::Cuda, false, false, false, false).0,
+            Ep::Cuda
+        );
+        assert_eq!(
+            pick_ep(EpChoice::Ncnn, false, false, false, false).0,
+            Ep::Ncnn
+        );
     }
 
     #[test]
     fn ep_auto_amd_without_so_falls_back_to_cpu() {
         let (ep, _) = pick_ep(EpChoice::Auto, true, false, false, false);
         assert_eq!(ep, Ep::Cpu);
-    }
-
-    #[test]
-    fn ep_auto_nvidia_only_picks_cuda() {
-        let (ep, _) = pick_ep(EpChoice::Auto, false, false, true, false);
-        assert_eq!(ep, Ep::Cuda);
     }
 
     #[test]
