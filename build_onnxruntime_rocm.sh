@@ -35,13 +35,13 @@ if [ ! -d "${BUILD_DIR}/onnxruntime" ]; then
     cd "${BUILD_DIR}"
     git clone --recursive https://github.com/microsoft/onnxruntime.git
     cd onnxruntime
-    git checkout ${ORT_VERSION}
+    git checkout "${ORT_VERSION}"
     git submodule update --init --recursive
 else
     echo "Using existing source at ${BUILD_DIR}/onnxruntime"
     cd "${BUILD_DIR}/onnxruntime"
     git fetch
-    git checkout ${ORT_VERSION}
+    git checkout "${ORT_VERSION}"
     git submodule update --init --recursive
 fi
 

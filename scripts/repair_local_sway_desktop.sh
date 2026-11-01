@@ -43,6 +43,7 @@ systemctl restart doormand.service
 
 echo "SDDM default session:"
 find /etc/sddm.conf.d -maxdepth 1 -name '*.conf' -exec grep -H '^Session=' {} + 2>/dev/null || true
+# shellcheck disable=SC2015 # best-effort diagnostic: '|| true' must run on either failure
 [ -f /etc/sddm.conf ] && grep -H '^Session=' /etc/sddm.conf || true
 systemctl is-active doormand.service || true
 systemctl is-active doorman-depthd.service || true

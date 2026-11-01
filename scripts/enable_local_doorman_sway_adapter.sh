@@ -246,7 +246,7 @@ done
 
 systemctl restart doormand.service
 
-for sock in "/run/user/${uid}"/sway-ipc."${uid}".*.sock; do
+for sock in "/run/user/${uid}/sway-ipc.${uid}".*.sock; do
     [ -S "$sock" ] || continue
     runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" SWAYSOCK="$sock" swaymsg reload >/dev/null 2>&1 || true
     runuser -u "$target_user" -- env XDG_RUNTIME_DIR="/run/user/${uid}" SWAYSOCK="$sock" pkill -x swayidle >/dev/null 2>&1 || true

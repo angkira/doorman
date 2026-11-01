@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+repo_dir="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 stamp="$(date +%Y%m%d-%H%M%S)"
 
 backup_file() {
