@@ -20,6 +20,12 @@ pub enum ConfigError {
 
 /// Upper bound (inclusive) for `[camera] warmup_frames`.
 pub const MAX_WARMUP_FRAMES: u32 = 10;
+/// Upper bound (inclusive, ms) for `[camera] prearm_window_ms`.
+pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
+
+fn default_prearm_window_ms() -> u32 {
+    5000
+}
 
 /// Accepted `[camera] fourcc` spellings (case-insensitive) for MJPEG.
 const FOURCC_MJPEG_NAMES: [&str; 2] = ["MJPG", "MJPEG"];
@@ -185,6 +191,12 @@ pub struct CameraConfig {
     /// recommended (see docs/camera.md).
     #[serde(default)]
     pub prearm_on_lock: bool,
+
+    /// With `prearm_on_lock`, how long after the lock event (LockedHint
+    /// false->true) the camera may stay open while the display is still idle.
+    /// After the window the normal `locked && !idle` rule applies. 0..=30000.
+    #[serde(default = "default_prearm_window_ms")]
+    pub prearm_window_ms: u32,
 }
 
 impl CameraConfig {
@@ -194,6 +206,12 @@ impl CameraConfig {
             return Err(ConfigError::Invalid(format!(
                 "camera.warmup_frames = {} is out of range (0..={MAX_WARMUP_FRAMES})",
                 self.warmup_frames
+            )));
+        }
+        if self.prearm_window_ms > MAX_PREARM_WINDOW_MS {
+            return Err(ConfigError::Invalid(format!(
+                "camera.prearm_window_ms = {} is out of range (0..={MAX_PREARM_WINDOW_MS})",
+                self.prearm_window_ms
             )));
         }
         self.fourcc()?;
@@ -710,6 +728,7 @@ impl Default for CameraConfig {
             fourcc: None,
             warmup_frames: 0,
             prearm_on_lock: false,
+            prearm_window_ms: default_prearm_window_ms(),
         }
     }
 }
@@ -911,6 +930,7 @@ mod tests {
         assert_eq!(old.camera.fourcc, None);
         assert_eq!(old.camera.warmup_frames, 0);
         assert!(!old.camera.prearm_on_lock);
+        assert_eq!(old.camera.prearm_window_ms, 5000);
         assert!(old.camera.validate().is_ok());
 
         let new: Config = toml::from_str(
@@ -932,6 +952,20 @@ mod tests {
             .to_string();
         assert!(
             err.contains("warmup_frames") && err.contains("0..=10"),
+            "{err}"
+        );
+
+        let window = |prearm_window_ms| CameraConfig {
+            prearm_window_ms,
+            ..CameraConfig::default()
+        };
+        assert!(window(MAX_PREARM_WINDOW_MS).validate().is_ok());
+        let err = window(MAX_PREARM_WINDOW_MS + 1)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("prearm_window_ms") && err.contains("0..=30000"),
             "{err}"
         );
 

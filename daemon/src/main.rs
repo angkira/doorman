@@ -574,11 +574,15 @@ async fn main() -> Result<()> {
             let db = debug_broadcaster.clone();
             let always = config.camera.always_track;
             let prearm = config.camera.prearm_on_lock;
+            let prearm_window =
+                std::time::Duration::from_millis(u64::from(config.camera.prearm_window_ms));
             let reqs = capture_requests.clone();
             tokio::spawn(async move {
                 let mut gate_armed = gate_armed;
                 let mut gate_locked = gate_locked;
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+                let clock = tokio::time::Instant::now();
+                let mut edge = camera::gate::LockEdge::default();
                 loop {
                     let subs = fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0)
                         + db.receiver_count();
@@ -586,10 +590,13 @@ async fn main() -> Result<()> {
                     let on_demand = reqs.load(std::sync::atomic::Ordering::SeqCst) > 0;
                     // armed = locked && !idle, so idle follows from the two hints.
                     let locked = *gate_locked.borrow();
+                    let since_lock_edge = edge.update(locked, clock.elapsed());
                     let want = camera::gate::camera_wanted(camera::gate::GateInputs {
                         locked,
                         idle: locked && !*gate_armed.borrow(),
                         prearm_on_lock: prearm,
+                        prearm_window,
+                        since_lock_edge,
                         always_track: always,
                         stream_subscribers: subs,
                         capture_leases: usize::from(on_demand),

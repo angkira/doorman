@@ -88,7 +88,8 @@ Hypotheses, most likely first:
 |---|---|---|
 | `fourcc` | unset | `"MJPG"` or `"YUYV"`. Unset keeps today's behaviour. |
 | `warmup_frames` | `0` | Frames dropped after a cold open. Valid 0..=10. Recommended: `3`. |
-| `prearm_on_lock` | `false` | Open on `LockedHint` even while `IdleHint` is set. Recommended: `true`. |
+| `prearm_on_lock` | `false` | Open on the lock event even while `IdleHint` is set, but only for `prearm_window_ms` after it. Recommended: `true`. |
+| `prearm_window_ms` | `5000` | How long after the `LockedHint` false->true edge prearm may keep the camera open while idle. Valid 0..=30000 (0 disables prearm). After the window the normal `locked && !idle` rule applies, so a screen that stays off for hours does not keep the camera on. |
 
 Defaults are unchanged on purpose: they change auth timing, so they are turned on
 after the host measurement, not before. The default resolution is also
@@ -101,7 +102,7 @@ prearm_on_lock = true`, pending the WS6 recall comparison against 1280x720.
 The camera is closed whenever the session is unlocked, apart from the explicit
 opt-ins that existed before (`always_track`, a connected preview client, an
 enroll/test lease). `prearm_on_lock` and `IdleHint` can only matter while
-`LockedHint` is true: see `camera::gate::camera_wanted` and its tests.
+`LockedHint` is true, and prearm only within `prearm_window_ms` of the lock edge: see `camera::gate::camera_wanted` and its tests.
 
 ## The open log line
 

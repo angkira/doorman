@@ -3,6 +3,8 @@
 //! Kept free of I/O so the privacy invariant (camera closed whenever the
 //! session is unlocked) is covered by exhaustive table tests.
 
+use std::time::Duration;
+
 /// Inputs to the capture gate, sampled from the lock supervisor and IPC state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GateInputs {
@@ -12,6 +14,11 @@ pub struct GateInputs {
     pub idle: bool,
     /// `[camera] prearm_on_lock`: open on lock even while the display is idle.
     pub prearm_on_lock: bool,
+    /// `[camera] prearm_window_ms`: how long after the lock edge prearm applies.
+    pub prearm_window: Duration,
+    /// Time since the LockedHint false->true edge (`None` when unlocked or the
+    /// edge is unknown). Computed by the caller from an injectable clock.
+    pub since_lock_edge: Option<Duration>,
     /// `[camera] always_track`: explicit opt-in to capture while unlocked.
     pub always_track: bool,
     /// Preview/debug stream subscribers (explicit opt-in to capture).
@@ -24,7 +31,8 @@ pub struct GateInputs {
 ///
 /// The lock-driven part (`lock_wanted`) is what unattended unlock relies on:
 /// it is true only while the session is locked, and while locked it is true
-/// when the display is not idle (`armed`) or when `prearm_on_lock` is set.
+/// when the display is not idle (`armed`) or, within `prearm_window` of the
+/// lock edge, when `prearm_on_lock` is set.
 /// `idle` and `prearm_on_lock` can therefore never open the camera on an
 /// unlocked session. The remaining terms are explicit, user-initiated reasons
 /// (always_track config, a connected preview client, an enroll/test lease) that
@@ -35,7 +43,34 @@ pub fn camera_wanted(i: GateInputs) -> bool {
 
 /// The part of the gate driven only by the lock state.
 pub fn lock_wanted(i: GateInputs) -> bool {
-    i.locked && (!i.idle || i.prearm_on_lock)
+    i.locked && (!i.idle || prearm_active(i))
+}
+
+/// Prearm applies only inside the bounded window after the lock edge.
+fn prearm_active(i: GateInputs) -> bool {
+    i.prearm_on_lock && i.since_lock_edge.is_some_and(|t| t < i.prearm_window)
+}
+
+/// Tracks the LockedHint false->true edge against an injectable clock.
+#[derive(Debug, Default)]
+pub struct LockEdge {
+    locked_since: Option<Duration>,
+    last_locked: bool,
+}
+
+impl LockEdge {
+    /// Feed the current `locked` and clock reading (any monotonic origin).
+    /// Returns the time since the lock edge, `None` while unlocked. A session
+    /// first observed already locked counts as an edge at `now`.
+    pub fn update(&mut self, locked: bool, now: Duration) -> Option<Duration> {
+        if locked && !self.last_locked {
+            self.locked_since = Some(now);
+        } else if !locked {
+            self.locked_since = None;
+        }
+        self.last_locked = locked;
+        self.locked_since.map(|t| now.saturating_sub(t))
+    }
 }
 
 /// Discards the first N frames after a cold open (auto-exposure settling).
@@ -70,11 +105,16 @@ mod tests {
 
     const BOOLS: [bool; 2] = [false, true];
 
+    const WINDOW: Duration = Duration::from_millis(5000);
+
+    /// Inputs "just after the lock edge" (inside the prearm window).
     fn inputs(locked: bool, idle: bool, prearm: bool, lease: bool) -> GateInputs {
         GateInputs {
             locked,
             idle,
             prearm_on_lock: prearm,
+            prearm_window: WINDOW,
+            since_lock_edge: locked.then_some(Duration::from_millis(100)),
             capture_leases: usize::from(lease),
             ..GateInputs::default()
         }
@@ -128,6 +168,8 @@ mod tests {
                         locked: false,
                         idle,
                         prearm_on_lock: prearm,
+                        prearm_window: WINDOW,
+                        since_lock_edge: Some(Duration::ZERO),
                         always_track,
                         stream_subscribers: 3,
                         capture_leases: 2,
@@ -151,6 +193,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn locked_idle_prearm_closes_when_window_expires() {
+        let at = |t: Option<Duration>, window: Duration| {
+            let mut i = inputs(true, true, true, false);
+            i.since_lock_edge = t;
+            i.prearm_window = window;
+            camera_wanted(i)
+        };
+        let ms = Duration::from_millis;
+        assert!(at(Some(ms(0)), WINDOW));
+        assert!(at(Some(ms(4999)), WINDOW));
+        assert!(!at(Some(ms(5000)), WINDOW), "window expired");
+        assert!(!at(Some(Duration::from_secs(3600)), WINDOW));
+        assert!(!at(None, WINDOW), "unknown edge never prearms");
+        assert!(!at(Some(ms(0)), Duration::ZERO), "zero window disables");
+    }
+
+    #[test]
+    fn expired_window_falls_back_to_locked_and_not_idle() {
+        let mut i = inputs(true, false, true, false);
+        i.since_lock_edge = Some(Duration::from_secs(3600));
+        assert!(camera_wanted(i), "locked && !idle still opens");
+    }
+
+    #[test]
+    fn unlocked_closed_whatever_the_window() {
+        for t in [None, Some(Duration::ZERO), Some(Duration::from_secs(1))] {
+            let mut i = inputs(false, true, true, false);
+            i.since_lock_edge = t;
+            assert!(!camera_wanted(i));
+        }
+    }
+
+    #[test]
+    fn lock_edge_tracks_clock() {
+        let ms = Duration::from_millis;
+        let mut e = LockEdge::default();
+        assert_eq!(e.update(false, ms(0)), None);
+        assert_eq!(e.update(true, ms(1000)), Some(ms(0)));
+        assert_eq!(e.update(true, ms(3000)), Some(ms(2000)));
+        assert_eq!(e.update(false, ms(4000)), None);
+        assert_eq!(e.update(true, ms(9000)), Some(ms(0)), "new edge restarts");
     }
 
     #[test]
