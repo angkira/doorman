@@ -556,6 +556,14 @@ pub struct LivenessConfig {
     #[serde(default = "default_depth_input_size")]
     pub depth_input_size: u32,
 
+    /// `mean` decision mode only: depth-check this many frames, evenly sampled
+    /// across the aggregated sequence (besides the deciding frame, which is
+    /// always checked). `0` (default) keeps the original behaviour: only the
+    /// first quality frames and the deciding frame are depth-checked. Any
+    /// failing sample rejects the attempt. Range `0..=authentication.auth_frames`.
+    #[serde(default)]
+    pub mean_mode_depth_samples: u32,
+
     /// Extra liveness signals (screen flash, head pose). None are implemented:
     /// any entry is rejected so a security setting is never silently ignored.
     #[serde(default)]
@@ -569,6 +577,7 @@ impl Default for LivenessConfig {
             aggregate: default_liveness_aggregate(),
             relief_stat: default_relief_stat(),
             depth_input_size: default_depth_input_size(),
+            mean_mode_depth_samples: 0,
             signals: Vec::new(),
         }
     }
@@ -1293,6 +1302,13 @@ impl Config {
                 "enrollment.prune_cosine = {prune} is out of range (0, 1]"
             )));
         }
+        let samples = self.liveness.mean_mode_depth_samples;
+        if usize::try_from(samples).map_or(true, |n| n > self.authentication.auth_frames) {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.mean_mode_depth_samples = {samples} is out of range (0..=authentication.auth_frames = {})",
+                self.authentication.auth_frames
+            )));
+        }
         if self.decision.mode == DecisionMode::NOfM
             && self.authentication.auth_frames < self.decision.accept_n
         {
@@ -1439,6 +1455,7 @@ mod tests {
         assert_eq!(old.liveness.relief_stat, ReliefStat::MinMax);
         assert_eq!(old.liveness.depth_input_size, 518);
         assert!(old.liveness.signals.is_empty());
+        assert_eq!(old.liveness.mean_mode_depth_samples, 0);
         assert!(old.validate().is_ok());
 
         let new: Config = toml::from_str(
@@ -1457,6 +1474,15 @@ mod tests {
         assert!(bad("[liveness]\ndepth_input_size = 500\n").contains("multiple of 14"));
         assert!(bad("[liveness]\ndepth_input_size = 0\n").contains("depth_input_size"));
         assert!(bad("[liveness]\nsignals = [\"screen_flash\"]\n").contains("screen_flash"));
+        assert!(bad(
+            "[authentication]\nauth_frames = 5\n[liveness]\nmean_mode_depth_samples = 6\n"
+        )
+        .contains("mean_mode_depth_samples"));
+        let ok: Config = toml::from_str(
+            "[authentication]\nauth_frames = 5\n[liveness]\nmean_mode_depth_samples = 5\n",
+        )
+        .unwrap();
+        assert!(ok.validate().is_ok());
         assert!(toml::from_str::<Config>("[liveness]\nrelief_stat = \"mean\"\n").is_err());
     }
 

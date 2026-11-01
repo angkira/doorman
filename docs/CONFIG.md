@@ -118,6 +118,7 @@ see the comments in `packaging/doorman.toml.example`).
 | `aggregate` | `"median"` |
 | `depth_input_size` | `518` |
 | `frames` | `1` |
+| `mean_mode_depth_samples` | `0` |
 | `relief_stat` | `"minmax"` |
 | `signals` | `[]` |
 

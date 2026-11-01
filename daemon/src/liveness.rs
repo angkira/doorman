@@ -157,6 +157,52 @@ where
     }
 }
 
+/// Picks up to `samples` frames evenly spread over the frames not yet depth-checked.
+///
+/// `already_checked[i]` is true when frame `i` had a depth check (those are
+/// excluded). Returns ascending, distinct frame indices; fewer than `samples`
+/// when fewer unchecked frames exist. Each pick is the midpoint of an equal
+/// slice of the unchecked frames, so the first and last slices are not biased
+/// towards the sequence ends.
+pub fn sample_unchecked_frames(already_checked: &[bool], samples: usize) -> Vec<usize> {
+    let unchecked: Vec<usize> = already_checked
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &checked)| (!checked).then_some(i))
+        .collect();
+    let picks = samples.min(unchecked.len());
+    // Midpoint of slice k of `picks` equal slices: (k + 1/2) * len / picks.
+    (0..picks)
+        .map(|k| unchecked[(2 * k + 1) * unchecked.len() / (2 * picks)])
+        .collect()
+}
+
+/// `mean` mode: depth-checks the sampled frames of an accepting attempt.
+///
+/// Every frame index picked by [`sample_unchecked_frames`] is evaluated with
+/// `check`; the first one that is not a pass is returned as `Err` so the caller
+/// rejects fail-closed. `Ok(n)` is the number of depth checks performed (for
+/// timing). `check` yields `None` when the check is disabled.
+pub async fn confirm_sampled_frames<F, Fut>(
+    already_checked: &[bool],
+    samples: usize,
+    mut check: F,
+) -> Result<usize, LivenessOutcome>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Option<LivenessOutcome>>,
+{
+    let mut performed = 0;
+    for index in sample_unchecked_frames(already_checked, samples) {
+        performed += 1;
+        match check(index).await {
+            None | Some(LivenessOutcome::Pass { .. }) => {}
+            Some(not_live) => return Err(not_live),
+        }
+    }
+    Ok(performed)
+}
+
 /// Linear-interpolated percentile (`q` in 0..=1) of `values`; 0.0 when empty.
 fn percentile(values: &[f32], q: f32) -> f32 {
     if values.is_empty() {
@@ -394,6 +440,48 @@ mod tests {
         assert!(!u.is_pass());
         assert_eq!(u.relief(), None);
         assert_eq!(LivenessOutcome::Fail { relief: 0.01 }.relief(), Some(0.01));
+    }
+
+    #[test]
+    fn sampling_spreads_evenly_and_skips_checked_frames() {
+        let none = [false; 8];
+        assert_eq!(sample_unchecked_frames(&none, 0), Vec::<usize>::new());
+        assert_eq!(sample_unchecked_frames(&none, 1), vec![4]);
+        assert_eq!(sample_unchecked_frames(&none, 2), vec![2, 6]);
+        assert_eq!(sample_unchecked_frames(&none, 4), vec![1, 3, 5, 7]);
+        // Asking for more than exist yields every unchecked frame once.
+        assert_eq!(
+            sample_unchecked_frames(&none, 20),
+            (0..8).collect::<Vec<_>>()
+        );
+        // Frame 0 was depth-checked already: it is never picked.
+        let first_checked = [true, false, false, false];
+        assert_eq!(sample_unchecked_frames(&first_checked, 3), vec![1, 2, 3]);
+        assert!(sample_unchecked_frames(&[true, true], 2).is_empty());
+        assert!(sample_unchecked_frames(&[], 2).is_empty());
+    }
+
+    #[tokio::test]
+    async fn sampled_frames_reject_on_first_failure_and_count_checks() {
+        let frames = [0.2_f32, 0.2, 0.01, 0.2, 0.2];
+        let check = |index: usize| {
+            let relief = frames[index];
+            async move {
+                Some(if relief >= 0.05 {
+                    LivenessOutcome::Pass { relief }
+                } else {
+                    LivenessOutcome::Fail { relief }
+                })
+            }
+        };
+        let none = [false; 5];
+        // One sample is frame 2, the photo.
+        assert!(confirm_sampled_frames(&none, 1, check).await.is_err());
+        // Zero samples never check anything.
+        assert_eq!(confirm_sampled_frames(&none, 0, check).await, Ok(0));
+        // Frame 2 counted as checked: the remaining live frames pass.
+        let skip_photo = [false, false, true, false, false];
+        assert_eq!(confirm_sampled_frames(&skip_photo, 4, check).await, Ok(4));
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ loaded, with an error naming the key.
 | `[liveness] aggregate` | `"median"` | Only `median` exists. |
 | `[liveness] relief_stat` | `"minmax"` | `minmax` (original) or `p10_p90`. |
 | `[liveness] depth_input_size` | `518` | Depth network input, a multiple of 14. |
+| `[liveness] mean_mode_depth_samples` | `0` | `mean` mode only: extra frames depth-checked, evenly sampled across the sequence (`0..=auth_frames`). See "Sampled depth checks in mean mode". |
 | `[liveness] signals` | `[]` | Placeholder for extra signals; any entry is rejected (none implemented). |
 | `[authentication] liveness_depth_threshold` | `0.05` | Relief threshold (unchanged). |
 
@@ -153,7 +154,8 @@ unchecked middle frames (`n_of_m` needs N hits, so this needs N >= 2 photo
 frames between two live ones within roughly a second; `mean` averages them in).
 Closing that fully means a depth pass on every accepting frame
 (`~N x 0.5-1.3 s`), which was not chosen for latency. A deeper fix needs
-identity-bound liveness (same face track), listed under future work. The
+identity-bound liveness (same face track), listed under future work. For
+`mean` mode the cost/coverage trade-off is configurable, see the next section. The
 synthetic swap tests are in `daemon/src/ipc.rs`
 (`live_then_photo_swap_is_rejected_by_the_deciding_frame_check`); they mirror
 the control flow with synthetic frames because `run_authenticate` needs the ML
@@ -183,6 +185,31 @@ their known weaknesses:
   and is defeated by a live relay or a replayed video of the right motion.
 
 Treat depth relief from an RGB camera as a deterrent, not a security boundary.
+
+### Sampled depth checks in mean mode
+
+`[liveness] mean_mode_depth_samples = K` (default `0`, behaviour unchanged)
+depth-checks K more frames in `mean` mode, only when the attempt would be
+accepted. The frames are evenly spread over the quality frames that were
+scored before the deciding frame, skipping any that already had a depth check
+(`sample_unchecked_frames` in `daemon/src/liveness.rs`: midpoints of K equal
+slices). Any failed or unavailable sample rejects fail-closed with the usual
+`liveness_rejected` / `liveness_unavailable` code. Valid range
+`0..=authentication.auth_frames`; it has no effect in `n_of_m` mode. With K > 0
+the daemon keeps at most `auth_frames` decoded frames in memory for the attempt.
+
+Coverage is statistical, not exhaustive: a single photo frame that no sample
+lands on is still averaged in; K = `auth_frames - 2` checks every middle frame.
+Swap tests: `mean_mode_samples_catch_photo_frames_mid_sequence` (and the
+default-behaviour record `mean_mode_default_checks_only_first_and_deciding_frames`)
+in `daemon/src/ipc.rs`.
+
+Cost: about K x the per-frame depth latency, added to accepting attempts only.
+Measure the per-frame figure on the host with the `liveness (depth gate)` stage
+of
+`doorman-bench latency --frames ~/doorman-data/me/day --iters 200 --warmup 10 --profile /etc/doorman/doorman.toml`
+(docs/bench/README.md), then multiply by K; the timing log's `liveness_frames`
+and `liveness_ms` show the real count and total per attempt.
 
 ## Calibration recipes
 

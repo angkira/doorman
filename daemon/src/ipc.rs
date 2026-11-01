@@ -449,6 +449,16 @@ async fn run_authenticate(
     // The last quality frame whose embedding was scored (it completes the
     // decision), and whether liveness was already evaluated on that very frame.
     let mut deciding_frame: Option<(image::DynamicImage, crate::ml::Face, bool)> = None;
+    // `mean` mode with `[liveness] mean_mode_depth_samples > 0`: every scored
+    // frame before the deciding one is kept (at most `auth_frames`) so a sample
+    // of them can be depth-checked once the attempt would be accepted. The flag
+    // says whether that frame already had a depth check.
+    let mean_depth_samples = match (&sequential, liveness_agg.is_some()) {
+        (None, true) => state.config.liveness.mean_mode_depth_samples as usize,
+        _ => 0,
+    };
+    let mut scored_frames: Vec<(image::DynamicImage, crate::ml::Face)> = Vec::new();
+    let mut scored_checked: Vec<bool> = Vec::new();
     let mut frames_seen = 0usize;
     let mut rx = state.latest_frame.clone();
     let mut maybe_frame = rx.borrow_and_update().clone();
@@ -562,6 +572,12 @@ async fn run_authenticate(
                         decider.push(score, liveness_state(liveness_agg.is_some(), &liveness));
                 }
                 passed_embeddings.push(embedding);
+                if let Some((prev, prev_face, prev_checked)) =
+                    deciding_frame.take().filter(|_| mean_depth_samples > 0)
+                {
+                    scored_frames.push((prev, prev_face));
+                    scored_checked.push(prev_checked);
+                }
                 deciding_frame = Some((frame, face, checked_this_frame));
             }
             Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
@@ -708,6 +724,42 @@ async fn run_authenticate(
                     Some(not_live),
                 );
             }
+        }
+    }
+    // `mean` mode, opt-in: also depth-check frames sampled across the sequence,
+    // so a photo shown between the checked first frames and the deciding frame
+    // cannot be averaged in unseen.
+    if matched && mean_depth_samples > 0 {
+        let sampled_started = std::time::Instant::now();
+        let sampled = doormand::liveness::confirm_sampled_frames(
+            &scored_checked,
+            mean_depth_samples,
+            |index| {
+                let (frame, face) = &scored_frames[index];
+                state.ml_pipeline.liveness_check(frame, face)
+            },
+        )
+        .await;
+        let performed = match &sampled {
+            Ok(n) => *n,
+            // The failing check ran too; the exact count is not needed for timing.
+            Err(_) => 1,
+        };
+        timing.liveness = Some(timing.liveness.unwrap_or_default() + sampled_started.elapsed());
+        timing.liveness_frames += performed as u32;
+        if let Err(not_live) = sampled {
+            timing.liveness_passed = Some(false);
+            timing.liveness_relief = not_live.relief();
+            return liveness_failure(
+                state,
+                &mut timing,
+                &attempt_id,
+                username,
+                first_quality_face_area_frac,
+                raw_face_frames,
+                frames_seen,
+                Some(not_live),
+            );
         }
     }
     timing.decision = Some(decision_started.elapsed());
@@ -1191,6 +1243,87 @@ mod tests {
         // then photos complete the three accepting hits.
         let swap = [LIVE, LIVE, PHOTO, PHOTO, PHOTO];
         assert!(!run(&swap, 3, true).await);
+    }
+
+    /// Mirrors `mean` mode: liveness on the first quality frames until decided,
+    /// the mean score decides, then the deciding-frame confirmation and the
+    /// optional sampled depth checks. Returns (accepted, depth checks run).
+    async fn run_mean(
+        frames: &[SynthFrame],
+        liveness_frames: usize,
+        samples: usize,
+    ) -> (bool, usize) {
+        use doormand::liveness::{LivenessAggregator, LivenessProgress};
+        let mut agg = LivenessAggregator::new(liveness_frames);
+        let mut verdict: Option<LivenessOutcome> = None;
+        let mut checks = 0;
+        let mut checked_flags = Vec::new();
+        for frame in frames {
+            let checked = verdict.is_none();
+            if checked {
+                checks += 1;
+                if let LivenessProgress::Decided(v) = agg.push(depth_check(*frame)) {
+                    verdict = Some(v);
+                }
+            }
+            if matches!(verdict, Some(ref v) if !v.is_pass()) {
+                return (false, checks);
+            }
+            checked_flags.push(checked);
+        }
+        let mean = frames.iter().map(|f| f.score).sum::<f32>() / frames.len() as f32;
+        if mean < THRESHOLD {
+            return (false, checks);
+        }
+        let (last, rest) = frames.split_last().expect("at least one frame");
+        let last_checked = checked_flags.pop().expect("one flag per frame");
+        let deciding = doormand::liveness::confirm_on_deciding_frame(last_checked, || async {
+            checks += 1;
+            Some(depth_check(*last))
+        })
+        .await;
+        if deciding.is_err() {
+            return (false, checks);
+        }
+        let sampled = doormand::liveness::confirm_sampled_frames(
+            &checked_flags,
+            samples,
+            |index| async move { Some(depth_check(rest[index])) },
+        )
+        .await;
+        match sampled {
+            Ok(n) => (true, checks + n),
+            Err(_) => (false, checks + 1),
+        }
+    }
+
+    #[tokio::test]
+    async fn mean_mode_default_checks_only_first_and_deciding_frames() {
+        // Documents the default (`mean_mode_depth_samples = 0`): photos between
+        // the checked first frame and the live deciding frame are averaged in
+        // unseen. Enable sampling to close this; see docs/decision-and-liveness.md.
+        let swap = [LIVE, PHOTO, PHOTO, PHOTO, LIVE];
+        assert_eq!(run_mean(&swap, 1, 0).await, (true, 2));
+    }
+
+    #[tokio::test]
+    async fn mean_mode_samples_catch_photo_frames_mid_sequence() {
+        let swap = [LIVE, PHOTO, PHOTO, PHOTO, LIVE];
+        assert!(!run_mean(&swap, 1, 1).await.0, "middle sample is a photo");
+        assert!(!run_mean(&swap, 1, 3).await.0);
+        // A single photo that no sample lands on stays unseen: sampling is
+        // statistical, not exhaustive (documented).
+        let one_photo = [LIVE, LIVE, PHOTO, LIVE, LIVE, LIVE, LIVE, LIVE, LIVE];
+        assert!(run_mean(&one_photo, 1, 1).await.0);
+        assert!(!run_mean(&one_photo, 1, 7).await.0);
+    }
+
+    #[tokio::test]
+    async fn mean_mode_samples_accept_genuine_live_sequences_and_cost_one_check_each() {
+        let live = [LIVE; 8];
+        assert_eq!(run_mean(&live, 1, 0).await, (true, 2));
+        assert_eq!(run_mean(&live, 1, 3).await, (true, 5));
+        assert!(!run_mean(&[PHOTO; 8], 1, 3).await.0);
     }
 
     #[tokio::test]
