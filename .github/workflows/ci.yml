@@ -98,8 +98,13 @@ jobs:
 
       - name: Shellcheck all tracked shell scripts
         run: |
-          # Select by shebang so extensionless scripts (packaging/, scripts/) are covered.
-          git ls-files -z | xargs -0 grep -lZE '^#!.*[/ ](ba)?sh( |$)' | xargs -0 shellcheck
+          # Tracked *.sh plus extensionless files whose first line is a shell
+          # shebang (packaging/, scripts/). .plans/, docs/ and Markdown are
+          # excluded so prose with code fences is never parsed as shell.
+          {
+            git ls-files -z -- '*.sh'
+            git ls-files -z | xargs -0 awk 'FNR == 1 && /^#!(\/usr\/bin\/env (ba)?sh|\/bin\/(ba)?sh)([ \t]|$)/ { printf "%s%c", FILENAME, 0 } FNR == 1 { nextfile }'
+          } | grep -zv -e '^\.plans/' -e '^docs/' -e '\.md$' | sort -zu | xargs -0 shellcheck
 
   python:
     runs-on: ubuntu-24.04
