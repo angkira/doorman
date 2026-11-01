@@ -59,6 +59,8 @@ mod gstreamer_backend;
 #[cfg(feature = "camera-gstreamer")]
 pub use gstreamer_backend::GStreamerCamera;
 
+pub mod gate;
+
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
 mod format_select;
 
@@ -100,6 +102,26 @@ impl Camera {
                 fps,
                 loop_playback,
             )),
+        }
+    }
+
+    /// Create a synthetic-frame camera (no device, no ffmpeg). For tests.
+    pub fn synthetic(width: u32, height: u32, fps: u32) -> Self {
+        Self {
+            inner: CameraBackendInner::Mock(MockCamera::synthetic(width, height, fps)),
+        }
+    }
+
+    /// Name of the active backend, for logging.
+    pub fn backend_name(&self) -> &'static str {
+        match &self.inner {
+            CameraBackendInner::Mock(cam) => cam.backend_name(),
+            #[cfg(feature = "camera-ffmpeg")]
+            CameraBackendInner::Ffmpeg(cam) => cam.backend_name(),
+            #[cfg(feature = "camera-gstreamer")]
+            CameraBackendInner::GStreamer(cam) => cam.backend_name(),
+            #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
+            CameraBackendInner::V4L2(cam) => cam.backend_name(),
         }
     }
 
