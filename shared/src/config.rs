@@ -582,7 +582,8 @@ impl LivenessConfig {
                 self.frames
             )));
         }
-        if self.depth_input_size == 0 || !self.depth_input_size.is_multiple_of(DEPTH_INPUT_MULTIPLE) {
+        if self.depth_input_size == 0 || !self.depth_input_size.is_multiple_of(DEPTH_INPUT_MULTIPLE)
+        {
             return Err(ConfigError::Invalid(format!(
                 "liveness.depth_input_size = {} must be a positive multiple of {DEPTH_INPUT_MULTIPLE}",
                 self.depth_input_size
@@ -763,7 +764,10 @@ impl SudoConfig {
         }
         if self.enabled {
             if self.service_names.is_empty() {
-                return invalid("pam.sudo.enabled = true needs at least one pam.sudo.service_names entry".to_string());
+                return invalid(
+                    "pam.sudo.enabled = true needs at least one pam.sudo.service_names entry"
+                        .to_string(),
+                );
             }
             if !auth.liveness_enabled {
                 return invalid("pam.sudo.enabled = true requires authentication.liveness_enabled = true (liveness is never advisory for sudo)".to_string());
@@ -1453,7 +1457,11 @@ mod tests {
         for bad in ["-1.0", "256.0"] {
             let cfg: Config =
                 toml::from_str(&format!("[recognition]\nmin_brightness = {bad}\n")).unwrap();
-            assert!(cfg.validate().unwrap_err().to_string().contains("min_brightness"));
+            assert!(cfg
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("min_brightness"));
         }
     }
 
@@ -1479,14 +1487,19 @@ mod tests {
         assert!(bad(1, 1).validate().is_ok());
         for (n, m) in [(0, 5), (6, 5)] {
             let err = bad(n, m).validate().unwrap_err().to_string();
-            assert!(err.contains("accept_n") && err.contains("window_m"), "{err}");
+            assert!(
+                err.contains("accept_n") && err.contains("window_m"),
+                "{err}"
+            );
         }
-        let short_budget: Config = toml::from_str(
-            "[authentication]\nauth_frames = 2\n[decision]\nmode = \"n_of_m\"\n",
-        )
-        .unwrap();
+        let short_budget: Config =
+            toml::from_str("[authentication]\nauth_frames = 2\n[decision]\nmode = \"n_of_m\"\n")
+                .unwrap();
         let err = short_budget.validate().unwrap_err().to_string();
-        assert!(err.contains("auth_frames") && err.contains("accept_n"), "{err}");
+        assert!(
+            err.contains("auth_frames") && err.contains("accept_n"),
+            "{err}"
+        );
         assert!(toml::from_str::<Config>("[decision]\nmode = \"sum\"\n").is_err());
         assert!(toml::from_str::<Config>("[decision]\ntemplate_score = \"min\"\n").is_err());
     }
@@ -1556,7 +1569,10 @@ mod tests {
         assert_eq!(sudo.service_names, vec!["sudo".to_string()]);
         assert_eq!((sudo.accept_n, sudo.window_m), (4, 5));
         assert_eq!(sudo.liveness_frames, 3);
-        assert_eq!((sudo.timeout_ms, sudo.max_failures, sudo.suspend_secs), (4000, 3, 600));
+        assert_eq!(
+            (sudo.timeout_ms, sudo.max_failures, sudo.suspend_secs),
+            (4000, 3, 600)
+        );
         assert_eq!(sudo.effective_threshold(&old.authentication), 0.4);
         assert!(old.validate().is_ok());
     }
@@ -1575,11 +1591,16 @@ mod tests {
         assert!(bad("[pam.sudo]\nmax_failures = 0").contains("max_failures"));
         assert!(bad("[pam.sudo]\nservice_names = [\"su do\"]").contains("service_names"));
         assert!(bad("[pam.sudo]\nenabled = true\nservice_names = []").contains("service_names"));
-        assert!(bad("[authentication]\nliveness_enabled = false\n[pam.sudo]\nenabled = true")
-            .contains("liveness_enabled"));
-        assert!(bad("[authentication]\nauth_frames = 3\n[pam.sudo]\nenabled = true")
-            .contains("auth_frames"));
-        let ok: Config = toml::from_str("[pam.sudo]\nenabled = true\nsimilarity_threshold = 0.5").unwrap();
+        assert!(
+            bad("[authentication]\nliveness_enabled = false\n[pam.sudo]\nenabled = true")
+                .contains("liveness_enabled")
+        );
+        assert!(
+            bad("[authentication]\nauth_frames = 3\n[pam.sudo]\nenabled = true")
+                .contains("auth_frames")
+        );
+        let ok: Config =
+            toml::from_str("[pam.sudo]\nenabled = true\nsimilarity_threshold = 0.5").unwrap();
         assert!(ok.validate().is_ok());
         assert_eq!(ok.pam.sudo.effective_threshold(&ok.authentication), 0.5);
     }

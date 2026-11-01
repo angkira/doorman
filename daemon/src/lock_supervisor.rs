@@ -136,7 +136,12 @@ pub async fn spawn() -> LockSupervisor {
             warn!(
                 "lock-supervisor: cannot connect to system D-Bus ({e}); pipeline lock-gating disabled (armed=false)"
             );
-            return LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker: None };
+            return LockSupervisor {
+                armed_rx,
+                locked_rx,
+                lock_gen_rx,
+                unlocker: None,
+            };
         }
     };
 
@@ -146,13 +151,24 @@ pub async fn spawn() -> LockSupervisor {
             warn!(
                 "lock-supervisor: no active graphical seat0 session found; pipeline lock-gating disabled (armed=false)"
             );
-            return LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker: None };
+            return LockSupervisor {
+                armed_rx,
+                locked_rx,
+                lock_gen_rx,
+                unlocker: None,
+            };
         }
     };
 
-    info!("lock-supervisor: tracking logind session {}", session_path.as_str());
+    info!(
+        "lock-supervisor: tracking logind session {}",
+        session_path.as_str()
+    );
 
-    let unlocker = Some(Unlocker { conn: conn.clone(), session_path: session_path.clone() });
+    let unlocker = Some(Unlocker {
+        conn: conn.clone(),
+        session_path: session_path.clone(),
+    });
 
     // Background watcher. Robust: if it can't build the session proxy it just
     // emits armed=false and exits (daemon keeps running, pipeline stays gated
@@ -168,7 +184,12 @@ pub async fn spawn() -> LockSupervisor {
         lock_gen_tx,
     ));
 
-    LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker }
+    LockSupervisor {
+        armed_rx,
+        locked_rx,
+        lock_gen_rx,
+        unlocker,
+    }
 }
 
 async fn build_session_proxy(

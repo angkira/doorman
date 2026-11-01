@@ -1,5 +1,5 @@
 use super::types::{DetectionResult, Face, RawFrame};
-use crate::{ml::MLPipeline, debug_stream::DebugStreamBroadcaster};
+use crate::{debug_stream::DebugStreamBroadcaster, ml::MLPipeline};
 use doorman_shared::StreamMessage;
 use image::GenericImageView;
 use std::sync::Arc;
@@ -80,7 +80,8 @@ pub async fn run_detection_pipeline(
                     }
                 }
             })
-        }).await;
+        })
+        .await;
 
         // Unwrap the nested Result from spawn_blocking
         let result = match result {
@@ -89,9 +90,14 @@ pub async fn run_detection_pipeline(
                 warn!("spawn_blocking join error on frame {}: {}", sequence, e);
                 let (camera_width, camera_height) = camera_dimensions;
                 let _ = result_tx.try_send(DetectionResult {
-                    sequence, face: None, embedding: None,
-                    processing_time: start.elapsed(), frame_width: camera_width, frame_height: camera_height,
-                    frame: None, ml_face: None,
+                    sequence,
+                    face: None,
+                    embedding: None,
+                    processing_time: start.elapsed(),
+                    frame_width: camera_width,
+                    frame_height: camera_height,
+                    frame: None,
+                    ml_face: None,
                 });
                 continue;
             }
@@ -166,29 +172,36 @@ pub async fn run_detection_pipeline(
             let w_px = w_norm * camera_width as f32;
             let h_px = h_norm * camera_height as f32;
 
-            let bbox_pixels = (
-                x_px as u32,
-                y_px as u32,
-                w_px as u32,
-                h_px as u32,
+            let bbox_pixels = (x_px as u32, y_px as u32, w_px as u32, h_px as u32);
+            debug!(
+                "Face bbox normalized: x={:.3}, y={:.3}, w={:.3}, h={:.3}",
+                x_norm, y_norm, w_norm, h_norm
             );
-            debug!("Face bbox normalized: x={:.3}, y={:.3}, w={:.3}, h={:.3}", x_norm, y_norm, w_norm, h_norm);
-            debug!("Converted to pixels ({}x{}): x={:.1}, y={:.1}, w={:.1}, h={:.1}", camera_width, camera_height, x_px, y_px, w_px, h_px);
+            debug!(
+                "Converted to pixels ({}x{}): x={:.1}, y={:.1}, w={:.1}, h={:.1}",
+                camera_width, camera_height, x_px, y_px, w_px, h_px
+            );
             debug!("  Top-left corner: ({:.1}, {:.1})", x_px, y_px);
-            debug!("  Bottom-right corner: ({:.1}, {:.1})", x_px + w_px, y_px + h_px);
-            info!("Broadcasting detection: bbox=({}, {}, {}, {}) = top_left + size, confidence={:.3}",
-                bbox_pixels.0, bbox_pixels.1, bbox_pixels.2, bbox_pixels.3, face.confidence);
+            debug!(
+                "  Bottom-right corner: ({:.1}, {:.1})",
+                x_px + w_px,
+                y_px + h_px
+            );
+            info!(
+                "Broadcasting detection: bbox=({}, {}, {}, {}) = top_left + size, confidence={:.3}",
+                bbox_pixels.0, bbox_pixels.1, bbox_pixels.2, bbox_pixels.3, face.confidence
+            );
             bc.broadcast(StreamMessage::Detection {
                 timestamp_ms: timestamp.elapsed().as_millis() as u64,
                 detection: doorman_shared::DetectionInfo {
                     bbox: Some(bbox_pixels),
                     frame_size: Some(camera_dimensions),
                     confidence: Some(face.confidence),
-                    recognized_user: None,  // Will be set by recognition pipeline
+                    recognized_user: None, // Will be set by recognition pipeline
                     similarity: None,
                     frame_jpeg_base64: None,
                 },
-                system_locked: false,  // Will be updated by recognition pipeline
+                system_locked: false, // Will be updated by recognition pipeline
                 processing_time_ms: processing_time.as_millis() as u32,
             });
         }
@@ -221,7 +234,10 @@ pub async fn run_detection_pipeline(
             };
 
             if !(area_ok && sharp_ok) {
-                debug!("Quality gate rejected frame {} (dropping embedding)", sequence);
+                debug!(
+                    "Quality gate rejected frame {} (dropping embedding)",
+                    sequence
+                );
                 embedding = None;
             }
         }
@@ -243,8 +259,16 @@ pub async fn run_detection_pipeline(
             processing_time,
             frame_width: camera_width,
             frame_height: camera_height,
-            frame: if carry_liveness { Some(frame_for_quality.clone()) } else { None },
-            ml_face: if carry_liveness { Some(face.clone()) } else { None },
+            frame: if carry_liveness {
+                Some(frame_for_quality.clone())
+            } else {
+                None
+            },
+            ml_face: if carry_liveness {
+                Some(face.clone())
+            } else {
+                None
+            },
         });
     }
 

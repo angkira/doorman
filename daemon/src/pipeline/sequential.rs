@@ -34,7 +34,9 @@ pub enum RejectReason {
 pub enum Step {
     Continue,
     /// `similarity` is the mean of the window scores that reached the threshold.
-    Accept { similarity: f32 },
+    Accept {
+        similarity: f32,
+    },
     Reject(RejectReason),
 }
 
@@ -167,7 +169,10 @@ mod tests {
         let scores = [HI, LO, LO, HI, LO, LO, HI, LO, LO, HI];
         let steps = run(&mut d, &scores, Passed);
         assert!(!steps.iter().any(|s| matches!(s, Step::Accept { .. })));
-        assert_eq!(*steps.last().unwrap(), Step::Reject(RejectReason::CannotReachN));
+        assert_eq!(
+            *steps.last().unwrap(),
+            Step::Reject(RejectReason::CannotReachN)
+        );
     }
 
     #[test]
@@ -186,23 +191,26 @@ mod tests {
         let mut d = SequentialDecider::new(T, 3, 5, 5);
         assert_eq!(d.push(LO, Passed), Step::Continue);
         assert_eq!(d.push(LO, Passed), Step::Continue);
-        assert_eq!(
-            d.push(LO, Passed),
-            Step::Reject(RejectReason::CannotReachN)
-        );
+        assert_eq!(d.push(LO, Passed), Step::Reject(RejectReason::CannotReachN));
     }
 
     #[test]
     fn budget_exhaustion_without_n_hits_rejects() {
         let mut d = SequentialDecider::new(T, 2, 3, 4);
         let steps = run(&mut d, &[HI, LO, LO, LO], Passed);
-        assert_eq!(*steps.last().unwrap(), Step::Reject(RejectReason::CannotReachN));
+        assert_eq!(
+            *steps.last().unwrap(),
+            Step::Reject(RejectReason::CannotReachN)
+        );
     }
 
     #[test]
     fn failed_liveness_rejects_immediately_even_with_matching_frames() {
         let mut d = SequentialDecider::new(T, 1, 1, 10);
-        assert_eq!(d.push(HI, Failed), Step::Reject(RejectReason::LivenessFailed));
+        assert_eq!(
+            d.push(HI, Failed),
+            Step::Reject(RejectReason::LivenessFailed)
+        );
     }
 
     #[test]
@@ -269,12 +277,7 @@ mod tests {
                 failed_seen |= live == Failed;
                 history.push(score);
                 let step = d.push(score, live);
-                let window_hits = history
-                    .iter()
-                    .rev()
-                    .take(m)
-                    .filter(|s| **s >= T)
-                    .count();
+                let window_hits = history.iter().rev().take(m).filter(|s| **s >= T).count();
                 match step {
                     Step::Accept { .. } => {
                         assert!(window_hits >= n, "accepted with {window_hits} < {n} hits");

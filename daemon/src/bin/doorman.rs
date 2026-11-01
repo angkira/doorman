@@ -32,7 +32,8 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use doorman_shared::{
-    DaemonInfo, EnrollmentPhase, Request, RequestEnvelope, Response, ResponseData, StreamMessage, UserInfo,
+    DaemonInfo, EnrollmentPhase, Request, RequestEnvelope, Response, ResponseData, StreamMessage,
+    UserInfo,
 };
 
 // Self-contained installer (doctor / install / uninstall). Kept in a sibling
@@ -358,7 +359,12 @@ fn main() {
             data_dir,
             models_dir,
             min_confirmed,
-        } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
+        } => cmd_train(
+            data_dir.as_deref(),
+            models_dir.as_deref(),
+            *min_confirmed,
+            cli.json,
+        ),
         Command::DatasetReport { data_dir } => cmd_dataset_report(data_dir.as_deref(), cli.json),
         Command::Promote {
             candidate_dir,
@@ -384,9 +390,14 @@ fn main() {
             } => cmd_dataset_purge(*older_than, *dry_run, data_dir.as_deref()),
         },
         Command::Config { action } => match action {
-            ConfigAction::Check { config } => std::process::exit(cmd_config_check(config.as_deref())),
+            ConfigAction::Check { config } => {
+                std::process::exit(cmd_config_check(config.as_deref()))
+            }
             ConfigAction::DumpDefaults => {
-                print!("{}", doorman_shared::config_check::render_reference_markdown());
+                print!(
+                    "{}",
+                    doorman_shared::config_check::render_reference_markdown()
+                );
                 Ok(())
             }
         },
@@ -404,7 +415,18 @@ fn main() {
             no_pam,
             desktop,
             auto_unlock,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, desktop, *auto_unlock),
+        } => cmd_install(
+            *dry_run,
+            *yes,
+            *cpu,
+            *rocm,
+            *ncnn,
+            *login,
+            *sudo,
+            *no_pam,
+            desktop,
+            *auto_unlock,
+        ),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
         Command::Preview { args } => cmd_preview(args),
     };
@@ -483,15 +505,29 @@ fn cmd_dataset_purge(
     let entries = doormand::dataset_purge::purge_candidates(&dataset_dir, today, days)
         .map_err(|e| CliError::new(format!("cannot scan {}: {e}", dataset_dir.display())))?;
     for path in &entries {
-        println!("{}{}", if dry_run { "would delete " } else { "deleting " }, path.display());
+        println!(
+            "{}{}",
+            if dry_run {
+                "would delete "
+            } else {
+                "deleting "
+            },
+            path.display()
+        );
     }
     if dry_run {
-        println!("{} entries older than {days} days (dry run, nothing deleted)", entries.len());
+        println!(
+            "{} entries older than {days} days (dry run, nothing deleted)",
+            entries.len()
+        );
         return Ok(());
     }
     let removed = doormand::dataset_purge::delete_entries(&entries)
         .map_err(|e| CliError::new(format!("delete failed: {e}")))?;
-    println!("deleted {removed} entries older than {days} days from {}", dataset_dir.display());
+    println!(
+        "deleted {removed} entries older than {days} days from {}",
+        dataset_dir.display()
+    );
     Ok(())
 }
 
@@ -517,7 +553,10 @@ fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliErro
         println!("  false negative attempts: {}", report.false_negative);
         println!("  rejected attempts: {}", report.rejected);
         println!("  suspected spoof attempts: {}", report.suspected_spoof);
-        println!("  proactive unlocked attempts: {}", report.proactive_unlocked);
+        println!(
+            "  proactive unlocked attempts: {}",
+            report.proactive_unlocked
+        );
         println!("  unknown attempts: {}", report.unknown);
         println!("  matched attempts: {}", report.matched_attempts);
         println!("  unlabeled attempts: {}", report.unlabeled_attempts);
@@ -707,8 +746,12 @@ fn send_request(
         ));
     }
 
-    let response: Response = serde_json::from_str(line.trim())
-        .map_err(|e| CliError::new(format!("failed to parse daemon response: {e} (raw: {})", line.trim())))?;
+    let response: Response = serde_json::from_str(line.trim()).map_err(|e| {
+        CliError::new(format!(
+            "failed to parse daemon response: {e} (raw: {})",
+            line.trim()
+        ))
+    })?;
     match response {
         Response::Denied { reason } => Err(CliError::new(format!("denied by daemon: {reason}"))),
         Response::RateLimited { retry_after_s } => Err(CliError::new(format!(
@@ -814,7 +857,11 @@ fn print_status(info: &DaemonInfo) {
     println!("  uptime         : {uptime}");
     println!(
         "  camera         : {}",
-        if info.camera_available { "available" } else { "unavailable" }
+        if info.camera_available {
+            "available"
+        } else {
+            "unavailable"
+        }
     );
     println!(
         "  models loaded  : {}",
@@ -904,12 +951,7 @@ fn print_user_table(users: &[UserInfo]) {
 // remove
 // ---------------------------------------------------------------------------
 
-fn cmd_remove(
-    sockets: &Sockets,
-    username: &str,
-    yes: bool,
-    json: bool,
-) -> Result<(), CliError> {
+fn cmd_remove(sockets: &Sockets, username: &str, yes: bool, json: bool) -> Result<(), CliError> {
     if !yes && !json {
         print!("Remove enrollment for '{username}'? [y/N] ");
         std::io::stdout()
@@ -938,7 +980,10 @@ fn cmd_remove(
     }
     match response {
         Response::Success { message, .. } => {
-            println!("{}", message.unwrap_or_else(|| format!("Removed user: {username}")));
+            println!(
+                "{}",
+                message.unwrap_or_else(|| format!("Removed user: {username}"))
+            );
             Ok(())
         }
         Response::Failure { reason } => Err(CliError::new(reason)),
@@ -1030,18 +1075,17 @@ fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Resul
     }
     match response {
         Response::Success { message, .. } => {
-            println!(
-                "\n✓ Enrolled '{username}'. {}",
-                message.unwrap_or_default()
-            );
+            println!("\n✓ Enrolled '{username}'. {}", message.unwrap_or_default());
             Ok(())
         }
-        Response::Failure { reason } => Err(CliError::new(format!(
-            "enrollment failed: {reason}"
-        ))),
+        Response::Failure { reason } => Err(CliError::new(format!("enrollment failed: {reason}"))),
         // The daemon never streams Progress on the command socket, but handle it
         // defensively so an unexpected frame doesn't crash the CLI.
-        Response::Progress { message, current, total } => Err(CliError::new(format!(
+        Response::Progress {
+            message,
+            current,
+            total,
+        } => Err(CliError::new(format!(
             "unexpected progress on command socket: {message} ({current}/{total})"
         ))),
         // send_request already turns these into errors; arm kept for exhaustiveness.
@@ -1049,9 +1093,9 @@ fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Resul
         | Response::RateLimited { .. }
         | Response::UnsupportedProtocol { .. }
         | Response::Matched { .. }
-        | Response::NoMatch { .. } => Err(CliError::new(format!(
-            "unexpected response: {response:?}"
-        ))),
+        | Response::NoMatch { .. } => {
+            Err(CliError::new(format!("unexpected response: {response:?}")))
+        }
     }
 }
 

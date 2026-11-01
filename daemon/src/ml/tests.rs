@@ -9,9 +9,9 @@ mod tests {
         // Test the parsing logic extracts face scores correctly
 
         let scores = vec![
-            0.9, 0.1,  // anchor 0: high background, low face
-            0.2, 0.8,  // anchor 1: low background, high face
-            0.7, 0.3,  // anchor 2: high background, low face
+            0.9, 0.1, // anchor 0: high background, low face
+            0.2, 0.8, // anchor 1: low background, high face
+            0.7, 0.3, // anchor 2: high background, low face
         ];
 
         let num_classes = 2;
@@ -85,7 +85,8 @@ mod tests {
         assert!(
             num_boxes < num_score_anchors,
             "Boxes {} should be less than score anchors {}",
-            num_boxes, num_score_anchors
+            num_boxes,
+            num_score_anchors
         );
     }
 

@@ -55,6 +55,9 @@ mod tests {
         // Identical inputs come back unchanged.
         assert_eq!(average_normalized(&a, &a), vec![1.0, 0.0]);
         // Opposite inputs: zero mean passes through instead of dividing by zero.
-        assert_eq!(average_normalized(&[1.0, 0.0], &[-1.0, 0.0]), vec![0.0, 0.0]);
+        assert_eq!(
+            average_normalized(&[1.0, 0.0], &[-1.0, 0.0]),
+            vec![0.0, 0.0]
+        );
     }
 }

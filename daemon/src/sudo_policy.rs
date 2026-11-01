@@ -267,10 +267,16 @@ mod tests {
         let now = Instant::now();
         let default_wait = Duration::from_secs(8);
         // Non-strict: unchanged default.
-        assert_eq!(camera_acquire_wait(default_wait, None, now), Some(default_wait));
+        assert_eq!(
+            camera_acquire_wait(default_wait, None, now),
+            Some(default_wait)
+        );
         // Strict, plenty of time beyond the default: default wins.
         let far = now + Duration::from_secs(20);
-        assert_eq!(camera_acquire_wait(default_wait, Some(far), now), Some(default_wait));
+        assert_eq!(
+            camera_acquire_wait(default_wait, Some(far), now),
+            Some(default_wait)
+        );
         // Strict 4 s deadline, 1 s already spent: 3 s left.
         let deadline = now + Duration::from_secs(4);
         let later = now + Duration::from_secs(1);
@@ -279,9 +285,16 @@ mod tests {
             Some(Duration::from_secs(3))
         );
         // Deadline reached or passed: no wait at all.
-        assert_eq!(camera_acquire_wait(default_wait, Some(deadline), deadline), None);
         assert_eq!(
-            camera_acquire_wait(default_wait, Some(deadline), deadline + Duration::from_secs(1)),
+            camera_acquire_wait(default_wait, Some(deadline), deadline),
+            None
+        );
+        assert_eq!(
+            camera_acquire_wait(
+                default_wait,
+                Some(deadline),
+                deadline + Duration::from_secs(1)
+            ),
             None
         );
     }

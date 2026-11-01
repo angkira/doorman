@@ -268,7 +268,10 @@ mod tests {
         assert!(v["liveness_relief"].is_null());
         assert_eq!(v["outcome"], "matched");
         t.liveness_relief = Some(0.25);
-        assert_eq!(serde_json::to_value(t.record()).unwrap()["liveness_relief"], 0.25);
+        assert_eq!(
+            serde_json::to_value(t.record()).unwrap()["liveness_relief"],
+            0.25
+        );
         let s = v.to_string();
         assert!(!s.contains("user") && !s.contains("uid"));
     }

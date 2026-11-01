@@ -40,7 +40,10 @@ impl NcnnHybridBackend {
                 Some(Mutex::new(net))
             }
             Err(e) => {
-                warn!("ncnn depth model not available, depth falls back to CPU ORT: {}", e);
+                warn!(
+                    "ncnn depth model not available, depth falls back to CPU ORT: {}",
+                    e
+                );
                 None
             }
         };
@@ -78,7 +81,9 @@ impl MLBackend for NcnnHybridBackend {
                         let (vec, shape) = match output.get("out0") {
                             Some(v) => v,
                             None => {
-                                warn!("ncnn depth: missing 'out0' in output, falling back to CPU ORT");
+                                warn!(
+                                    "ncnn depth: missing 'out0' in output, falling back to CPU ORT"
+                                );
                                 return self.inner.depth_relief(image, face).await;
                             }
                         };
@@ -98,7 +103,10 @@ impl MLBackend for NcnnHybridBackend {
                         Ok(Some(relief))
                     }
                     Err(e) => {
-                        warn!("ncnn depth inference failed ({}), falling back to CPU ORT", e);
+                        warn!(
+                            "ncnn depth inference failed ({}), falling back to CPU ORT",
+                            e
+                        );
                         self.inner.depth_relief(image, face).await
                     }
                 }

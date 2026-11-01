@@ -1,18 +1,18 @@
-use crate::DaemonState;
 use crate::dataset::{self, AttemptConditions, GtSource, LabelEvent, Outcome};
-use anyhow::Result;
-use chrono::Timelike;
-use doorman_shared::{
-    DaemonInfo, ENROLL_DURATION_SECS, EnrollmentPhase, Request, Response, ResponseData,
-    SIMILARITY_THRESHOLD, StreamMessage,
-};
-use async_trait::async_trait;
-use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
-use doormand::sudo_policy::{self, Profile, StrictProfile};
 use crate::pipeline::{LivenessState, SequentialDecider, Step};
+use crate::DaemonState;
+use anyhow::Result;
+use async_trait::async_trait;
+use chrono::Timelike;
 use doorman_shared::config::DecisionMode;
+use doorman_shared::{
+    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage,
+    ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
+};
 use doormand::decision::{AuthDecision, AuthOutcome};
+use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
 use doormand::liveness::{LivenessAggregator, LivenessOutcome, LivenessProgress};
+use doormand::sudo_policy::{self, Profile, StrictProfile};
 use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
 use image::GenericImageView;
 use std::sync::Arc;
@@ -292,7 +292,11 @@ async fn handle_authenticate(
 ) -> Response {
     let request_start = std::time::Instant::now();
     let strict = match sudo_policy::select_profile(service, &state.config) {
-        Profile::Default => return run_authenticate(state, username, None).await.into_response(),
+        Profile::Default => {
+            return run_authenticate(state, username, None)
+                .await
+                .into_response()
+        }
         Profile::Denied(reason) => {
             sudo_policy::audit(
                 service.unwrap_or_default(),
@@ -417,9 +421,10 @@ async fn run_authenticate(
         None => std::time::Instant::now() + auth_timeout,
     };
     let rec = &state.config.recognition;
-    let threshold = strict.map_or(state.config.authentication.similarity_threshold, |(p, _)| {
-        p.threshold
-    });
+    let threshold = strict.map_or(
+        state.config.authentication.similarity_threshold,
+        |(p, _)| p.threshold,
+    );
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(auth_frames);
     // `n_of_m` mode: score every frame as it arrives and stop at the first
     // terminal step. `mean` mode leaves the decider unset.
@@ -428,8 +433,7 @@ async fn run_authenticate(
         Some((p, _)) => Some((p.accept_n, p.window_m)),
         None => (dec.mode == DecisionMode::NOfM).then_some((dec.accept_n, dec.window_m)),
     };
-    let mut sequential =
-        n_of_m.map(|(n, m)| SequentialDecider::new(threshold, n, m, auth_frames));
+    let mut sequential = n_of_m.map(|(n, m)| SequentialDecider::new(threshold, n, m, auth_frames));
     let mut sequential_step = Step::Continue;
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
@@ -548,10 +552,8 @@ async fn run_authenticate(
                         &stored_embeddings,
                     );
                     debug!("Frame {}: template score {:.4}", i, score);
-                    sequential_step = decider.push(
-                        score,
-                        liveness_state(liveness_agg.is_some(), &liveness),
-                    );
+                    sequential_step =
+                        decider.push(score, liveness_state(liveness_agg.is_some(), &liveness));
                 }
                 passed_embeddings.push(embedding);
             }

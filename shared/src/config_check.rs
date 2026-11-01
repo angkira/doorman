@@ -5,7 +5,7 @@
 //! serialized by `serde_json` as `null` (TOML would drop them), which keeps them
 //! in the known set.
 
-use crate::config::{CONFIG_SCHEMA_VERSION, Config, ConfigError};
+use crate::config::{Config, ConfigError, CONFIG_SCHEMA_VERSION};
 use std::collections::BTreeMap;
 
 /// Keys that are still read but replaced by another key: `(dotted old key, hint)`.
@@ -115,10 +115,9 @@ fn render_default(value: &serde_json::Value) -> String {
         serde_json::Value::Number(n) if n.is_f64() => {
             let text = format!("{:.*}", FLOAT_DOC_DECIMALS, n.as_f64().unwrap_or_default());
             let trimmed = text.trim_end_matches('0');
-            trimmed.strip_suffix('.').map_or_else(
-                || trimmed.to_string(),
-                |int| format!("{int}.0"),
-            )
+            trimmed
+                .strip_suffix('.')
+                .map_or_else(|| trimmed.to_string(), |int| format!("{int}.0"))
         }
         other => other.to_string(),
     }

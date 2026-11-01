@@ -15,7 +15,9 @@ pub enum AuthOutcome {
     NotMatched,
     NotEnrolled,
     /// Camera lease failed; `message` is the user-facing reason.
-    CameraUnavailable { message: String },
+    CameraUnavailable {
+        message: String,
+    },
     NoFrames,
     NoClearFace,
     LivenessRejected,
@@ -123,7 +125,10 @@ mod tests {
         );
         match d.into_response() {
             Response::Success { message, .. } => {
-                assert_eq!(message.as_deref(), Some("Authenticated (confidence: 81.23%)"))
+                assert_eq!(
+                    message.as_deref(),
+                    Some("Authenticated (confidence: 81.23%)")
+                )
             }
             other => panic!("{other:?}"),
         }

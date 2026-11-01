@@ -85,8 +85,11 @@ mod tests {
     #[test]
     fn prune_drops_near_duplicates_of_existing_and_of_earlier_candidates() {
         let existing = vec![at(0.0)];
-        let kept =
-            prune_near_duplicates(vec![at(5.0), at(40.0), at(42.0), at(90.0)], &existing, PRUNE);
+        let kept = prune_near_duplicates(
+            vec![at(5.0), at(40.0), at(42.0), at(90.0)],
+            &existing,
+            PRUNE,
+        );
         assert_eq!(kept, vec![at(40.0), at(90.0)]);
     }
 

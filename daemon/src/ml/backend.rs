@@ -1,6 +1,6 @@
 use anyhow::Result;
-use image::DynamicImage;
 use async_trait::async_trait;
+use image::DynamicImage;
 
 /// Face detection result
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct Face {
 pub trait MLBackend: Send + Sync {
     /// Detect faces in image
     async fn detect_face(&self, image: &DynamicImage) -> Result<Option<Face>>;
-    
+
     /// Check if face is real (anti-spoofing) — legacy MiniFASNet check.
     async fn check_liveness(&self, image: &DynamicImage, face: &Face) -> Result<bool>;
 
@@ -35,13 +35,12 @@ pub trait MLBackend: Send + Sync {
         Ok(None)
     }
 
-
     /// Extract face embedding (512-d vector)
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>>;
-    
+
     /// Check if backend is ready
     fn is_ready(&self) -> bool;
-    
+
     /// Get backend name
     fn name(&self) -> &'static str;
 }

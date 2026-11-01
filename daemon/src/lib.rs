@@ -14,5 +14,5 @@ pub mod unlock_wait;
 
 // Re-export commonly used types
 pub use camera::Camera;
-pub use ml::{MLPipeline, Face};
+pub use ml::{Face, MLPipeline};
 pub use storage::Storage;

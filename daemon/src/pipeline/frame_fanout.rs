@@ -25,7 +25,10 @@ pub async fn run_frame_fanout(
     let mut frame_count = 0u64;
     let mut last_log = Instant::now();
 
-    info!("Frame fanout started (detection @ {}fps, preview @ ~15fps)", target_detection_fps);
+    info!(
+        "Frame fanout started (detection @ {}fps, preview @ ~15fps)",
+        target_detection_fps
+    );
 
     while let Some(raw_frame) = frame_rx.recv().await {
         frame_count += 1;
@@ -59,7 +62,11 @@ pub async fn run_frame_fanout(
             let send_result = detection_tx.try_send(raw_frame);
             match send_result {
                 Ok(_) => {
-                    debug!("Sent frame {} to detection, gap={}ms", frame_count, last_detection.elapsed().as_millis());
+                    debug!(
+                        "Sent frame {} to detection, gap={}ms",
+                        frame_count,
+                        last_detection.elapsed().as_millis()
+                    );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     debug!("Detection channel full, skipping frame {}", frame_count);

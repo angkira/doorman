@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use doorman_shared::{DATA_DIR};
+use doorman_shared::DATA_DIR;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -34,8 +34,7 @@ impl Storage {
         let data_dir: PathBuf = data_dir.into();
 
         // Ensure data directory exists
-        fs::create_dir_all(&data_dir)
-            .context("Failed to create data directory")?;
+        fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
 
         // Set proper permissions (0700 for user, or current perms)
         #[cfg(unix)]
@@ -51,7 +50,7 @@ impl Storage {
         }
 
         let file_path = data_dir.join("embeddings.bin");
-        
+
         // Load existing embeddings if file exists
         let embeddings = if file_path.exists() {
             debug!("Loading existing embeddings from {:?}", file_path);
@@ -138,9 +137,13 @@ impl Storage {
     }
 
     /// Store a user's embeddings (multiple variations)
-    pub async fn store_embeddings(&mut self, username: String, embeddings: Vec<Vec<f32>>) -> Result<()> {
+    pub async fn store_embeddings(
+        &mut self,
+        username: String,
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<()> {
         let enrolled_at = chrono::Local::now().to_rfc3339();
-        
+
         let user_embedding = UserEmbedding {
             username: username.clone(),
             embeddings,
@@ -151,7 +154,10 @@ impl Storage {
         self.embeddings.insert(username.clone(), user_embedding);
         self.save_embeddings()?;
 
-        info!("Stored {} embeddings for user: {}", num_embeddings, username);
+        info!(
+            "Stored {} embeddings for user: {}",
+            num_embeddings, username
+        );
         Ok(())
     }
 
@@ -190,7 +196,6 @@ impl Storage {
         self.embeddings.len()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -232,7 +237,9 @@ mod tests {
         bytes[FILE_MAGIC.len()..HEADER_LEN].copy_from_slice(&99u32.to_le_bytes());
         let err = Storage::decode_embeddings(&bytes).unwrap_err().to_string();
         assert!(err.contains("version 99"), "{err}");
-        let err = Storage::decode_embeddings(FILE_MAGIC).unwrap_err().to_string();
+        let err = Storage::decode_embeddings(FILE_MAGIC)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("truncated"), "{err}");
     }
 
@@ -244,7 +251,10 @@ mod tests {
         let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
         assert_eq!(storage.get_embeddings("alice").unwrap().len(), 2);
         // Reading alone does not rewrite the file.
-        assert_eq!(fs::read(dir.path().join("embeddings.bin")).unwrap(), legacy_bytes());
+        assert_eq!(
+            fs::read(dir.path().join("embeddings.bin")).unwrap(),
+            legacy_bytes()
+        );
 
         storage
             .store_embeddings("alice".into(), vec![vec![0.0, 0.0, 1.0]])
@@ -254,6 +264,9 @@ mod tests {
         assert!(on_disk.starts_with(FILE_MAGIC));
 
         let reloaded = Storage::new_with_dir(dir.path()).await.unwrap();
-        assert_eq!(reloaded.get_embeddings("alice").unwrap(), &vec![vec![0.0, 0.0, 1.0]]);
+        assert_eq!(
+            reloaded.get_embeddings("alice").unwrap(),
+            &vec![vec![0.0, 0.0, 1.0]]
+        );
     }
 }

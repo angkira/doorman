@@ -60,7 +60,11 @@ async fn yunet_detects_real_face() {
     assert!(w > 0.05 && w < 0.95, "width implausible: {}", w);
     assert!(h > 0.05 && h < 0.95, "height implausible: {}", h);
     assert!(x + w <= 1.001 && y + h <= 1.001, "bbox extends past frame");
-    assert!(face.confidence > 0.6, "confidence below threshold: {}", face.confidence);
+    assert!(
+        face.confidence > 0.6,
+        "confidence below threshold: {}",
+        face.confidence
+    );
 
     // Match the Python reference decode (tolerance for resize-filter diffs).
     assert!((x - 0.409).abs() < 0.06, "x far from reference: {}", x);
@@ -71,7 +75,10 @@ async fn yunet_detects_real_face() {
     // 5 landmarks present and inside the frame.
     let lms = face.landmarks.expect("YuNet must supply landmarks");
     for (lx, ly) in lms.iter() {
-        assert!((0.0..=1.0).contains(lx) && (0.0..=1.0).contains(ly), "landmark out of frame: ({lx},{ly})");
+        assert!(
+            (0.0..=1.0).contains(lx) && (0.0..=1.0).contains(ly),
+            "landmark out of frame: ({lx},{ly})"
+        );
     }
 }
 
@@ -89,7 +96,13 @@ async fn yunet_no_face_on_test_pattern() {
         .expect("Failed to create ML pipeline");
 
     let img = image::open("tests/fixtures/no_face_pattern.jpg").expect("load no-face fixture");
-    let result = pipeline.detect_face(&img).await.expect("detect_face errored");
-    println!("test-pattern detection: {:?}", result.as_ref().map(|f| f.bbox));
+    let result = pipeline
+        .detect_face(&img)
+        .await
+        .expect("detect_face errored");
+    println!(
+        "test-pattern detection: {:?}",
+        result.as_ref().map(|f| f.bbox)
+    );
     assert!(result.is_none(), "expected no face on TV test pattern");
 }

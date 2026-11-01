@@ -274,7 +274,9 @@ mod tests {
         let env: RequestEnvelope =
             serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
         assert_eq!(env.protocol_version, None);
-        assert!(matches!(env.request, Request::Authenticate { ref username, service: None, tty: None } if username == "bob"));
+        assert!(
+            matches!(env.request, Request::Authenticate { ref username, service: None, tty: None } if username == "bob")
+        );
     }
 
     #[test]

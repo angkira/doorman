@@ -70,7 +70,8 @@ impl CaptureLease {
 }
 impl Drop for CaptureLease {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -192,8 +193,10 @@ async fn run_preview_supervisor(
                 let handles =
                     pipeline::start_detection_recognition(&state, detection_rx, unlock_ctx.clone());
                 active = Some((detection_tx, handles));
-                last_detection = Instant::now() - std::time::Duration::from_millis(detection_interval_ms as u64);
-                last_preview = Instant::now() - std::time::Duration::from_millis(preview_interval_ms as u64);
+                last_detection =
+                    Instant::now() - std::time::Duration::from_millis(detection_interval_ms as u64);
+                last_preview =
+                    Instant::now() - std::time::Duration::from_millis(preview_interval_ms as u64);
             }
             // Both gates closed -> tear the ML pipeline down (back to ~0% CPU).
             (false, true) => {
@@ -254,31 +257,27 @@ async fn main() -> Result<()> {
     // precedence over the config's `ml.device`. On Apple Silicon with the
     // `backend-ort-coreml` feature compiled, `auto`/`coreml` selects the CoreML
     // EP (Neural Engine + GPU + CPU fallback); otherwise the daemon stays on CPU.
-    let device_override = std::env::args()
-        .skip_while(|arg| arg != "--device")
-        .nth(1);
+    let device_override = std::env::args().skip_while(|arg| arg != "--device").nth(1);
 
     // Load configuration from --config, DOORMAN_CONFIG env var, or standard locations
     let mut config = if let Some(config_path) = config_file {
         info!("Loading config from --config: {:?}", config_path);
-        Config::load_from(&config_path)
-            .unwrap_or_else(|e| {
-                warn!("Failed to load config from --config: {}", e);
-                Config::default()
-            })
+        Config::load_from(&config_path).unwrap_or_else(|e| {
+            warn!("Failed to load config from --config: {}", e);
+            Config::default()
+        })
     } else if let Ok(config_path) = std::env::var("DOORMAN_CONFIG") {
         info!("Loading config from DOORMAN_CONFIG: {}", config_path);
-        Config::load_from(&std::path::PathBuf::from(config_path))
-            .unwrap_or_else(|e| {
-                warn!("Failed to load config from DOORMAN_CONFIG: {}", e);
-                Config::default()
-            })
+        Config::load_from(&std::path::PathBuf::from(config_path)).unwrap_or_else(|e| {
+            warn!("Failed to load config from DOORMAN_CONFIG: {}", e);
+            Config::default()
+        })
     } else {
         Config::load().unwrap_or_default()
     };
     if preview_mode {
         config.daemon.preview_mode = true;
-        config.daemon.debug_mode = true;  // Preview mode implies debug mode
+        config.daemon.debug_mode = true; // Preview mode implies debug mode
     }
 
     // Resolve the inference device.
@@ -308,8 +307,7 @@ async fn main() -> Result<()> {
     //
     // Dev/preview: --start-unlocked, or debug/preview mode, keeps the session
     // unlocked so the pipeline streams frames without auto-locking the desktop.
-    let initial_locked =
-        config.daemon.start_locked && !start_unlocked && !config.daemon.debug_mode;
+    let initial_locked = config.daemon.start_locked && !start_unlocked && !config.daemon.debug_mode;
 
     if user_mode {
         config.daemon.user_mode = true;
@@ -317,19 +315,37 @@ async fn main() -> Result<()> {
         // Adjust paths for user mode (use XDG directories)
         if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
             let runtime_path = std::path::PathBuf::from(runtime_dir);
-            config.daemon.socket_path = runtime_path.join("doorman.sock").to_string_lossy().to_string();
-            config.daemon.debug_socket = runtime_path.join("doorman-debug.sock").to_string_lossy().to_string();
-            config.daemon.frame_socket = runtime_path.join("doorman-frames.sock").to_string_lossy().to_string();
+            config.daemon.socket_path = runtime_path
+                .join("doorman.sock")
+                .to_string_lossy()
+                .to_string();
+            config.daemon.debug_socket = runtime_path
+                .join("doorman-debug.sock")
+                .to_string_lossy()
+                .to_string();
+            config.daemon.frame_socket = runtime_path
+                .join("doorman-frames.sock")
+                .to_string_lossy()
+                .to_string();
         }
 
         if let Some(data_dir) = std::env::var_os("XDG_DATA_HOME") {
-            config.daemon.data_dir = std::path::PathBuf::from(data_dir).join("doorman").to_string_lossy().to_string();
+            config.daemon.data_dir = std::path::PathBuf::from(data_dir)
+                .join("doorman")
+                .to_string_lossy()
+                .to_string();
         } else if let Some(home) = std::env::var_os("HOME") {
-            config.daemon.data_dir = std::path::PathBuf::from(home).join(".local/share/doorman").to_string_lossy().to_string();
+            config.daemon.data_dir = std::path::PathBuf::from(home)
+                .join(".local/share/doorman")
+                .to_string_lossy()
+                .to_string();
         }
 
         // Also update models directory for user mode
-        config.ml.models_dir = std::path::PathBuf::from(&config.daemon.data_dir).join("models").to_string_lossy().to_string();
+        config.ml.models_dir = std::path::PathBuf::from(&config.daemon.data_dir)
+            .join("models")
+            .to_string_lossy()
+            .to_string();
     }
 
     // Initialize logging.
@@ -338,12 +354,13 @@ async fn main() -> Result<()> {
     // logs ("Successfully registered ROCMExecutionProvider" / CPU fallback) are
     // visible — otherwise an operator can't tell a GPU run from a silent CPU
     // fallback. Still overridable via RUST_LOG.
-    let log_level = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| format!(
+    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        format!(
             "doormand={},ort=info,{}=info",
             config.daemon.log_level,
             doormand::sudo_policy::AUDIT_TARGET
-        ));
+        )
+    });
 
     tracing_subscriber::registry()
         .with(
@@ -354,7 +371,14 @@ async fn main() -> Result<()> {
         .init();
 
     info!("doorman daemon starting...");
-    info!("Mode: {}", if config.daemon.user_mode { "user service" } else { "system service (root)" });
+    info!(
+        "Mode: {}",
+        if config.daemon.user_mode {
+            "user service"
+        } else {
+            "system service (root)"
+        }
+    );
     info!("Socket: {}", config.daemon.socket_path);
     info!("Data dir: {}", config.daemon.data_dir);
     info!(
@@ -392,7 +416,7 @@ async fn main() -> Result<()> {
                 info!("✓ Models warmed up and ready");
             }
             Arc::new(pipeline)
-        },
+        }
         Err(e) => {
             error!("Failed to initialize ML pipeline: {}", e);
             warn!(
@@ -403,7 +427,9 @@ async fn main() -> Result<()> {
     };
 
     info!("Initializing storage...");
-    let storage = Arc::new(RwLock::new(storage::Storage::new_with_dir(&config.daemon.data_dir).await?));
+    let storage = Arc::new(RwLock::new(
+        storage::Storage::new_with_dir(&config.daemon.data_dir).await?,
+    ));
 
     info!("Initializing camera...");
     // The camera is OPENED and OWNED entirely by the producer thread (see
@@ -460,7 +486,7 @@ async fn main() -> Result<()> {
     // only while at least one preview client is connected. With nobody watching,
     // these broadcasters sit idle and the daemon stays at ~0% CPU.
     info!("Initializing frame stream broadcaster...");
-    let frame_broadcaster = Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30)));  // Buffer 30 frames
+    let frame_broadcaster = Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30))); // Buffer 30 frames
 
     // Lock supervisor (SYSTEM-daemon mode only). Connects to logind on the
     // system bus, resolves the active graphical seat0 session, and exposes
@@ -535,7 +561,9 @@ async fn main() -> Result<()> {
         let debug_ipc = config.ipc.clone();
         info!("Starting debug stream server on {}", debug_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_bcast, debug_ipc).await {
+            if let Err(e) =
+                debug_stream::run_debug_server(debug_socket_path, debug_bcast, debug_ipc).await
+            {
                 error!("Debug stream server error: {}", e);
             }
         }))
@@ -548,7 +576,10 @@ async fn main() -> Result<()> {
         let frame_ipc = config.ipc.clone();
         info!("Starting frame stream server on {}", frame_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone, frame_ipc).await {
+            if let Err(e) =
+                frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone, frame_ipc)
+                    .await
+            {
                 error!("Frame stream server error: {}", e);
             }
         }))
@@ -580,7 +611,10 @@ async fn main() -> Result<()> {
     let pipeline_handles = if config.daemon.preview_mode {
         info!("Starting pipeline (preview mode - detection+recognition overlay, always-on)");
         let _ = capture_active_tx.send(true); // preview => camera always capturing
-        let camera_rx = camera_rx.lock().await.take()
+        let camera_rx = camera_rx
+            .lock()
+            .await
+            .take()
             .expect("camera_rx consumed exactly once by the pipeline");
         let handles = pipeline::start_pipeline(state.clone(), camera_rx).await;
         Some(handles)
@@ -593,11 +627,13 @@ async fn main() -> Result<()> {
             // When disabled, the pipeline is still lock-GATED via `armed_rx`; it
             // just never calls Unlock (PAM remains the unlock path).
             let unlock_ctx = if config.authentication.proactive_unlock {
-                sup.unlocker.clone().map(|unlocker| pipeline::UnlockContext {
-                    unlocker,
-                    armed_rx: sup.armed_rx.clone(),
-                    lock_gen_rx: sup.lock_gen_rx.clone(),
-                })
+                sup.unlocker
+                    .clone()
+                    .map(|unlocker| pipeline::UnlockContext {
+                        unlocker,
+                        armed_rx: sup.armed_rx.clone(),
+                        lock_gen_rx: sup.lock_gen_rx.clone(),
+                    })
             } else {
                 None
             };
@@ -632,8 +668,8 @@ async fn main() -> Result<()> {
                 let clock = tokio::time::Instant::now();
                 let mut edge = camera::gate::LockEdge::default();
                 loop {
-                    let subs = fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0)
-                        + db.receiver_count();
+                    let subs =
+                        fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0) + db.receiver_count();
                     // On-demand IPC leases (enroll/auth) force the camera on too.
                     let on_demand = reqs.load(std::sync::atomic::Ordering::SeqCst) > 0;
                     // armed = locked && !idle, so idle follows from the two hints.
