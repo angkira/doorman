@@ -188,7 +188,9 @@ uses the ROCm/CUDA features above). Reproduce the table with:
 ## Config
 
 Edit `/etc/doorman/doorman.toml` (system) or `~/.config/doorman/doorman.toml`
-(user). See `packaging/doorman.toml.example` for all keys.
+(user). See `packaging/doorman.toml.example` for an annotated example and
+[docs/CONFIG.md](docs/CONFIG.md) for every key with its default. Validate a file
+with `doorman config check [--config PATH]` (exit 0 ok, 1 invalid, 2 unknown keys).
 
 ```toml
 [authentication]
@@ -230,6 +232,42 @@ Camera Producer → Frame Fanout → Detection → Recognition
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
+
+## Architecture & trust boundaries
+
+```
+client (PAM module / CLI / unlock helper)
+   -> command socket
+   -> SO_PEERCRED policy (peer uid decides which requests are allowed)
+   -> camera -> detection -> liveness -> recognition
+   -> decision (N-of-M frames) -> Success / Denied
+```
+
+- The command socket identifies the caller by kernel-reported peer credentials,
+  not by the `username` in the request; admin operations (enroll, remove) are
+  root/`admin_uids` only. See [docs/ipc-security.md](docs/ipc-security.md).
+- The default path serves the lock screen; see [docs/unlock-path.md](docs/unlock-path.md)
+  and [docs/decision-and-liveness.md](docs/decision-and-liveness.md).
+- `sudo` face authentication is opt-in in two places (daemon config and PAM file),
+  runs a stricter profile and always falls through to the password:
+  [docs/SUDO.md](docs/SUDO.md). Daemon sandboxing: [docs/systemd-hardening.md](docs/systemd-hardening.md).
+
+## Latency budget
+
+Per-stage numbers and the lock-to-unlock timeline are in
+[docs/bench/baseline.md](docs/bench/baseline.md). They are labelled there as a
+host audit (2026-11-01) and were not reproduced by the benchmark harness; measure
+your own with `doorman-bench` ([docs/bench/README.md](docs/bench/README.md)).
+Camera notes: [docs/camera.md](docs/camera.md).
+
+## Known limitations
+
+- Liveness from an RGB webcam is a heuristic (monocular depth relief), not a
+  strong authentication factor: photos, screens and masks are not ruled out.
+  Prefer a FIDO2 key or fingerprint reader where you have the hardware.
+- Any local process allowed by the socket policy can make the daemon open the
+  camera for an attempt.
+- Dataset capture for R&D is off by default; see [docs/CONFIG.md](docs/CONFIG.md).
 
 ## Testing
 
