@@ -59,6 +59,9 @@ mod gstreamer_backend;
 #[cfg(feature = "camera-gstreamer")]
 pub use gstreamer_backend::GStreamerCamera;
 
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod format_select;
+
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 mod v4l2_backend;
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
@@ -111,7 +114,7 @@ impl Camera {
                         inner: CameraBackendInner::GStreamer(cam),
                     });
                 }
-                Err(e) => tracing::warn!("GStreamer camera failed: {}, trying next backend", e),
+                Err(e) => tracing::warn!("GStreamer camera failed: {:#}, trying next backend", e),
             }
         }
 
@@ -125,7 +128,7 @@ impl Camera {
                         inner: CameraBackendInner::V4L2(cam),
                     });
                 }
-                Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {}, trying next backend", e),
+                Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {:#}, trying next backend", e),
             }
         }
 
@@ -141,7 +144,7 @@ impl Camera {
                         inner: CameraBackendInner::Ffmpeg(cam),
                     });
                 }
-                Err(e) => tracing::warn!("ffmpeg webcam failed: {}, falling back to mock", e),
+                Err(e) => tracing::warn!("ffmpeg webcam failed: {:#}, falling back to mock", e),
             }
         }
 
