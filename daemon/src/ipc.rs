@@ -6,7 +6,7 @@ use doorman_shared::{
     DaemonInfo, ENROLL_DURATION_SECS, EnrollmentPhase, Request, Response, ResponseData,
     SIMILARITY_THRESHOLD, StreamMessage,
 };
-use doormand::ipc_policy::{self, Gatekeeper, Gated};
+use doormand::ipc_policy::{self, Gated, Gatekeeper};
 use image::GenericImageView;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -83,7 +83,11 @@ pub async fn run_server(state: DaemonState) -> Result<()> {
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: DaemonState, gate: &Gatekeeper) -> Result<()> {
+async fn handle_connection(
+    stream: UnixStream,
+    state: DaemonState,
+    gate: &Gatekeeper,
+) -> Result<()> {
     // Fail closed: without peer credentials no request can be authorized.
     let peer = match ipc_policy::peer_from_stream(&stream) {
         Ok(p) => p,

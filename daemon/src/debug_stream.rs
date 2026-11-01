@@ -1,6 +1,6 @@
 use anyhow::Result;
-use doormand::ipc_policy;
 use doorman_shared::{IpcConfig, StreamMessage};
+use doormand::ipc_policy;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;

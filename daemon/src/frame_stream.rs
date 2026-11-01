@@ -1,6 +1,6 @@
 use anyhow::Result;
-use doormand::ipc_policy;
 use doorman_shared::IpcConfig;
+use doormand::ipc_policy;
 use image::DynamicImage;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
