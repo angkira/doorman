@@ -59,6 +59,11 @@ mod gstreamer_backend;
 #[cfg(feature = "camera-gstreamer")]
 pub use gstreamer_backend::GStreamerCamera;
 
+pub mod gate;
+
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod format_select;
+
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 mod v4l2_backend;
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
@@ -100,6 +105,26 @@ impl Camera {
         }
     }
 
+    /// Create a synthetic-frame camera (no device, no ffmpeg). For tests.
+    pub fn synthetic(width: u32, height: u32, fps: u32) -> Self {
+        Self {
+            inner: CameraBackendInner::Mock(MockCamera::synthetic(width, height, fps)),
+        }
+    }
+
+    /// Name of the active backend, for logging.
+    pub fn backend_name(&self) -> &'static str {
+        match &self.inner {
+            CameraBackendInner::Mock(cam) => cam.backend_name(),
+            #[cfg(feature = "camera-ffmpeg")]
+            CameraBackendInner::Ffmpeg(cam) => cam.backend_name(),
+            #[cfg(feature = "camera-gstreamer")]
+            CameraBackendInner::GStreamer(cam) => cam.backend_name(),
+            #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
+            CameraBackendInner::V4L2(cam) => cam.backend_name(),
+        }
+    }
+
     pub async fn new_with_config(config: &Config) -> Result<Self> {
         // Try GStreamer first (PipeWire-integrated, Linux).
         #[cfg(feature = "camera-gstreamer")]
@@ -111,7 +136,7 @@ impl Camera {
                         inner: CameraBackendInner::GStreamer(cam),
                     });
                 }
-                Err(e) => tracing::warn!("GStreamer camera failed: {}, trying next backend", e),
+                Err(e) => tracing::warn!("GStreamer camera failed: {:#}, trying next backend", e),
             }
         }
 
@@ -125,7 +150,7 @@ impl Camera {
                         inner: CameraBackendInner::V4L2(cam),
                     });
                 }
-                Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {}, trying next backend", e),
+                Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {:#}, trying next backend", e),
             }
         }
 
@@ -141,7 +166,7 @@ impl Camera {
                         inner: CameraBackendInner::Ffmpeg(cam),
                     });
                 }
-                Err(e) => tracing::warn!("ffmpeg webcam failed: {}, falling back to mock", e),
+                Err(e) => tracing::warn!("ffmpeg webcam failed: {:#}, falling back to mock", e),
             }
         }
 
