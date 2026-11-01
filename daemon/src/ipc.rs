@@ -1289,6 +1289,17 @@ async fn handle_remove_user(state: &DaemonState, username: &str) -> Response {
     }
 }
 
+/// Loaded ONNX Runtime linkage/version, `None` when built without an ORT backend.
+#[cfg(feature = "_ort")]
+fn ort_runtime_info() -> Option<String> {
+    Some(crate::ml::ort_backend::runtime_info())
+}
+
+#[cfg(not(feature = "_ort"))]
+fn ort_runtime_info() -> Option<String> {
+    None
+}
+
 async fn handle_status(state: &DaemonState) -> Response {
     let storage = state.storage.read().await;
     let camera_available = state.latest_frame.borrow().is_some();
@@ -1299,6 +1310,7 @@ async fn handle_status(state: &DaemonState) -> Response {
         camera_available,
         models_loaded: state.ml_pipeline.models_loaded(),
         enrolled_users: storage.count(),
+        ort_runtime: ort_runtime_info(),
     };
 
     Response::Success {

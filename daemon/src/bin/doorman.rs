@@ -821,6 +821,9 @@ fn print_status(info: &DaemonInfo) {
         if info.models_loaded { "yes" } else { "no" }
     );
     println!("  enrolled users : {}", info.enrolled_users);
+    if let Some(ort) = &info.ort_runtime {
+        println!("  onnx runtime   : {ort}");
+    }
 }
 
 fn format_uptime(secs: u64) -> String {
