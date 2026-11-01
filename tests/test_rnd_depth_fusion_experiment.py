@@ -83,3 +83,49 @@ def test_inventory_report_includes_capture_quality_by_label(tmp_path):
     assert quality["FalseNegative"]["frames"] == 2
     assert quality["FalseNegative"]["missing_bbox"] == 1
     assert quality["FalseNegative"]["face_area_frac"]["p50"] == 0.0001
+
+
+def test_calibration_report_selects_threshold_with_no_false_accepts_when_possible():
+    errors = [0.1, 0.2, 0.3, 0.55, 0.7]
+    labels = [1, 1, 1, 0, 0]
+
+    report = rnd.calibrate_one_class_errors(errors, labels)
+
+    assert report["status"] == "ok"
+    assert report["threshold_source"] == "max_positive_below_min_negative"
+    assert report["threshold"] == 0.3
+    assert report["false_accept_rate"] == 0.0
+    assert report["false_reject_rate"] == 0.0
+
+
+def test_deployment_manifest_records_auxiliary_scorer_contract(tmp_path):
+    one_class = {
+        "status": "ok",
+        "model_path": str(tmp_path / "one_class_autoencoder.pt"),
+        "reconstruction_error_p95": 0.4,
+    }
+    calibration = {
+        "status": "ok",
+        "threshold": 0.3,
+        "false_accept_rate": 0.0,
+        "false_reject_rate": 0.1,
+    }
+
+    manifest = rnd.write_deployment_manifest(
+        out_dir=tmp_path,
+        encoder="da3-base",
+        feature_kind="da3_depth_face_patch_and_stats",
+        model_dir="/mnt/datasets/models/depth-anything/DA3-BASE",
+        feature_shape=[10, 1036],
+        one_class=one_class,
+        calibration=calibration,
+        probe={"status": "ok", "roc_auc": 0.99},
+        process_res=504,
+        patch_size=32,
+    )
+
+    assert manifest["scorer_kind"] == "da3_one_class_reconstruction"
+    assert manifest["decision"]["threshold"] == 0.3
+    assert manifest["decision"]["lower_is_more_genuine"] is True
+    assert manifest["runtime"]["integration_status"] == "candidate_not_hot_path"
+    assert (tmp_path / "deployment_manifest.json").exists()

@@ -553,6 +553,126 @@ def train_one_class_autoencoder(
     }
 
 
+def score_one_class_autoencoder(model_path: Path, features: np.ndarray) -> np.ndarray:
+    import torch
+    from torch import nn
+
+    artifact = torch.load(model_path, map_location="cpu", weights_only=False)
+    input_dim = int(artifact["input_dim"])
+    hidden_dim = int(artifact["hidden_dim"])
+    latent_dim = int(artifact["latent_dim"])
+    model = nn.Sequential(
+        nn.Linear(input_dim, hidden_dim),
+        nn.GELU(),
+        nn.Linear(hidden_dim, latent_dim),
+        nn.GELU(),
+        nn.Linear(latent_dim, hidden_dim),
+        nn.GELU(),
+        nn.Linear(hidden_dim, input_dim),
+    )
+    model.load_state_dict(artifact["state_dict"])
+    model.eval()
+
+    mean = np.asarray(artifact["mean"], dtype=np.float32).reshape(1, -1)
+    std = np.asarray(artifact["std"], dtype=np.float32).reshape(1, -1)
+    std[std < 1e-6] = 1.0
+    x = (np.asarray(features, dtype=np.float32) - mean) / std
+    with torch.inference_mode():
+        tensor = torch.from_numpy(x)
+        recon = model(tensor).detach().cpu().numpy()
+    return ((recon - x) ** 2).mean(axis=1)
+
+
+def calibrate_one_class_errors(errors: list[float] | np.ndarray, labels: list[int]) -> dict[str, Any]:
+    y = np.asarray(labels, dtype=np.int64)
+    e = np.asarray(errors, dtype=np.float64)
+    pos = e[y == 1]
+    neg = e[y == 0]
+    if pos.size == 0 or neg.size == 0:
+        return {
+            "status": "not_enough_classes",
+            "positive_count": int(pos.size),
+            "negative_count": int(neg.size),
+        }
+
+    max_pos = float(pos.max())
+    min_neg = float(neg.min())
+    if max_pos < min_neg:
+        threshold = max_pos
+        threshold_source = "max_positive_below_min_negative"
+    else:
+        candidates = np.sort(np.unique(e))
+        best = None
+        for threshold_candidate in candidates:
+            false_accept_rate = float(np.mean(neg <= threshold_candidate))
+            false_reject_rate = float(np.mean(pos > threshold_candidate))
+            objective = (false_accept_rate, false_reject_rate, abs(float(threshold_candidate) - float(np.median(pos))))
+            if best is None or objective < best[0]:
+                best = (objective, float(threshold_candidate))
+        threshold = best[1] if best is not None else float(np.percentile(pos, 95))
+        threshold_source = "min_false_accept_then_false_reject"
+
+    false_accept_rate = float(np.mean(neg <= threshold))
+    false_reject_rate = float(np.mean(pos > threshold))
+    return {
+        "status": "ok",
+        "threshold": float(threshold),
+        "threshold_source": threshold_source,
+        "positive_count": int(pos.size),
+        "negative_count": int(neg.size),
+        "positive_error": metric_summary(pos.tolist()),
+        "negative_error": metric_summary(neg.tolist()),
+        "false_accept_rate": false_accept_rate,
+        "false_reject_rate": false_reject_rate,
+    }
+
+
+def write_deployment_manifest(
+    *,
+    out_dir: Path,
+    encoder: str,
+    feature_kind: str,
+    model_dir: str,
+    feature_shape: list[int],
+    one_class: dict[str, Any],
+    calibration: dict[str, Any],
+    probe: dict[str, Any],
+    process_res: int,
+    patch_size: int,
+) -> dict[str, Any]:
+    threshold = calibration.get("threshold", one_class.get("reconstruction_error_p95"))
+    manifest = {
+        "schema_version": 1,
+        "scorer_kind": "da3_one_class_reconstruction",
+        "encoder": encoder,
+        "feature_kind": feature_kind,
+        "feature_shape": feature_shape,
+        "model_dir": model_dir,
+        "model_path": one_class.get("model_path"),
+        "preprocess": {
+            "process_res": process_res,
+            "patch_size": patch_size,
+            "feature_layout": "12_stats_plus_depth_face_patch_row_major",
+        },
+        "decision": {
+            "score": "mean_squared_reconstruction_error",
+            "threshold": threshold,
+            "lower_is_more_genuine": True,
+        },
+        "calibration": calibration,
+        "probe": probe,
+        "runtime": {
+            "integration_status": "candidate_not_hot_path",
+            "required_next_step": "run via DA3 sidecar or export scorer to ONNX before enabling in doormand",
+        },
+    }
+    (out_dir / "deployment_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def run_linear_probe(features: np.ndarray, labels: list[int]) -> dict[str, Any]:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import accuracy_score, roc_auc_score
@@ -693,6 +813,36 @@ def main() -> int:
                     args.one_class_val_frac,
                 )
             report["probe"] = run_linear_probe(features, labels)
+            one_class = report.get("one_class")
+            if isinstance(one_class, dict) and one_class.get("status") == "ok":
+                reconstruction_errors = score_one_class_autoencoder(Path(one_class["model_path"]), features)
+                score_rows = [
+                    {
+                        "attempt_id": sample.attempt_id,
+                        "label": sample.label,
+                        "target": int(label),
+                        "reconstruction_error": float(error),
+                    }
+                    for sample, label, error in zip(usable, labels, reconstruction_errors)
+                ]
+                (out_dir / "one_class_scores.json").write_text(
+                    json.dumps(score_rows, indent=2),
+                    encoding="utf-8",
+                )
+                report["one_class_scores_path"] = str(out_dir / "one_class_scores.json")
+                report["one_class_calibration"] = calibrate_one_class_errors(reconstruction_errors, labels)
+                report["deployment_manifest"] = write_deployment_manifest(
+                    out_dir=out_dir,
+                    encoder=args.encoder,
+                    feature_kind=report["feature_kind"],
+                    model_dir=args.da3_model_dir,
+                    feature_shape=report["feature_shape"],
+                    one_class=one_class,
+                    calibration=report["one_class_calibration"],
+                    probe=report["probe"],
+                    process_res=args.da3_process_res,
+                    patch_size=args.da3_patch_size,
+                )
         elif args.encoder.startswith("timm:"):
             model_name = args.encoder.split(":", 1)[1]
             features = extract_timm_features(usable, model_name, args.batch_size)
