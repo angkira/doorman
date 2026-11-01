@@ -35,6 +35,26 @@ echo "{name}: already locked" >&2
 exit 1
 """
 
+# Watcher that stays up until killed and counts its invocations.
+LONG_WATCHER_STUB = """#!/bin/sh
+printf '%s\\n' "$$" > "$STUB_DIR/{name}.pid"
+printf '%s\\n' "$@" >> "$STUB_DIR/{name}.calls"
+trap 'exit 0' TERM
+while :; do sleep 0.05; done
+"""
+
+# pgrep: records its arguments, prints $STUB_DIR/pgrep.out (exit 1 if empty).
+PGREP_STUB = """#!/bin/sh
+printf '%s\\n' "$@" > "$STUB_DIR/pgrep.args"
+if [ -s "$STUB_DIR/pgrep.out" ]; then cat "$STUB_DIR/pgrep.out"; else exit 1; fi
+"""
+
+# loginctl: records its arguments, prints LockedHint=<contents of lockedhint>.
+LOGINCTL_STUB = """#!/bin/sh
+printf '%s\\n' "$@" > "$STUB_DIR/loginctl.args"
+printf 'LockedHint=%s\\n' "$(cat "$STUB_DIR/lockedhint" 2>/dev/null || echo no)"
+"""
+
 RECORDER_STUB = """#!/bin/sh
 printf '%s\\n' "$@" > "$STUB_DIR/{name}.args"
 """
@@ -91,6 +111,9 @@ class Env:
             "GTKLOCK": "gtklock",
             "SWAYLOCK": "swaylock",
         }
+        # Default: no live locker, session not locked. Never ask the real host.
+        self.stub("pgrep", PGREP_STUB)
+        self.stub("loginctl", LOGINCTL_STUB)
 
     def stub(self, name: str, template: str) -> None:
         path = self.stub_dir / name
@@ -168,7 +191,111 @@ def test_locker_exiting_at_once_means_already_locked(tmp_path: Path) -> None:
 
     assert proc.returncode == 0
     assert not (env.stub_dir / "doorman.args").exists(), "no second watcher"
-    assert "already locked" in env.log.read_text()
+    log = env.log.read_text()
+    assert "already locked" in log
+    assert "rc=1" in log and "no watcher" in log
+
+
+@pytest.fixture
+def alive_holder():
+    """A live process standing in for the locker that holds the session lock."""
+    holder = subprocess.Popen(["sleep", str(TIMEOUT * 4)])
+    yield holder
+    holder.kill()
+    holder.wait()
+
+
+def test_failed_locker_with_live_holder_attaches_the_watcher(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+
+    proc = env.run()
+    proc.wait(timeout=TIMEOUT)
+
+    assert proc.returncode == 0
+    watch = env.read_args("doorman")
+    assert watch[:3] == ["--socket", env.env["DOORMAN_SOCKET"], "unlock-watch"]
+    assert watch[watch.index("--locker-pid") + 1] == str(alive_holder.pid)
+    assert watch[watch.index("--locker-name") + 1] == "gtklock"
+    # Only this user's processes, exact name, newest match.
+    pgrep = env.read_args("pgrep")
+    assert pgrep[pgrep.index("-u") + 1] == str(os.getuid())
+    assert pgrep[pgrep.index("-x") + 1] == "gtklock"
+    assert "-n" in pgrep
+    log = env.log.read_text()
+    assert "rc=1" in log
+    assert f"pid={alive_holder.pid}" in log
+    assert "attaching watcher" in log
+
+
+def test_failed_locker_without_process_but_locked_hint_attaches_nothing(
+    tmp_path: Path,
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "lockedhint").write_text("yes")
+
+    proc = env.run({"XDG_SESSION_ID": "7"})
+    proc.wait(timeout=TIMEOUT)
+
+    assert proc.returncode == 0
+    assert not (env.stub_dir / "doorman.args").exists(), "nothing to SIGTERM"
+    assert env.read_args("loginctl") == ["show-session", "7", "-p", "LockedHint"]
+    log = env.log.read_text()
+    assert "rc=1" in log
+    assert "unknown client" in log and "LockedHint=yes" in log
+
+
+def test_second_run_does_not_start_a_second_watcher(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", LONG_WATCHER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+
+    first = env.run()
+    env.wait_for("doorman.pid")
+    watcher_pid = int((env.stub_dir / "doorman.pid").read_text())
+    pidfile = env.runtime / "doorman" / "unlock-watch.pid"
+    assert pidfile.read_text().strip() == str(watcher_pid)
+
+    second = env.run()
+    second.wait(timeout=TIMEOUT)
+    assert second.returncode == 0
+    calls = (env.stub_dir / "doorman.calls").read_text().splitlines()
+    assert calls.count("unlock-watch") == 1, "no duplicate watcher"
+    assert "already running" in env.log.read_text()
+
+    os.kill(watcher_pid, signal.SIGTERM)
+    first.wait(timeout=TIMEOUT)
+    assert first.returncode == 0
+    assert not pidfile.exists(), "pidfile removed when the watcher ends"
+
+
+def test_stale_pidfile_does_not_block_a_new_watcher(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+    state = env.runtime / "doorman"
+    state.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (state / "unlock-watch.pid").write_text(f"{dead.pid}\n")
+
+    proc = env.run()
+    proc.wait(timeout=TIMEOUT)
+
+    watch = env.read_args("doorman")
+    assert watch[watch.index("--locker-pid") + 1] == str(alive_holder.pid)
 
 
 def test_falls_back_to_swaylock_without_gtklock(tmp_path: Path) -> None:

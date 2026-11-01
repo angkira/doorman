@@ -15,8 +15,22 @@ Mod+L -> doorman-lock -> gtklock (background job, PID = $!)
 1. `doorman-lock` (`packaging/adapters/niri/bin/`) starts the locker as a
    background job of the script, so `$!` is the PID of the real locker. It does
    not use `--daemonize`. If the locker exits within `DOORMAN_LOCKER_SETTLE`
-   (0.3 s) the session was already locked: that is success, no second locker
-   and no second watcher. While the locker is alive it starts the watcher.
+   (0.3 s) the session was already locked: no second locker is started. With
+   status 0 that is the end. With a non-zero status (gtklock returns 1 while a
+   previous instance holds the lock) the script decides whether the lock is held
+   and logs `rc`, the chosen PID and the decision to `lock.log`:
+   * a live process of the locker name owned by the current user
+     (`pgrep -n -u "$(id -u)" -x gtklock`, newest PID): the watcher is attached
+     to that PID (`unlock-watch --locker-pid <pid>`);
+   * none, but `loginctl show-session "$XDG_SESSION_ID" -p LockedHint` says
+     `yes`: the lock is held by an unknown client; this is logged and no
+     watcher is started (there is no PID to SIGTERM);
+   * neither: logged, nothing started.
+
+   One watcher at a time: its PID is kept in
+   `$XDG_RUNTIME_DIR/doorman/unlock-watch.pid`. A second run finds the live
+   watcher, logs `already running` and starts none. A stale pidfile is ignored.
+   While the locker is alive the script starts the watcher.
 2. `doorman unlock-watch` sends `WaitForMatch{username, timeout_ms}` and
    blocks on the socket. One connection replaces one `doorman test` process
    (a full capture session) plus a `sleep 2` per attempt. Calls are re-issued
@@ -124,8 +138,12 @@ and, with `keep_raw_frames`, a capture pack (capped per day), as repeated
       `sent SIGTERM`, `locker exited after SIGTERM`.
 - [ ] Measure recognized-to-unlocked from the log timestamps (target <= 0.6 s).
 - [ ] Typing the password still works and the watcher exits with 10.
-- [ ] Locking twice in a row: the second run logs "already locked" and starts
-      no second locker or watcher; `pgrep -fc unlock-watch` is 1.
+- [ ] Locking twice in a row: the second run starts no second locker or watcher
+      (`lock.log`: `rc=1` ... `already running`, or `already locked`);
+      `pgrep -fc unlock-watch` is 1.
+- [ ] Host case: gtklock returns rc=1 while niri reports the session locked by
+      an active client: `lock.log` shows `rc=1`, the PID of the live gtklock and
+      `attaching watcher`, and the face unlock still works.
 - [ ] Camera unplugged: the lock screen stays responsive and the password works.
 - [ ] Screen idle (display off) then wake: `not_armed` waits, unlock still works.
 - [ ] `gtklock` comm equals `gtklock` (`cat /proc/$(pgrep -x gtklock)/comm`);
