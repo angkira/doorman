@@ -2049,11 +2049,9 @@ pub fn run_install(opts: &InstallOpts) -> Result<(), String> {
                 .into(),
         );
     }
-    if !opts.assume_yes {
-        if !confirm("Proceed with the install above?") {
-            println!("Aborted.");
-            return Ok(());
-        }
+    if !opts.assume_yes && !confirm("Proceed with the install above?") {
+        println!("Aborted.");
+        return Ok(());
     }
     execute_plan(&plan, &d, opts)?;
     print_next_steps(&d, opts);
@@ -2174,7 +2172,7 @@ fn run_action(a: &Action) -> Result<bool, String> {
             let mut c = Command::new("sudo");
             c.arg("-u")
                 .arg(&sudo_user)
-                .arg(format!("--preserve-env=DOORMAN_INSTALL_CONFIRM,TERM"))
+                .arg("--preserve-env=DOORMAN_INSTALL_CONFIRM,TERM")
                 .arg("env")
                 .arg(format!("HOME={user_home}"))
                 .arg(format!("PATH={merged_path}"))

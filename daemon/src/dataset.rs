@@ -67,23 +67,12 @@ impl Default for GallerySpreadStats {
 }
 
 /// Lightweight capture conditions for stratified offline evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AttemptConditions {
     pub brightness: Option<f32>,
     pub face_area_frac: Option<f32>,
     pub sharpness: Option<f32>,
     pub hour_utc: Option<u32>,
-}
-
-impl Default for AttemptConditions {
-    fn default() -> Self {
-        Self {
-            brightness: None,
-            face_area_frac: None,
-            sharpness: None,
-            hour_utc: None,
-        }
-    }
 }
 
 /// One scored attempt. Vectors only — no raw frames.
@@ -178,6 +167,8 @@ pub fn outcome_from_match(matched: bool, liveness_pass: Option<bool>) -> Outcome
     }
 }
 
+// Plain data parameters of a persisted record; a params struct would be a refactor.
+#[allow(clippy::too_many_arguments)]
 pub fn new_attempt_record(
     attempt_id: String,
     lock_generation: u64,
@@ -280,6 +271,8 @@ pub fn log_label_event(data_dir: &str, enabled: bool, event: &LabelEvent) {
     }
 }
 
+// Plain data parameters of a persisted record; a params struct would be a refactor.
+#[allow(clippy::too_many_arguments)]
 pub fn write_capture_pack(
     data_dir: &str,
     enabled: bool,
@@ -309,6 +302,8 @@ pub fn write_capture_pack(
     }
 }
 
+// Plain data parameters of a persisted record; a params struct would be a refactor.
+#[allow(clippy::too_many_arguments)]
 fn write_capture_pack_inner(
     data_dir: &str,
     attempt_id: &str,
@@ -397,7 +392,7 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
-        return builder.create(path);
+        builder.create(path)
     }
     #[cfg(not(unix))]
     {

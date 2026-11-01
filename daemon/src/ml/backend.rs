@@ -57,6 +57,8 @@ pub enum BackendType {
 }
 
 impl BackendType {
+    // Not `FromStr`: this is infallible (every value maps to the one backend).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(_s: &str) -> Self {
         // All config values currently resolve to the single ONNX Runtime backend.
         Self::OnnxRuntime

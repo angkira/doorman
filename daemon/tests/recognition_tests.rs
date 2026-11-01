@@ -202,10 +202,9 @@ fn test_multi_user_recognition() {
     }
 
     // Test frame should match user1
-    let mut test_embedding = vec![0.0; 512];
-    for i in 0..512 {
-        test_embedding[i] = (i as f32 / 100.0).sin() * 0.98; // Very similar to user1
-    }
+    let test_embedding: Vec<f32> = (0..512)
+        .map(|i| (i as f32 / 100.0).sin() * 0.98) // Very similar to user1
+        .collect();
 
     let sim1 = cosine_similarity(&test_embedding, &user1_embedding);
     let sim2 = cosine_similarity(&test_embedding, &user2_embedding);
@@ -460,7 +459,7 @@ async fn e2e_enroll_match_reject_separation() {
     let fx = fixtures_dir();
 
     // Enroll person A from two photos (mirrors storing multiple embeddings).
-    let enrolled_a = vec![
+    let enrolled_a = [
         embed_face(&p, &fx.join("personA_1.jpg")).await,
         embed_face(&p, &fx.join("personA_2.jpg")).await,
     ];

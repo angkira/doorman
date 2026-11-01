@@ -54,6 +54,9 @@ pub struct MLPipeline {
 }
 
 impl MLPipeline {
+    // Without an ORT feature the only backend arm returns early with an error,
+    // so the code after the match (and the match binding) is intentionally dead.
+    #[cfg_attr(not(feature = "_ort"), allow(unreachable_code, unused_variables))]
     pub async fn new(config: &Config) -> Result<Self> {
         let models_dir = PathBuf::from(&config.ml.models_dir);
 
@@ -314,7 +317,7 @@ impl MLPipeline {
         Ok(self
             .liveness_check(image, face)
             .await
-            .map_or(true, |outcome| outcome.is_pass()))
+            .is_none_or(|outcome| outcome.is_pass()))
     }
 
     /// Fast detection only - no embedding extraction (for real-time preview)

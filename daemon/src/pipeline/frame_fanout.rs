@@ -49,7 +49,7 @@ pub async fn run_frame_fanout(
                 let image = raw_frame.image.clone();
                 // Spawn blocking task for CPU-intensive JPEG encoding
                 tokio::task::spawn_blocking(move || {
-                    if let Err(e) = broadcaster.broadcast_frame(&*image) {
+                    if let Err(e) = broadcaster.broadcast_frame(&image) {
                         debug!("Failed to broadcast preview frame: {}", e);
                     }
                 });

@@ -526,7 +526,7 @@ async fn main() -> Result<()> {
     };
 
     // Setup signal handlers for graceful shutdown
-    let mut signals = signal_hook_tokio::Signals::new(&[
+    let mut signals = signal_hook_tokio::Signals::new([
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGINT,
     ])?;

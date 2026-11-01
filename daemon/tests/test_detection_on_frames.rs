@@ -1,6 +1,5 @@
 use doorman_shared::Config;
 use doormand::ml::MLPipeline;
-use image;
 use std::env;
 
 #[tokio::test]
