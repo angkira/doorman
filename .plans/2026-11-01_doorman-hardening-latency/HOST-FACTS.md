@@ -829,11 +829,46 @@ uid=997(doorman) gid=985(doorman) groups=985(doorman),44(video),991(render)
 - Camera controls: auto_exposure menu has only 1 (Manual) and 3 (Aperture Priority; current). exposure_time_absolute range 1-5000 (inactive while auto), gain 0-15 (current 0), backlight_compensation 0-3 (1), power_line_frequency currently 60 Hz (50 Hz also selectable; host timezone is CEST so 50 Hz may be more correct, unverified), focus is continuous auto, brightness/contrast 1-64.
 - Backend failure: nokhwa/V4L2 "Failed to open camera" fails in ~0.1-0.4 ms on every start (no detail logged), then falls back to the ffmpeg backend (device 0, 1280x720 @ 30fps) which works. The failure is immediate, so it is not a timeout/format negotiation. The service user doorman is in groups video and render, /dev/video0 is root:video 660, DevicePolicy allows char-video4linux. The error detail needs better logging.
 - Service sandbox: no denied/permission/seccomp/apparmor journal hits in 2 days; no SystemCallFilter; RestrictAddressFamilies=AF_UNIX only (no AF_NETLINK, a possible factor for device enumeration, unverified); ProtectHome=true; MemoryMax=2G, TasksMax=128 (current 42 tasks, swap used 353M).
-- Unit header says "EP: ncnn" but ExecStart passes --device cpu and doorman.toml has [ml] backend="ort", device="cpu". /proc/PID/maps is unreadable, so the actually loaded libonnxruntime is unconfirmed. doormand is linked only against libstdc++/libgcc/libm/libc (no NEEDED onnxruntime/ffmpeg/gst), so ORT is statically linked or dlopen'd. Candidates: distro libonnxruntime.so.1.21 (1.21.0+dfsg-2, with dnnl provider) or /usr/lib/doorman/libonnxruntime.so (26.8MB, Jun 12) plus a 259MB ROCm provider.
-- Models: /usr/share/doorman/models has edgeface_s.onnx, face_detection_yunet_2023mar.onnx, minifasnet_v2se.onnx, minifasnet_v2se_int8.onnx (all Jun 24). Config models_dir=/var/lib/doorman/models, which does not exist in /var/lib/doorman (only dataset/ and embeddings.bin), so the daemon must resolve models elsewhere (config vs reality mismatch).
+- Unit header says "EP: ncnn" but ExecStart passes --device cpu and doorman.toml has [ml] backend="ort", device="cpu". /proc/PID/maps is unreadable, so the actually loaded libonnxruntime is unconfirmed. The result of `sudo grep -i onnx /proc/<pid>/maps` is NOT yet confirmed (owner will re-run `sudo grep -ci onnx ...`). doormand is linked only against libstdc++/libgcc/libm/libc (no NEEDED onnxruntime/ffmpeg/gst), so ORT is statically linked or dlopen'd. Candidates: distro libonnxruntime.so.1.21 (1.21.0+dfsg-2, with dnnl provider) or /usr/lib/doorman/libonnxruntime.so (26.8MB, Jun 12) plus a 259MB ROCm provider.
+- Models: /usr/share/doorman/models has edgeface_s.onnx, face_detection_yunet_2023mar.onnx, minifasnet_v2se.onnx, minifasnet_v2se_int8.onnx (all Jun 24). Config models_dir=/var/lib/doorman/models DOES exist and holds many more model files (see section 8; the earlier `ls | head -3` truncated the listing, so the earlier claim that it does not exist was wrong). Which directory the daemon actually loads each model from is still to be determined from code.
 - CPU: Ryzen 7 8700G, 8C/16T, AVX2, AVX-512 (incl. VNNI, bf16), so int8 ORT models are viable; cpu_threads=0 (ORT chooses).
 - Timings: auth request to success is ~3.0-3.4 s end to end (13:12:06.0 -> 13:12:07.29; 19:27:27.75 -> 19:27:30.7), of which camera open/pipeline start is ~1.3-1.5 s (request 19:27:27.75, pipeline started 19:27:29.26). Recognition log lines are ~6 frame ids apart every ~0.4 s. Aggregate cosine 0.765-0.787 vs threshold 0.40; per-frame 0.75-0.82. Detection confidence ~0.91.
 - Liveness: one real owner attempt rejected at 13:12:03 by the depth gate: relief=0.0491 < threshold 0.0500 (marginal false reject; the retry 3 s later passed).
 - Lock glue: lock script uses gtklock (rc=1 in 3 of 4 recent runs, rc=0 once; watcher still started when gtklock is alive), watcher polls `doorman test` every 2 s and terminates the locker via process signal on a "recognized:" line. Compositor is niri/DMS (dms + quickshell processes), not sway; SWAYSOCK is unset, so the swaymsg step is a no-op. Config has proactive_unlock=false with comment "Sway adapter owns face unlock".
 - Config hygiene: 18 *.bak* files in /etc/doorman; the installed unit says "Do not edit by hand".
 - Dataset logging is on with keep_raw_frames=true (JPEG quality 92).
+
+## 8. Correction: /var/lib/doorman/models (owner-run, root)
+
+The earlier `ls | head -3` of /var/lib/doorman truncated the listing, so the statements that models_dir does not exist and that only dataset/ and embeddings.bin are in /var/lib/doorman were wrong. The directory exists (drwxr-x--- doorman:doorman).
+
+### `sudo ls -l /var/lib/doorman/models`
+Owner:group is doorman:doorman for all files. Mode 0600 where noted, otherwise as listed by ls (not recorded here). Dates only where recorded.
+```
+blazeface.onnx                       1270727  (0600)
+blazeface.onnx.bak                   1270727  (0600)
+depth.ncnn.bin                      50583752
+depth.ncnn.param                       21092
+depth_anything_v2_small_fp32.onnx   99109158
+edgeface_s.onnx                     14826052  (Jun 24)
+face_detection_short_range.tflite     229746
+face_detection_yunet_2023mar.onnx     232589  (Jun 24)
+liveness.onnx                        1322532
+liveness.onnx.data                     20544
+liveness.pt                          1508872
+minifasnet_v2se.onnx                 1912594  (Jun 24)
+minifasnet_v2se_int8.onnx             626197  (Jun 24)
+mobilefacenet.onnx                 261036388  (0600)
+scrfd_500m.onnx                      2524817
+ultraface-rfb-320.onnx               1270727
+ultraface-slim-320.onnx              1195330
+w600k_mbf.onnx                      13616099
+```
+
+### Corrected implications
+
+- models_dir = /var/lib/doorman/models exists and contains the depth models (depth_anything_v2_small_fp32.onnx and depth.ncnn.bin/.param) in addition to the face and liveness models. There is no config-vs-reality mismatch for the directory itself.
+- /usr/share/doorman/models (packaged copy) holds only edgeface_s, yunet_2023mar, minifasnet_v2se and its int8 variant; the depth models exist only in the host models_dir.
+- Many files look legacy (blazeface*, ultraface*, scrfd, liveness.*, mobilefacenet, w600k_mbf, tflite); which are used by the current code is for the cloud session to determine (see ROUND3.md). Nothing is to be deleted; the owner decides.
+- Having BOTH depth_anything_v2_small_fp32.onnx and depth.ncnn.* means the loaded depth path (ORT vs ncnn/Vulkan) cannot be inferred from the directory alone.
+- NOT yet confirmed: the result of `sudo grep -i onnx /proc/<pid>/maps` (which onnxruntime library is mapped). The owner will re-run `sudo grep -ci onnx /proc/<pid>/maps`. Until then ORT linkage is unverified.
