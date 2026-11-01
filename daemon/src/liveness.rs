@@ -16,6 +16,13 @@ pub enum LivenessOutcome {
     Unavailable { reason: String },
 }
 
+/// Error code of a liveness check that could not run (model missing, inference
+/// error). Distinct from [`LIVENESS_REJECTED_CODE`] so "unavailable" is never
+/// mistaken for "spoof suspected" in logs, `doorman test` output and PAM.
+pub const LIVENESS_UNAVAILABLE_CODE: &str = "liveness_unavailable";
+/// Error code of a liveness check that ran and rejected the face.
+pub const LIVENESS_REJECTED_CODE: &str = "liveness_rejected";
+
 impl LivenessOutcome {
     pub fn is_pass(&self) -> bool {
         matches!(self, Self::Pass { .. })

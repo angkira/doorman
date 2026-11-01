@@ -78,6 +78,9 @@ pub struct TimingRecord {
     pub embed_count: u32,
     pub liveness_ms: Option<f64>,
     pub liveness_passed: Option<bool>,
+    /// Depth relief of the liveness evaluation (calibration signal, see
+    /// docs/decision-and-liveness.md); `null` when it produced none.
+    pub liveness_relief: Option<f32>,
     pub decision_ms: Option<f64>,
     pub total_ms: f64,
     pub frames_seen: usize,
@@ -103,6 +106,7 @@ pub struct AttemptTiming {
     pub embed: StageAccum,
     pub liveness: Option<Duration>,
     pub liveness_passed: Option<bool>,
+    pub liveness_relief: Option<f32>,
     pub decision: Option<Duration>,
     pub frames_seen: usize,
     pub frames_used: usize,
@@ -125,6 +129,7 @@ impl AttemptTiming {
             embed: StageAccum::default(),
             liveness: None,
             liveness_passed: None,
+            liveness_relief: None,
             decision: None,
             frames_seen: 0,
             frames_used: 0,
@@ -167,6 +172,7 @@ impl AttemptTiming {
             embed_count: self.embed.count,
             liveness_ms: self.liveness.map(ms),
             liveness_passed: self.liveness_passed,
+            liveness_relief: self.liveness_relief,
             decision_ms: self.decision.map(ms),
             total_ms: ms(self.start.elapsed()),
             frames_seen: self.frames_seen,
@@ -254,7 +260,10 @@ mod tests {
         assert_eq!(v["detect_count"], 2);
         assert!(v["embed_sum_ms"].is_null());
         assert!(v["align_ms"].is_null());
+        assert!(v["liveness_relief"].is_null());
         assert_eq!(v["outcome"], "matched");
+        t.liveness_relief = Some(0.25);
+        assert_eq!(serde_json::to_value(t.record()).unwrap()["liveness_relief"], 0.25);
         let s = v.to_string();
         assert!(!s.contains("user") && !s.contains("uid"));
     }

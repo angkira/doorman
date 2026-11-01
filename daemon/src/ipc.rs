@@ -392,16 +392,42 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
             let liveness_result = state.ml_pipeline.liveness_check(&frame, &face).await;
             timing.liveness = Some(liveness_started.elapsed());
             timing.liveness_passed = liveness_result.as_ref().map(LivenessOutcome::is_pass);
+            timing.liveness_relief = liveness_result.as_ref().and_then(LivenessOutcome::relief);
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let (_, _, box_w, box_h) = face.bbox;
+                debug!(
+                    "Liveness frame {}: relief={:?} face_box={:.0}x{:.0}px sharpness={:.2} brightness={:.1} depth_ms={:.1}",
+                    i,
+                    timing.liveness_relief,
+                    box_w * frame.width() as f32,
+                    box_h * frame.height() as f32,
+                    crate::pipeline::sharpness_score(&frame),
+                    crate::pipeline::face_brightness(&frame, face.bbox),
+                    liveness_started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             liveness = liveness_result;
             match &liveness {
                 None | Some(LivenessOutcome::Pass { .. }) => {}
-                // Step 0 keeps the wire behaviour: an unavailable check is
-                // reported like a rejection.
                 Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. }) => {
-                    timing.outcome = crate::timing::TimingOutcome::LivenessRejected;
+                    let unavailable = matches!(liveness, Some(LivenessOutcome::Unavailable { .. }));
+                    let (auth_outcome, timing_outcome, code) = if unavailable {
+                        (
+                            AuthOutcome::LivenessError,
+                            crate::timing::TimingOutcome::LivenessError,
+                            doormand::liveness::LIVENESS_UNAVAILABLE_CODE,
+                        )
+                    } else {
+                        (
+                            AuthOutcome::LivenessRejected,
+                            crate::timing::TimingOutcome::LivenessRejected,
+                            doormand::liveness::LIVENESS_REJECTED_CODE,
+                        )
+                    };
+                    timing.outcome = timing_outcome;
                     warn!(
-                        "Authentication failed for {}: liveness/anti-spoof gate rejected",
-                        username
+                        "Authentication failed for {}: liveness gate [{}]: {:?}",
+                        username, code, liveness
                     );
                     log_auth_failure_attempt(
                         state,
@@ -409,7 +435,7 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
                         username,
                         Outcome::SuspectedSpoof,
                         Some(false),
-                        "liveness_rejected",
+                        code,
                         AttemptConditions {
                             face_area_frac: first_quality_face_area_frac,
                             ..AttemptConditions::default()
@@ -426,7 +452,7 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
                     return AuthDecision {
                         frames_seen,
                         liveness,
-                        ..AuthDecision::bare(AuthOutcome::LivenessRejected)
+                        ..AuthDecision::bare(auth_outcome)
                     };
                 }
             }

@@ -4,7 +4,7 @@
 //! `WaitForMatch` [`AttemptOutcome`] are both built from it, so nothing has to
 //! re-parse a message string to learn the similarity.
 
-use crate::liveness::LivenessOutcome;
+use crate::liveness::{LivenessOutcome, LIVENESS_UNAVAILABLE_CODE};
 use crate::unlock_wait::AttemptOutcome;
 use doorman_shared::Response;
 
@@ -58,6 +58,10 @@ impl AuthDecision {
         let failure = |reason: &str| Response::Failure {
             reason: reason.to_string(),
         };
+        let unavailable_reason = match &self.liveness {
+            Some(LivenessOutcome::Unavailable { reason }) => reason.as_str(),
+            _ => "no detail",
+        };
         match (self.outcome, self.similarity) {
             (AuthOutcome::Matched, Some(similarity)) => Response::Success {
                 message: Some(authenticated_message(similarity)),
@@ -81,7 +85,11 @@ impl AuthDecision {
             (AuthOutcome::LivenessRejected, _) => {
                 failure("Liveness check failed (not a live face).")
             }
-            (AuthOutcome::LivenessError, _) => failure("Liveness check error."),
+            (AuthOutcome::LivenessError, _) => Response::Failure {
+                reason: format!(
+                    "Liveness check unavailable [{LIVENESS_UNAVAILABLE_CODE}]: {unavailable_reason}"
+                ),
+            },
         }
     }
 
@@ -136,7 +144,7 @@ mod tests {
         };
         assert_eq!(reason(AuthOutcome::NotEnrolled), "User not enrolled");
         assert_eq!(reason(AuthOutcome::NoFrames), "Failed to capture frames");
-        assert_eq!(reason(AuthOutcome::LivenessError), "Liveness check error.");
+        assert!(reason(AuthOutcome::LivenessError).contains("[liveness_unavailable]"));
         assert_eq!(
             reason(AuthOutcome::LivenessRejected),
             "Liveness check failed (not a live face)."
@@ -145,6 +153,23 @@ mod tests {
             Response::Failure { reason } => {
                 assert_eq!(reason, "Face not recognized (confidence: 30.00%)")
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unavailable_liveness_reports_its_own_code_and_reason() {
+        let d = AuthDecision {
+            liveness: Some(LivenessOutcome::Unavailable {
+                reason: "depth model not loaded".into(),
+            }),
+            ..AuthDecision::bare(AuthOutcome::LivenessError)
+        };
+        match d.into_response() {
+            Response::Failure { reason } => assert_eq!(
+                reason,
+                "Liveness check unavailable [liveness_unavailable]: depth model not loaded"
+            ),
             other => panic!("{other:?}"),
         }
     }
