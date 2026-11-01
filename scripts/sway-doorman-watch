@@ -2,7 +2,7 @@
 set -u
 
 log="${DOORMAN_SWAY_WATCH_LOG:-/tmp/sway-doorman-watch.log}"
-user="${1:-${USER:-angkira}}"
+user="${1:-${USER:?set USER}}"
 locker="${2:-swaylock}"
 socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
 interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"

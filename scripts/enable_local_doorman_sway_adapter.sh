@@ -7,7 +7,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
-target_user="${SUDO_USER:-angkira}"
+target_user="${SUDO_USER:-${USER:?set SUDO_USER or USER}}"
 home="/home/${target_user}"
 uid="$(id -u "$target_user")"
 
@@ -55,7 +55,7 @@ cat > "$watch" <<'WATCH'
 set -u
 
 log=/tmp/doorman-lock-watch.log
-user="${1:-${USER:-angkira}}"
+user="${1:-${USER:?set USER}}"
 locker="${2:-swaylock}"
 socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
 interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"
@@ -149,7 +149,7 @@ watcher="$HOME/.local/bin/doorman-lock-watch"
     echo "[$(date -Is)] backend=$backend rc=$rc"
 
     if [ "$rc" -eq 0 ]; then
-        "$watcher" "${USER:-angkira}" "$locker" >/dev/null 2>&1 &
+        "$watcher" "${USER:?set USER}" "$locker" >/dev/null 2>&1 &
         echo "[$(date -Is)] doorman watcher pid=$! locker=$locker"
     fi
 

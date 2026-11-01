@@ -9,7 +9,7 @@ fi
 script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(CDPATH='' cd -- "${script_dir}/.." && pwd)"
 ts="$(date +%Y%m%d-%H%M%S)"
-target_user="${SUDO_USER:-angkira}"
+target_user="${SUDO_USER:-${USER:?set SUDO_USER or USER}}"
 session_name="sway-system-mesa.desktop"
 sddm_override="/etc/sddm.conf.d/zz-doorman-sway.conf"
 sddm_theme="${DOORMAN_SDDM_THEME:-breeze}"
