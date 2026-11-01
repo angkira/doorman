@@ -92,7 +92,7 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
         Request::Authenticate { username } => {
             run_authenticate(state, &username).await.into_response()
         }
-        Request::Enroll { username } => handle_enroll(state, &username).await,
+        Request::Enroll { username, add } => handle_enroll(state, &username, add).await,
         Request::ListUsers => handle_list_users(state).await,
         Request::RemoveUser { username } => handle_remove_user(state, &username).await,
         Request::Status => handle_status(state).await,
@@ -860,8 +860,8 @@ mod tests {
     }
 }
 
-async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
-    info!("Enrollment request for user: {}", username);
+async fn handle_enroll(state: &DaemonState, username: &str, add: bool) -> Response {
+    info!("Enrollment request for user: {} (add: {})", username, add);
 
     // Turn the camera ON on-demand (works even when the screen is unlocked and the
     // camera is otherwise gated off) and wait for frames. The lease is held for the
@@ -1027,7 +1027,11 @@ async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
     let selected_embeddings = match crate::pipeline::plan_templates(
         valid_embeddings,
         &existing_templates,
-        crate::pipeline::EnrollMode::Merge,
+        if add {
+            crate::pipeline::EnrollMode::Append
+        } else {
+            crate::pipeline::EnrollMode::Merge
+        },
         state.config.enrollment.prune_cosine,
         TARGET_EMBEDDINGS,
     ) {
