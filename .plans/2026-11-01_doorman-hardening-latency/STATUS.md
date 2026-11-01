@@ -18,7 +18,7 @@ Branch: `claude/great-ride-i3oqn6` (all workstreams merged sequentially; no per-
 | WS5 Decision | Done (host-unverified) | Structured `AuthDecision`; n_of_m, template scoring, flip TTA, brightness gate, versioned `embeddings.bin` (v2; old readable, older daemons can't read v2), pruning, `enroll --add`. Defaults = old behaviour. |
 | WS3 Liveness | Done, partial | Relief value + `liveness_unavailable` code, multi-frame median, `p10_p90` stat, configurable depth input. Threshold not changed (no owner data). Challenge signals: interface only. No stub-ONNX shape tests. |
 | WS7 sudo | Done (host-unverified) | Off by default; strict profile, freshness, presence, suspension, audit, fast PAM fallthrough, safe installer. Strict path inside `run_authenticate` only unit-tested in parts. |
-| WS8 Hygiene | Done | ort pinned `=2.0.0-rc.12`, Cargo.lock committed, shellcheck clean, GPU removed from systemd DeviceAllow, licences in `MODELS.md`, `config check`, generated `docs/CONFIG.md`, smaller dataset caps, `dataset purge`, CI jobs, README trust-boundaries section. |
+| WS8 Hygiene | Done | ort pinned `=2.0.0-rc.12`, Cargo.lock committed, shellcheck clean, GPU removed from systemd DeviceAllow, licences in `docs/MODELS.md`, `config check`, generated `docs/CONFIG.md`, smaller dataset caps, `dataset purge`, CI jobs, README trust-boundaries section. |
 
 ## Not done / blocked
 - Anything needing the real host: all host validation checklists (in each doc), real latency/accuracy numbers, threshold calibration, default flips (n_of_m, warmup, prearm, 640x480 MJPEG, liveness frames=3).
@@ -60,7 +60,7 @@ Owner decision: stays on one branch / PR #13 (ROUND3 task 8 not applied).
 - Task 4: `[liveness] mean_mode_depth_samples` (default 0 = unchanged) depth-checks K evenly sampled frames in mean mode; swap tests in `daemon/src/ipc.rs`. Cost ≈ K × per-frame depth latency — measure with `doorman-bench latency` (command in `docs/decision-and-liveness.md`). Residual: a single photo frame no sample lands on is still averaged in.
 - Task 5: `tests/test_packaging_gpu_free.py` (service + postinst).
 - Task 6 (`docs/host-facts-answers.md` "Round 3"): `backend="ort", device="cpu"` ⇒ in-process ORT CPU on `depth_anything_v2_small_fp32.onnx`; `depth.ncnn.*` only with `backend="ncnn"`, which runs Vulkan even with `--device cpu` (`--device` overrides only `ml.device`). Which one the host runs: check the `Using ML backend:` startup line. Shipped configs are GPU-free (test `shared/tests/shipped_configs_no_gpu.rs`). **Fixed**: `doorman install` default `--auto` used to pick ROCm/CUDA when present; now CPU on Linux, GPU only via `--rocm`/`--cuda`/`--ncnn`.
-- Task 7: root `MODELS.md` licence table + used/legacy table. Flag: the deb ships `edgeface_s.onnx` without a verified redistribution licence (likely CC BY-NC-SA; HF card unreadable here) — owner decides. `minifasnet_v2se_int8.onnx` is packaged but unused.
+- Task 7: `docs/MODELS.md` licence table + used/legacy table. Flag: the deb ships `edgeface_s.onnx` without a verified redistribution licence (likely CC BY-NC-SA; HF card unreadable here) — owner decides. `minifasnet_v2se_int8.onnx` is packaged but unused.
 
 Owner check: `journalctl -u doormand | grep "Using ML backend"` (the ORT maps check is done, see "Round 4").
 

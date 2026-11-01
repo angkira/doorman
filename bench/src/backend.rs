@@ -52,7 +52,7 @@ pub fn check_models(config: &Config, need_liveness: bool) -> Result<()> {
         .collect();
     if !missing.is_empty() {
         bail!(
-            "required model files are missing: {}. Set `--models-dir`/`--profile` to a directory containing them (see MODELS.md / scripts/fetch_models.sh)",
+            "required model files are missing: {}. Set `--models-dir`/`--profile` to a directory containing them (see docs/MODELS.md / scripts/fetch_models.sh)",
             missing.join(", ")
         );
     }

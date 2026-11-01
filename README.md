@@ -53,7 +53,7 @@ your runtime models dir (`/var/lib/doorman/models` for the system service):
 
 > The default EdgeFace-S recognizer weights are **CC-BY-NC-SA 4.0
 > (non-commercial only)**. For commercial use, swap in **AuraFace-v1** (fal,
-> native ONNX, commercial-OK). See [MODELS.md](MODELS.md) for details.
+> native ONNX, commercial-OK). See [docs/MODELS.md](docs/MODELS.md) for details.
 
 Sources:
 - YuNet: https://github.com/opencv/opencv_zoo
@@ -292,5 +292,5 @@ high-assurance anti-spoof.
 
 [PolyForm Noncommercial 1.0.0](LICENSE) (project code) — free for personal,
 research, and noncommercial use. Model weights carry their own licenses — see
-[MODELS.md](MODELS.md): YuNet **MIT**, MiniFASNetV2-SE **Apache-2.0**, EdgeFace-S
+[docs/MODELS.md](docs/MODELS.md): YuNet **MIT**, MiniFASNetV2-SE **Apache-2.0**, EdgeFace-S
 **CC-BY-NC-SA 4.0 (non-commercial)**.

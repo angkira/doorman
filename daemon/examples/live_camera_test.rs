@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
 
     println!("\n🎉 Live camera test completed successfully!");
     println!("\nNext steps:");
-    println!("  1. Download ONNX models (see MODELS.md)");
+    println!("  1. Download ONNX models (see docs/MODELS.md)");
     println!("  2. Run daemon: sudo target/release/doormand");
     println!("  3. Enroll face: uv run doorman enroll <username>");
 
