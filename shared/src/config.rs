@@ -13,6 +13,45 @@ pub enum ConfigError {
 
     #[error("Config not found at any standard location")]
     NotFound,
+
+    #[error("Invalid config: {0}")]
+    Invalid(String),
+}
+
+/// Upper bound (inclusive) for `[camera] warmup_frames`.
+pub const MAX_WARMUP_FRAMES: u32 = 10;
+/// Upper bound (inclusive, ms) for `[camera] prearm_window_ms`.
+pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
+
+fn default_prearm_window_ms() -> u32 {
+    5000
+}
+
+/// Accepted `[camera] fourcc` spellings (case-insensitive) for MJPEG.
+const FOURCC_MJPEG_NAMES: [&str; 2] = ["MJPG", "MJPEG"];
+/// Accepted `[camera] fourcc` spellings (case-insensitive) for YUYV.
+const FOURCC_YUYV_NAMES: [&str; 2] = ["YUYV", "YUY2"];
+
+/// Pixel format requested from the camera via `[camera] fourcc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraFourcc {
+    Mjpeg,
+    Yuyv,
+}
+
+impl CameraFourcc {
+    /// Parse a user-supplied fourcc string.
+    pub fn parse(s: &str) -> Result<Self, ConfigError> {
+        if FOURCC_MJPEG_NAMES.iter().any(|n| n.eq_ignore_ascii_case(s)) {
+            Ok(Self::Mjpeg)
+        } else if FOURCC_YUYV_NAMES.iter().any(|n| n.eq_ignore_ascii_case(s)) {
+            Ok(Self::Yuyv)
+        } else {
+            Err(ConfigError::Invalid(format!(
+                "camera.fourcc = {s:?} is not supported (use \"MJPG\" or \"YUYV\")"
+            )))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +171,57 @@ pub struct CameraConfig {
     /// wired yet — this is the config hook the feature will read.
     #[serde(default)]
     pub presence_autolock_secs: u64,
+
+    /// Pixel format to request from the camera: "MJPG" or "YUYV". Unset keeps
+    /// the historical behaviour (YUYV at the configured size; with the native
+    /// backend a size the device only offers as MJPEG falls back to MJPEG).
+    /// For the ffmpeg backend "MJPG" adds `-input_format mjpeg`.
+    #[serde(default)]
+    pub fourcc: Option<String>,
+
+    /// Frames to discard after a cold camera open, while auto-exposure settles.
+    /// `0` (default) keeps every frame. Valid range 0..=10; 3 is recommended
+    /// once measured on the host (see docs/camera.md).
+    #[serde(default)]
+    pub warmup_frames: u32,
+
+    /// Start opening the camera as soon as the session reports `LockedHint`,
+    /// without waiting for the display to be non-idle. The camera is still
+    /// closed whenever the session is unlocked. Default `false`; `true` is
+    /// recommended (see docs/camera.md).
+    #[serde(default)]
+    pub prearm_on_lock: bool,
+
+    /// With `prearm_on_lock`, how long after the lock event (LockedHint
+    /// false->true) the camera may stay open while the display is still idle.
+    /// After the window the normal `locked && !idle` rule applies. 0..=30000.
+    #[serde(default = "default_prearm_window_ms")]
+    pub prearm_window_ms: u32,
+}
+
+impl CameraConfig {
+    /// Reject out-of-range or unsupported `[camera]` values with an explicit error.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.warmup_frames > MAX_WARMUP_FRAMES {
+            return Err(ConfigError::Invalid(format!(
+                "camera.warmup_frames = {} is out of range (0..={MAX_WARMUP_FRAMES})",
+                self.warmup_frames
+            )));
+        }
+        if self.prearm_window_ms > MAX_PREARM_WINDOW_MS {
+            return Err(ConfigError::Invalid(format!(
+                "camera.prearm_window_ms = {} is out of range (0..={MAX_PREARM_WINDOW_MS})",
+                self.prearm_window_ms
+            )));
+        }
+        self.fourcc()?;
+        Ok(())
+    }
+
+    /// The parsed `fourcc` request, `None` when unset.
+    pub fn fourcc(&self) -> Result<Option<CameraFourcc>, ConfigError> {
+        self.fourcc.as_deref().map(CameraFourcc::parse).transpose()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -647,6 +737,10 @@ impl Default for CameraConfig {
             fps: default_fps(),
             always_track: false,
             presence_autolock_secs: 0,
+            fourcc: None,
+            warmup_frames: 0,
+            prearm_on_lock: false,
+            prearm_window_ms: default_prearm_window_ms(),
         }
     }
 }
@@ -760,6 +854,7 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
+        config.camera.validate()?;
         Ok(config)
     }
 
@@ -840,5 +935,62 @@ mod tests {
         let on: Config = toml::from_str("[telemetry]\ntiming_log = true\n").unwrap();
         assert!(on.telemetry.timing_log);
         assert_eq!(on.telemetry.timing_log_max_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_camera_latency_options_default_and_validate() {
+        // Old configs (no new keys) keep the current behaviour.
+        let old: Config = toml::from_str("[camera]\nwidth = 1024\n").unwrap();
+        assert_eq!(old.camera.fourcc, None);
+        assert_eq!(old.camera.warmup_frames, 0);
+        assert!(!old.camera.prearm_on_lock);
+        assert_eq!(old.camera.prearm_window_ms, 5000);
+        assert!(old.camera.validate().is_ok());
+
+        let new: Config = toml::from_str(
+            "[camera]\nfourcc = \"mjpg\"\nwarmup_frames = 3\nprearm_on_lock = true\n",
+        )
+        .unwrap();
+        assert_eq!(new.camera.fourcc().unwrap(), Some(CameraFourcc::Mjpeg));
+        assert_eq!(new.camera.warmup_frames, 3);
+        assert!(new.camera.prearm_on_lock);
+
+        let with_warmup = |warmup_frames| CameraConfig {
+            warmup_frames,
+            ..CameraConfig::default()
+        };
+        assert!(with_warmup(MAX_WARMUP_FRAMES).validate().is_ok());
+        let err = with_warmup(MAX_WARMUP_FRAMES + 1)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("warmup_frames") && err.contains("0..=10"),
+            "{err}"
+        );
+
+        let window = |prearm_window_ms| CameraConfig {
+            prearm_window_ms,
+            ..CameraConfig::default()
+        };
+        assert!(window(MAX_PREARM_WINDOW_MS).validate().is_ok());
+        let err = window(MAX_PREARM_WINDOW_MS + 1)
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("prearm_window_ms") && err.contains("0..=30000"),
+            "{err}"
+        );
+
+        let bad_fourcc = CameraConfig {
+            fourcc: Some("H264".into()),
+            ..CameraConfig::default()
+        };
+        assert!(bad_fourcc
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("fourcc"));
     }
 }

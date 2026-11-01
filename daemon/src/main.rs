@@ -550,7 +550,7 @@ async fn main() -> Result<()> {
     } else {
         info!("Detection/recognition pipeline idle (production mode - starts on preview connect, auth runs on-demand detection)");
 
-        let (armed_rx, unlock_ctx) = if let Some(sup) = lock_sup.as_ref() {
+        let (armed_rx, locked_rx, unlock_ctx) = if let Some(sup) = lock_sup.as_ref() {
             // Build the Stage-B unlock context only when proactive unlock is
             // enabled AND a session was actually resolved (so we have an Unlocker).
             // When disabled, the pipeline is still lock-GATED via `armed_rx`; it
@@ -564,9 +564,13 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
-            (Some(sup.armed_rx.clone()), unlock_ctx)
+            (
+                Some(sup.armed_rx.clone()),
+                Some(sup.locked_rx.clone()),
+                unlock_ctx,
+            )
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Camera capture gate (system mode): drive `capture_active` from armed
@@ -575,26 +579,45 @@ async fn main() -> Result<()> {
         // the camera is OFF (unlike the frame-driven pipeline supervisor), so it can
         // turn the camera back ON when you lock the screen. In --user/dev mode
         // (armed_rx=None) there is no lock gate, so capture stays on.
-        if let Some(gate_armed) = armed_rx.clone() {
+        if let (Some(gate_armed), Some(gate_locked)) = (armed_rx.clone(), locked_rx) {
             let cap_tx = capture_active_tx;
             let fb = frame_broadcaster.clone();
             let db = debug_broadcaster.clone();
             let always = config.camera.always_track;
+            let prearm = config.camera.prearm_on_lock;
+            let prearm_window =
+                std::time::Duration::from_millis(u64::from(config.camera.prearm_window_ms));
             let reqs = capture_requests.clone();
             tokio::spawn(async move {
                 let mut gate_armed = gate_armed;
+                let mut gate_locked = gate_locked;
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+                let clock = tokio::time::Instant::now();
+                let mut edge = camera::gate::LockEdge::default();
                 loop {
                     let subs = fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0)
                         + db.receiver_count();
                     // On-demand IPC leases (enroll/auth) force the camera on too.
                     let on_demand = reqs.load(std::sync::atomic::Ordering::SeqCst) > 0;
-                    let want = always || *gate_armed.borrow() || subs > 0 || on_demand;
+                    // armed = locked && !idle, so idle follows from the two hints.
+                    let locked = *gate_locked.borrow();
+                    let since_lock_edge = edge.update(locked, clock.elapsed());
+                    let want = camera::gate::camera_wanted(camera::gate::GateInputs {
+                        locked,
+                        idle: locked && !*gate_armed.borrow(),
+                        prearm_on_lock: prearm,
+                        prearm_window,
+                        since_lock_edge,
+                        always_track: always,
+                        stream_subscribers: subs,
+                        capture_leases: usize::from(on_demand),
+                    });
                     if cap_tx.send(want).is_err() {
                         break; // producer gone
                     }
                     tokio::select! {
                         r = gate_armed.changed() => { if r.is_err() { break; } }
+                        r = gate_locked.changed() => { if r.is_err() { break; } }
                         _ = tick.tick() => {}
                     }
                 }
