@@ -89,7 +89,7 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
     let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
-        Request::Authenticate { username } => {
+        Request::Authenticate { username, .. } => {
             run_authenticate(state, &username).await.into_response()
         }
         Request::Enroll { username, add } => handle_enroll(state, &username, add).await,

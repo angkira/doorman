@@ -102,6 +102,8 @@ fn authenticate_ipc(username: &str) -> AuthOutcome {
 
     let request = RequestEnvelope::new(Request::Authenticate {
         username: username.to_string(),
+        service: None,
+        tty: None,
     });
     let request_json = match serde_json::to_string(&request) {
         Ok(j) => j,
