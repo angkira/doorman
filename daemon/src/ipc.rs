@@ -1,15 +1,15 @@
 use crate::DaemonState;
 use crate::dataset::{self, AttemptConditions, GtSource, LabelEvent, Outcome};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Timelike;
 use doorman_shared::{
     DaemonInfo, ENROLL_DURATION_SECS, EnrollmentPhase, Request, Response, ResponseData,
     SIMILARITY_THRESHOLD, StreamMessage,
 };
+use doormand::ipc_policy::{self, Gatekeeper, Gated};
 use image::GenericImageView;
-use std::fs;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tracing::{debug, error, info, warn};
 
 /// Select diverse embeddings from a larger set using maximal distance approach
@@ -62,25 +62,17 @@ pub(crate) fn select_diverse_embeddings(embeddings: Vec<Vec<f32>>, count: usize)
 pub async fn run_server(state: DaemonState) -> Result<()> {
     let socket_path = &state.config.daemon.socket_path;
 
-    // Remove old socket if it exists
-    let _ = fs::remove_file(socket_path);
-
-    let listener = UnixListener::bind(socket_path).context("Failed to bind UNIX socket")?;
-
-    // Set socket permissions to allow all users (PAM runs in different contexts)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o666);
-        fs::set_permissions(socket_path, perms).context("Failed to set socket permissions")?;
-    }
+    // World-connectable: PAM (root) and the CLI/lock watcher (user) differ in uid.
+    // Authorization is entirely SO_PEERCRED policy, see ipc_policy / docs/ipc-security.md.
+    let listener = ipc_policy::bind_socket(socket_path, ipc_policy::COMMAND_SOCKET_MODE, None)?;
+    let gate = Gatekeeper::new(state.config.ipc.clone());
 
     info!("IPC server listening on {}", socket_path);
 
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
-                if let Err(e) = handle_connection(stream, state.clone()).await {
+                if let Err(e) = handle_connection(stream, state.clone(), &gate).await {
                     error!("Connection error: {}", e);
                 }
             }
@@ -91,15 +83,26 @@ pub async fn run_server(state: DaemonState) -> Result<()> {
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()> {
+async fn handle_connection(stream: UnixStream, state: DaemonState, gate: &Gatekeeper) -> Result<()> {
+    // Fail closed: without peer credentials no request can be authorized.
+    let peer = match ipc_policy::peer_from_stream(&stream) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Rejecting connection: {e:#}");
+            return Ok(());
+        }
+    };
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
 
-    reader.read_line(&mut line).await?;
+    let request = match ipc_policy::read_gated_request(&mut reader, &peer, gate).await? {
+        Gated::Allowed(request) => request,
+        Gated::Rejected(response) => {
+            return write_response(reader.into_inner(), &response).await;
+        }
+    };
 
-    let request: Request = serde_json::from_str(line.trim()).context("Failed to parse request")?;
-
-    debug!("Received request: {:?}", request);
+    debug!("Received request: {}", ipc_policy::request_name(&request));
+    let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
         Request::Authenticate { username } => handle_authenticate(&state, &username).await,
@@ -123,10 +126,24 @@ async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()>
         }
     };
 
-    // Send response
-    let response_json = serde_json::to_string(&response)?;
-    let stream = reader.into_inner();
-    let mut stream = stream;
+    if is_authenticate {
+        let outcome = match response {
+            Response::Success { .. } => "success",
+            _ => "failure",
+        };
+        info!(
+            peer_uid = peer.uid,
+            peer_pid = ?peer.pid,
+            outcome,
+            "Authenticate decision"
+        );
+    }
+
+    write_response(reader.into_inner(), &response).await
+}
+
+async fn write_response(mut stream: UnixStream, response: &Response) -> Result<()> {
+    let response_json = serde_json::to_string(response)?;
     stream.write_all(response_json.as_bytes()).await?;
     stream.write_all(b"\n").await?;
     stream.flush().await?;
