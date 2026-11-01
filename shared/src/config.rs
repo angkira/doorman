@@ -35,6 +35,13 @@ pub const DEFAULT_ACCEPT_N: usize = 3;
 /// Default `[decision] window_m`: size of the sliding window of recent frames.
 pub const DEFAULT_WINDOW_M: usize = 5;
 
+/// Current `schema_version` of the config file format.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    CONFIG_SCHEMA_VERSION
+}
+
 fn default_prearm_window_ms() -> u32 {
     5000
 }
@@ -66,8 +73,13 @@ impl CameraFourcc {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Config schema version (see docs/CONFIG.md). Files that omit it are read
+    /// as the current version; a version newer than this build is rejected.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+
     #[serde(default)]
     pub daemon: DaemonConfig,
 
@@ -862,6 +874,11 @@ pub struct DatasetConfig {
     /// here because they are low-volume ground-truth events.
     #[serde(default = "default_dataset_max_attempt_records_per_day")]
     pub max_attempt_records_per_day: usize,
+
+    /// Age in days used by `doorman dataset purge` when `--older-than` is
+    /// omitted. Advisory only: the daemon never deletes dataset files itself.
+    #[serde(default = "default_dataset_retention_days")]
+    pub retention_days: u32,
 }
 
 impl Default for DatasetConfig {
@@ -873,6 +890,7 @@ impl Default for DatasetConfig {
             max_capture_packs_per_day: default_max_capture_packs_per_day(),
             raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
+            retention_days: default_dataset_retention_days(),
         }
     }
 }
@@ -1057,11 +1075,18 @@ fn default_min_face_area_frac() -> f32 {
 fn default_dataset_max_attempt_records_per_day() -> usize {
     50_000
 }
+/// Frames per raw capture bundle (only used when `keep_raw_frames = true`).
 fn default_raw_frame_bundle_size() -> usize {
-    10
+    5
 }
+/// Raw capture bundles per day (only used when `keep_raw_frames = true`).
 fn default_max_capture_packs_per_day() -> usize {
-    500
+    20
+}
+/// Advisory age in days that `doorman dataset purge` uses when `--older-than`
+/// is omitted. Nothing is ever deleted automatically.
+fn default_dataset_retention_days() -> u32 {
+    14
 }
 fn default_raw_frame_jpeg_quality() -> u8 {
     92
@@ -1209,9 +1234,37 @@ impl Default for ModelsConfig {
     }
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            daemon: DaemonConfig::default(),
+            camera: CameraConfig::default(),
+            ml: MLConfig::default(),
+            authentication: AuthConfig::default(),
+            enrollment: EnrollmentConfig::default(),
+            preprocessing: PreprocessingConfig::default(),
+            models: ModelsConfig::default(),
+            recognition: RecognitionConfig::default(),
+            dataset: DatasetConfig::default(),
+            ipc: IpcConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            decision: DecisionConfig::default(),
+            liveness: LivenessConfig::default(),
+            pam: PamConfig::default(),
+        }
+    }
+}
+
 impl Config {
     /// Validate every section that has range or consistency rules.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.schema_version > CONFIG_SCHEMA_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "schema_version = {} is newer than this build supports ({CONFIG_SCHEMA_VERSION}); upgrade doorman",
+                self.schema_version
+            )));
+        }
         self.camera.validate()?;
         self.decision.validate()?;
         self.liveness.validate()?;
@@ -1242,6 +1295,16 @@ impl Config {
     /// Load config from standard locations
     /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
     pub fn load() -> Result<Self, ConfigError> {
+        if let Some(path) = Self::find_config_path() {
+            return Self::load_from(&path);
+        }
+
+        // If no config found, use defaults
+        Ok(Self::default())
+    }
+
+    /// The config file `load` would use: the first existing standard location.
+    pub fn find_config_path() -> Option<PathBuf> {
         let locations = vec![
             PathBuf::from("doorman.toml"),
             dirs::config_dir()
@@ -1249,15 +1312,7 @@ impl Config {
                 .unwrap_or_default(),
             PathBuf::from("/etc/doorman/doorman.toml"),
         ];
-
-        for path in locations {
-            if path.exists() {
-                return Self::load_from(&path);
-            }
-        }
-
-        // If no config found, use defaults
-        Ok(Self::default())
+        locations.into_iter().find(|path| path.exists())
     }
 
     /// Load config from specific path

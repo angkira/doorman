@@ -1,0 +1,20 @@
+# Written by an older doorman: no schema_version, none of the newer sections
+# ([decision], [liveness], [ipc], [telemetry], [pam]).
+[daemon]
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 640
+height = 480
+fps = 30
+
+[ml]
+device = "cpu"
+
+[authentication]
+similarity_threshold = 0.4
+timeout_secs = 5
+liveness_enabled = true

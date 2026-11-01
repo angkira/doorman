@@ -62,11 +62,13 @@ min_valid_frames = 5
 logging_enabled = false
 # Raw frame persistence stays off; M1 writes embeddings-only records.
 keep_raw_frames = false
-raw_frame_bundle_size = 10
-max_capture_packs_per_day = 500
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
 raw_frame_jpeg_quality = 92
 # Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
 max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
 
 [preprocessing]
 image_width = 256

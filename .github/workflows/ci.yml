@@ -38,14 +38,17 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets $FEATURES -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --no-default-features --features camera-mock,camera-ffmpeg,preview -- -D warnings
+
+      - name: Clippy (ORT code paths, load-dynamic, no download)
+        run: cargo clippy --locked --workspace --all-targets --no-default-features --features backend-ort-rocm,camera-mock,camera-ffmpeg,preview -- -D warnings
 
       - name: Test
         # test_video_frame_detection builds a real ML pipeline and needs the ORT backend.
-        run: cargo test --workspace $FEATURES -- --skip test_video_frame_detection
+        run: cargo test --locked --workspace $FEATURES -- --skip test_video_frame_detection
 
       - name: Build doorman-bench
-        run: cargo build -p doorman-bench --no-default-features
+        run: cargo build --locked -p doorman-bench --no-default-features
 
       - name: Bench smoke on synthetic data
         # Only algorithmic invariants are asserted (in bench/tests/cli.rs, run
@@ -63,6 +66,28 @@ jobs:
         run: |
           echo "SKIPPED: latency needs ONNX model files and a doorman-bench build with --features ort."
           echo "CI builds the model-free subset; run 'doorman-bench latency' on a host with models (docs/bench/README.md)."
+
+  ort-typecheck:
+    # Type-checks the ORT code paths (cfg feature = "_ort") without linking or
+    # downloading ONNX Runtime: backend-ort-rocm uses ort/load-dynamic.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev libpam0g-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Type-check the ORT backend (load-dynamic, no download)
+        run: >
+          cargo check --locked -p doormand --all-targets --no-default-features
+          --features backend-ort-rocm,camera-mock,camera-ffmpeg,preview
 
   shellcheck:
     runs-on: ubuntu-24.04

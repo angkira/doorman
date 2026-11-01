@@ -85,6 +85,37 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigAction {
+    /// Parse and validate the config and report unknown or deprecated keys.
+    /// Exit codes: 0 ok, 1 invalid, 2 valid but unknown/deprecated keys.
+    Check {
+        /// Config file to check (default: the file the daemon would load).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Print every config key with its default as Markdown (docs/CONFIG.md).
+    DumpDefaults,
+}
+
+#[derive(Subcommand)]
+enum DatasetAction {
+    /// Delete dataset files (attempt/label shards, capture packs) older than N days.
+    /// Root only; never run automatically.
+    Purge {
+        /// Delete entries whose UTC day is more than this many days old
+        /// (default: `[dataset] retention_days`).
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u32>,
+        /// List what would be deleted and delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Data directory containing dataset/ (default: `[daemon] data_dir`).
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Enroll a new user (records from the daemon's current camera source).
     Enroll {
@@ -171,6 +202,16 @@ enum Command {
         /// Maximum allowed absolute FRR regression.
         #[arg(long, default_value_t = 0.01)]
         max_frr_regression: f32,
+    },
+    /// Manage stored dataset files (see docs/datasets.md).
+    Dataset {
+        #[command(subcommand)]
+        action: DatasetAction,
+    },
+    /// Validate or document the daemon config (see docs/CONFIG.md).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
@@ -341,6 +382,25 @@ fn main() {
             *max_frr_regression,
             cli.json,
         ),
+        Command::Dataset { action } => match action {
+            DatasetAction::Purge {
+                older_than,
+                dry_run,
+                data_dir,
+            } => cmd_dataset_purge(*older_than, *dry_run, data_dir.as_deref()),
+        },
+        Command::Config { action } => match action {
+            ConfigAction::Check { config } => {
+                std::process::exit(cmd_config_check(config.as_deref()))
+            }
+            ConfigAction::DumpDefaults => {
+                print!(
+                    "{}",
+                    doorman_shared::config_check::render_reference_markdown()
+                );
+                Ok(())
+            }
+        },
         Command::Doctor => cmd_doctor(),
         Command::Install {
             dry_run,
@@ -419,6 +479,55 @@ fn cmd_train(
         println!("  output: {}", report.output_dir.display());
         println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
     }
+    Ok(())
+}
+
+fn cmd_dataset_purge(
+    older_than: Option<u32>,
+    dry_run: bool,
+    data_dir: Option<&Path>,
+) -> Result<(), CliError> {
+    // Dataset files are root-owned 0700; refuse early with a clear message
+    // instead of failing half way through a deletion.
+    if !nix::unistd::geteuid().is_root() {
+        return Err(CliError::new(
+            "dataset purge must run as root (the dataset directory is private to the daemon); try: sudo doorman dataset purge ...",
+        ));
+    }
+    let config = doorman_shared::Config::load()
+        .map_err(|e| CliError::new(format!("cannot load config: {e}")))?;
+    let days = older_than.unwrap_or(config.dataset.retention_days);
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.daemon.data_dir));
+    let dataset_dir = data_dir.join("dataset");
+    let today = chrono::Utc::now().date_naive();
+    let entries = doormand::dataset_purge::purge_candidates(&dataset_dir, today, days)
+        .map_err(|e| CliError::new(format!("cannot scan {}: {e}", dataset_dir.display())))?;
+    for path in &entries {
+        println!(
+            "{}{}",
+            if dry_run {
+                "would delete "
+            } else {
+                "deleting "
+            },
+            path.display()
+        );
+    }
+    if dry_run {
+        println!(
+            "{} entries older than {days} days (dry run, nothing deleted)",
+            entries.len()
+        );
+        return Ok(());
+    }
+    let removed = doormand::dataset_purge::delete_entries(&entries)
+        .map_err(|e| CliError::new(format!("delete failed: {e}")))?;
+    println!(
+        "deleted {removed} entries older than {days} days from {}",
+        dataset_dir.display()
+    );
     Ok(())
 }
 
@@ -666,6 +775,60 @@ fn print_raw(response: &Response) -> Result<(), CliError> {
 }
 
 // ---------------------------------------------------------------------------
+// config check
+// ---------------------------------------------------------------------------
+
+/// Exit code: config valid, no unknown or deprecated keys.
+const CONFIG_EXIT_OK: i32 = 0;
+/// Exit code: config unreadable, unparsable or failing validation.
+const CONFIG_EXIT_INVALID: i32 = 1;
+/// Exit code: config valid but has unknown or deprecated keys.
+const CONFIG_EXIT_UNKNOWN_KEYS: i32 = 2;
+
+fn cmd_config_check(explicit: Option<&Path>) -> i32 {
+    let path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => match doorman_shared::Config::find_config_path() {
+            Some(p) => p,
+            None => {
+                println!("no config file found in the standard locations; built-in defaults apply");
+                return CONFIG_EXIT_OK;
+            }
+        },
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("invalid: cannot read {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    let report = match doorman_shared::config_check::check_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("invalid: {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    println!(
+        "{}: valid (schema_version {})",
+        path.display(),
+        report.config.schema_version
+    );
+    for key in &report.unknown_keys {
+        println!("unknown key: {key}");
+    }
+    for (key, hint) in &report.deprecated_keys {
+        println!("deprecated key: {key} ({hint})");
+    }
+    if report.unknown_keys.is_empty() && report.deprecated_keys.is_empty() {
+        CONFIG_EXIT_OK
+    } else {
+        CONFIG_EXIT_UNKNOWN_KEYS
+    }
+}
+
+// ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------
 
@@ -705,6 +868,9 @@ fn print_status(info: &DaemonInfo) {
         if info.models_loaded { "yes" } else { "no" }
     );
     println!("  enrolled users : {}", info.enrolled_users);
+    if let Some(ort) = &info.ort_runtime {
+        println!("  onnx runtime   : {ort}");
+    }
 }
 
 fn format_uptime(secs: u64) -> String {
