@@ -78,4 +78,6 @@ What was verified by reading the workflows (not by re-running them):
 
 Host facts (HOST-FACTS section 9): ORT is statically linked in the installed (old, ~5f78657) build (`grep -ci onnx /proc/<pid>/maps` = 0). `doorman config check` does not exist in the installed CLI ("unrecognized subcommand 'config'"); it exists only in the PR #13 build.
 
-Step-by-step host install of this build: `docs/INSTALL-FROM-BRANCH.md`.
+Step-by-step host install of this build: [docs/INSTALL-FROM-BRANCH.md](../../docs/INSTALL-FROM-BRANCH.md).
+
+Round 4 code changes (each with tests): `MODELS.md` moved to `docs/`; mean-mode swap tests through the real `run_authenticate` (`daemon/src/ipc/real_path_tests.rs`, test-only DaemonState + scripted backend); `doorman install` keeps an existing config and writes `doorman.toml.new`; postinst warns about GPU grants in operator systemd files (never edits them); `dataset.raw_face_frame_bundle_size` is a deprecated key in `config check`; `doorman-lock` attaches the watcher to a live locker after a non-zero quick exit (pidfile prevents duplicates). All host-unverified.

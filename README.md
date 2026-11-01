@@ -35,6 +35,9 @@ make build            # builds doormand + doorman + pam_doorman.so (release)
 sudo make install     # installs binaries, PAM module, systemd units; prints the PAM edit
 ```
 
+To try a CI-built package from a branch (backups, config check, rollback), follow
+[docs/INSTALL-FROM-BRANCH.md](docs/INSTALL-FROM-BRANCH.md).
+
 `doorman` does **not** auto-edit PAM. `sudo make install` (or
 `make pam-instructions`) prints the exact `auth sufficient pam_doorman.so` line
 to add yourself — see [INSTALL.md §6](INSTALL.md) and keep a root shell open
