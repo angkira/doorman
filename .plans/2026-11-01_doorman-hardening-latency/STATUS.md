@@ -65,7 +65,7 @@ Owner decision: stays on one branch / PR #13 (ROUND3 task 8 not applied).
 Owner check: `journalctl -u doormand | grep "Using ML backend"` (the ORT maps check is done, see "Round 4").
 
 ## Round 4 (owner follow-ups)
-CI on PR #13 @e50cd65 (owner-reported, all green):
+CI on PR #13 @e50cd65 (all green; check runs read via the GitHub API):
 - `ci.yml` run https://github.com/angkira/doorman/actions/runs/41355386222: `check`, `python`, `shellcheck`, `ort-typecheck`, `deb`.
 - `release.yml` run https://github.com/angkira/doorman/actions/runs/41355386218: `deb`.
 This replaces the earlier "shellcheck/python fail" statements, which were fixed in round 3.
