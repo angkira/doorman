@@ -165,7 +165,7 @@ case $CAMERA_CHOICE in
         ;;
     2)
         CAMERA="v4l"
-        CARGO_FEATURES="$CARGO_FEATURES,camera-v4l"
+        CARGO_FEATURES="$CARGO_FEATURES,camera-v4l2"
         ;;
     *)
         echo -e "${RED}Invalid choice${NC}"
