@@ -88,4 +88,58 @@ mod tests {
             num_boxes, num_score_anchors
         );
     }
+
+    /// Backend whose detector occupies its thread, like a slow ORT inference.
+    struct SlowBackend;
+
+    const SLOW_INFERENCE: std::time::Duration = std::time::Duration::from_millis(500);
+    /// Longest a timer may be late while an inference is in flight.
+    const MAX_RUNTIME_STALL: std::time::Duration = std::time::Duration::from_millis(250);
+
+    #[async_trait::async_trait]
+    impl MLBackend for SlowBackend {
+        async fn detect_face(&self, _image: &DynamicImage) -> Result<Option<Face>> {
+            std::thread::sleep(SLOW_INFERENCE);
+            Ok(None)
+        }
+        async fn check_liveness(&self, _image: &DynamicImage, _face: &Face) -> Result<bool> {
+            Ok(true)
+        }
+        async fn extract_embedding(&self, _image: &DynamicImage, _face: &Face) -> Result<Vec<f32>> {
+            Ok(Vec::new())
+        }
+        fn is_ready(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "slow-mock"
+        }
+    }
+
+    /// A slow inference must not park the (single-threaded) runtime: timers,
+    /// i.e. every other connection such as `Status`, keep being served.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_inference_does_not_block_the_runtime() {
+        let pipeline = Arc::new(MLPipeline::with_backend(
+            Arc::new(SlowBackend),
+            &Config::default(),
+        ));
+        let image = DynamicImage::new_rgb8(8, 8);
+        let detect = {
+            let pipeline = pipeline.clone();
+            tokio::spawn(async move { pipeline.detect_face(&image).await })
+        };
+        // Let the detect task start its inference.
+        tokio::task::yield_now().await;
+
+        let started = std::time::Instant::now();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(
+            started.elapsed() < MAX_RUNTIME_STALL,
+            "runtime stalled for {:?} while inference was in flight",
+            started.elapsed()
+        );
+        assert!(!detect.is_finished(), "inference is still in flight");
+        assert!(detect.await.unwrap().unwrap().is_none());
+    }
 }

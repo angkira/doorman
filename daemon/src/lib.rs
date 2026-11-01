@@ -6,6 +6,7 @@ pub mod ipc_policy;
 pub mod liveness;
 pub mod ml;
 pub mod storage;
+pub mod sudo_policy;
 pub mod timing;
 pub mod training;
 pub mod unlock_wait;

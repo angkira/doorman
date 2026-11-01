@@ -71,7 +71,7 @@ pub fn authorize(
     match req {
         // Self, root, or an explicitly trusted uid. WaitForMatch yields the same
         // decision as Authenticate, so it needs exactly the same authority.
-        Request::Authenticate { username } | Request::WaitForMatch { username, .. } => {
+        Request::Authenticate { username, .. } | Request::WaitForMatch { username, .. } => {
             let allowed = peer.uid == 0
                 || cfg.trusted_uids.contains(&peer.uid)
                 || resolve_uid(username) == Some(peer.uid);
@@ -437,6 +437,8 @@ mod tests {
     fn auth(name: &str) -> Request {
         Request::Authenticate {
             username: name.into(),
+            service: None,
+            tty: None,
         }
     }
 
