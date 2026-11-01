@@ -22,6 +22,10 @@ pub enum ConfigError {
 pub const MAX_WARMUP_FRAMES: u32 = 10;
 /// Upper bound (inclusive, ms) for `[camera] prearm_window_ms`.
 pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
+/// Default `[decision] accept_n`: frames that must clear the threshold.
+pub const DEFAULT_ACCEPT_N: usize = 3;
+/// Default `[decision] window_m`: size of the sliding window of recent frames.
+pub const DEFAULT_WINDOW_M: usize = 5;
 
 fn default_prearm_window_ms() -> u32 {
     5000
@@ -88,6 +92,9 @@ pub struct Config {
 
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+
+    #[serde(default)]
+    pub decision: DecisionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,6 +407,72 @@ impl Default for RecognitionConfig {
     }
 }
 
+/// How the per-frame evidence becomes an accept/reject decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionMode {
+    /// Collect `auth_frames` embeddings, average them, score once (original behaviour).
+    Mean,
+    /// Score every frame; accept as soon as `accept_n` of the last `window_m`
+    /// frames reach the threshold (and liveness passed).
+    NOfM,
+}
+
+/// How one embedding is scored against a user's stored templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateScore {
+    /// Highest cosine over the stored templates (original behaviour).
+    Max,
+    /// Mean of the three highest template cosines.
+    Top3Mean,
+    /// Cosine against the renormalised mean of all templates.
+    Centroid,
+}
+
+/// `[decision]`: decision rule and template scoring. Defaults reproduce the
+/// original behaviour; see docs/decision-and-liveness.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionConfig {
+    #[serde(default = "default_decision_mode")]
+    pub mode: DecisionMode,
+
+    /// `n_of_m` only: frames that must be at or above the threshold.
+    #[serde(default = "default_accept_n")]
+    pub accept_n: usize,
+
+    /// `n_of_m` only: size of the sliding window of most recent quality frames.
+    #[serde(default = "default_window_m")]
+    pub window_m: usize,
+
+    #[serde(default = "default_template_score")]
+    pub template_score: TemplateScore,
+}
+
+impl Default for DecisionConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_decision_mode(),
+            accept_n: default_accept_n(),
+            window_m: default_window_m(),
+            template_score: default_template_score(),
+        }
+    }
+}
+
+impl DecisionConfig {
+    /// Reject `accept_n`/`window_m` outside `1 <= N <= M` with an explicit error.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.accept_n < 1 || self.accept_n > self.window_m {
+            return Err(ConfigError::Invalid(format!(
+                "decision.accept_n = {} and decision.window_m = {} must satisfy 1 <= accept_n <= window_m",
+                self.accept_n, self.window_m
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Default per-uid Authenticate budget per sliding minute.
 pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
 /// Default cap for a single `WaitForMatch` (milliseconds).
@@ -635,6 +708,18 @@ fn default_liveness_depth_threshold() -> f32 {
 fn default_timeout_secs() -> u64 {
     3
 }
+fn default_decision_mode() -> DecisionMode {
+    DecisionMode::Mean
+}
+fn default_accept_n() -> usize {
+    DEFAULT_ACCEPT_N
+}
+fn default_window_m() -> usize {
+    DEFAULT_WINDOW_M
+}
+fn default_template_score() -> TemplateScore {
+    TemplateScore::Max
+}
 fn default_enroll_frames() -> usize {
     20
 }
@@ -824,11 +909,19 @@ impl Default for Config {
             dataset: DatasetConfig::default(),
             ipc: IpcConfig::default(),
             telemetry: TelemetryConfig::default(),
+            decision: DecisionConfig::default(),
         }
     }
 }
 
 impl Config {
+    /// Validate every section that has range or consistency rules.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.camera.validate()?;
+        self.decision.validate()?;
+        Ok(())
+    }
+
     /// Load config from standard locations
     /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
     pub fn load() -> Result<Self, ConfigError> {
@@ -854,7 +947,7 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
-        config.camera.validate()?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -935,6 +1028,39 @@ mod tests {
         let on: Config = toml::from_str("[telemetry]\ntiming_log = true\n").unwrap();
         assert!(on.telemetry.timing_log);
         assert_eq!(on.telemetry.timing_log_max_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn decision_defaults_keep_current_behaviour_and_old_configs_parse() {
+        let old: Config = toml::from_str("[ml]\ndevice = \"cpu\"\n").unwrap();
+        assert_eq!(old.decision.mode, DecisionMode::Mean);
+        assert_eq!(old.decision.template_score, TemplateScore::Max);
+        assert_eq!((old.decision.accept_n, old.decision.window_m), (3, 5));
+        assert!(old.validate().is_ok());
+
+        let new: Config = toml::from_str(
+            "[decision]\nmode = \"n_of_m\"\ntemplate_score = \"top3_mean\"\naccept_n = 2\nwindow_m = 4\n",
+        )
+        .unwrap();
+        assert_eq!(new.decision.mode, DecisionMode::NOfM);
+        assert_eq!(new.decision.template_score, TemplateScore::Top3Mean);
+        assert!(new.validate().is_ok());
+    }
+
+    #[test]
+    fn decision_validation_rejects_bad_n_and_m_and_unknown_modes() {
+        let bad = |n, m| DecisionConfig {
+            accept_n: n,
+            window_m: m,
+            ..DecisionConfig::default()
+        };
+        assert!(bad(1, 1).validate().is_ok());
+        for (n, m) in [(0, 5), (6, 5)] {
+            let err = bad(n, m).validate().unwrap_err().to_string();
+            assert!(err.contains("accept_n") && err.contains("window_m"), "{err}");
+        }
+        assert!(toml::from_str::<Config>("[decision]\nmode = \"sum\"\n").is_err());
+        assert!(toml::from_str::<Config>("[decision]\ntemplate_score = \"min\"\n").is_err());
     }
 
     #[test]
