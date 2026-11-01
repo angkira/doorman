@@ -1,0 +1,261 @@
+//! Per-attempt stage timing telemetry (WS6).
+//!
+//! One [`AttemptTiming`] is created at the start of an authentication attempt,
+//! filled in by hooks along the pipeline, and emitted when it is dropped:
+//!
+//! * always as a `debug!` line (via `tracing`), and
+//! * as one JSON line appended to a bounded rotating file when
+//!   `[telemetry] timing_log = true`.
+//!
+//! Privacy: a record carries stage durations, frame counters, the outcome, the
+//! final cosine similarity and the liveness verdict. The similarity is kept
+//! on purpose: it is the calibration signal for the threshold. A record never
+//! carries a username, uid, frame, embedding or per-frame score. The attempt id
+//! is a monotonic counter + wall-clock microseconds, unrelated to any identity.
+//!
+//! All durations come from `std::time::Instant` (monotonic).
+
+use doorman_shared::config::TelemetryConfig;
+use serde::Serialize;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tracing::{debug, warn};
+
+/// File mode of the timing log: owner read/write, group read.
+const TIMING_LOG_MODE: u32 = 0o640;
+
+static ATTEMPT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// How an authentication attempt ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimingOutcome {
+    /// Never set: the attempt exited through a path without a hook.
+    Unknown,
+    Matched,
+    NotMatched,
+    LivenessRejected,
+    LivenessError,
+    NoFrames,
+    NoClearFace,
+    NotEnrolled,
+    CameraUnavailable,
+}
+
+/// Sum + count of repeated stage invocations.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StageAccum {
+    pub total: Duration,
+    pub count: u32,
+}
+
+impl StageAccum {
+    pub fn record(&mut self, d: Duration) {
+        self.total += d;
+        self.count += 1;
+    }
+}
+
+/// Serialized form: durations in fractional milliseconds, `null` when a stage
+/// never ran or cannot be measured.
+#[derive(Debug, Serialize)]
+pub struct TimingRecord {
+    pub attempt_id: String,
+    pub timestamp_unix_ms: u64,
+    pub outcome: TimingOutcome,
+    pub camera_open_ms: Option<f64>,
+    pub first_frame_ms: Option<f64>,
+    pub first_valid_frame_ms: Option<f64>,
+    pub detect_sum_ms: Option<f64>,
+    pub detect_count: u32,
+    /// Always `null` today: alignment runs inside the backend's embedding call
+    /// and is included in `embed_*`.
+    pub align_ms: Option<f64>,
+    pub embed_sum_ms: Option<f64>,
+    pub embed_count: u32,
+    pub liveness_ms: Option<f64>,
+    pub liveness_passed: Option<bool>,
+    pub decision_ms: Option<f64>,
+    pub total_ms: f64,
+    pub frames_seen: usize,
+    pub frames_used: usize,
+    /// Final aggregate cosine similarity (calibration signal).
+    pub similarity: Option<f32>,
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// Timing state of one authentication attempt. Emits on drop.
+pub struct AttemptTiming {
+    start: Instant,
+    cfg: TelemetryConfig,
+    pub attempt_id: String,
+    pub outcome: TimingOutcome,
+    pub camera_open: Option<Duration>,
+    pub first_frame: Option<Duration>,
+    pub first_valid_frame: Option<Duration>,
+    pub detect: StageAccum,
+    pub embed: StageAccum,
+    pub liveness: Option<Duration>,
+    pub liveness_passed: Option<bool>,
+    pub decision: Option<Duration>,
+    pub frames_seen: usize,
+    pub frames_used: usize,
+    pub similarity: Option<f32>,
+}
+
+impl AttemptTiming {
+    pub fn start(cfg: &TelemetryConfig) -> Self {
+        let seq = ATTEMPT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let micros = chrono::Utc::now().timestamp_micros();
+        Self {
+            start: Instant::now(),
+            cfg: cfg.clone(),
+            attempt_id: format!("t-{micros}-{seq}"),
+            outcome: TimingOutcome::Unknown,
+            camera_open: None,
+            first_frame: None,
+            first_valid_frame: None,
+            detect: StageAccum::default(),
+            embed: StageAccum::default(),
+            liveness: None,
+            liveness_passed: None,
+            decision: None,
+            frames_seen: 0,
+            frames_used: 0,
+            similarity: None,
+        }
+    }
+
+    /// Time elapsed since the attempt started.
+    pub fn since_start(&self) -> Duration {
+        self.start.elapsed()
+    }
+
+    /// Mark the first frame received (no-op after the first call).
+    pub fn mark_first_frame(&mut self) {
+        if self.first_frame.is_none() {
+            self.first_frame = Some(self.start.elapsed());
+        }
+    }
+
+    /// Mark the first frame that passed the quality gate (no-op after the first call).
+    pub fn mark_first_valid_frame(&mut self) {
+        if self.first_valid_frame.is_none() {
+            self.first_valid_frame = Some(self.start.elapsed());
+        }
+    }
+
+    pub fn record(&self) -> TimingRecord {
+        let accum_ms = |a: &StageAccum| (a.count > 0).then(|| ms(a.total));
+        TimingRecord {
+            attempt_id: self.attempt_id.clone(),
+            timestamp_unix_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+            outcome: self.outcome,
+            camera_open_ms: self.camera_open.map(ms),
+            first_frame_ms: self.first_frame.map(ms),
+            first_valid_frame_ms: self.first_valid_frame.map(ms),
+            detect_sum_ms: accum_ms(&self.detect),
+            detect_count: self.detect.count,
+            align_ms: None,
+            embed_sum_ms: accum_ms(&self.embed),
+            embed_count: self.embed.count,
+            liveness_ms: self.liveness.map(ms),
+            liveness_passed: self.liveness_passed,
+            decision_ms: self.decision.map(ms),
+            total_ms: ms(self.start.elapsed()),
+            frames_seen: self.frames_seen,
+            frames_used: self.frames_used,
+            similarity: self.similarity,
+        }
+    }
+}
+
+impl Drop for AttemptTiming {
+    fn drop(&mut self) {
+        let rec = self.record();
+        match serde_json::to_string(&rec) {
+            Ok(line) => {
+                debug!(target: "doorman::timing", "{}", line);
+                if self.cfg.timing_log {
+                    if let Err(e) = append_rotating(
+                        Path::new(&self.cfg.timing_log_path),
+                        self.cfg.timing_log_max_bytes,
+                        &line,
+                    ) {
+                        warn!("timing log write failed: {}", e);
+                    }
+                }
+            }
+            Err(e) => warn!("timing record serialization failed: {}", e),
+        }
+    }
+}
+
+fn rotated_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".1");
+    PathBuf::from(s)
+}
+
+/// Append `line` (plus newline) to `path`. If that would grow the file beyond
+/// `max_bytes`, the file is first renamed to `<path>.1` (replacing the previous
+/// generation), so at most about `2 * max_bytes` is ever on disk.
+pub fn append_rotating(path: &Path, max_bytes: u64, line: &str) -> std::io::Result<()> {
+    let incoming = line.len() as u64 + 1;
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > 0 && meta.len() + incoming > max_bytes {
+            fs::rename(path, rotated_path(path))?;
+        }
+    }
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(TIMING_LOG_MODE);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_keeps_one_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        // Each line is 9 bytes with newline; cap of 20 fits two lines.
+        for i in 0..5 {
+            append_rotating(&p, 20, &format!("line-{i:03}")).unwrap();
+        }
+        let cur = fs::read_to_string(&p).unwrap();
+        let old = fs::read_to_string(rotated_path(&p)).unwrap();
+        assert_eq!(cur, "line-004\n");
+        assert_eq!(old, "line-002\nline-003\n");
+    }
+
+    #[test]
+    fn record_has_no_identity_fields_and_null_for_missing_stages() {
+        let cfg = TelemetryConfig::default();
+        let mut t = AttemptTiming::start(&cfg);
+        t.detect.record(Duration::from_millis(10));
+        t.detect.record(Duration::from_millis(20));
+        t.outcome = TimingOutcome::Matched;
+        let v = serde_json::to_value(t.record()).unwrap();
+        assert_eq!(v["detect_sum_ms"], 30.0);
+        assert_eq!(v["detect_count"], 2);
+        assert!(v["embed_sum_ms"].is_null());
+        assert!(v["align_ms"].is_null());
+        assert_eq!(v["outcome"], "matched");
+        let s = v.to_string();
+        assert!(!s.contains("user") && !s.contains("uid"));
+    }
+}

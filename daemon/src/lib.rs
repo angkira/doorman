@@ -3,6 +3,7 @@ pub mod camera;
 pub mod dataset;
 pub mod ml;
 pub mod storage;
+pub mod timing;
 pub mod training;
 
 // Re-export commonly used types

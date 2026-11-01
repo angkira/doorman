@@ -232,6 +232,8 @@ async fn collect_frames_for_duration(
 
 async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     info!("Authentication request for user: {}", username);
+    // Emits one timing record (debug log + optional JSONL file) when dropped.
+    let mut timing = crate::timing::AttemptTiming::start(&state.config.telemetry);
 
     // Check if user is enrolled
     let storage = state.storage.read().await;
@@ -239,6 +241,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         Some(embs) => embs.clone(),
         None => {
             warn!("User not enrolled: {}", username);
+            timing.outcome = crate::timing::TimingOutcome::NotEnrolled;
             return Response::Failure {
                 reason: "User not enrolled".to_string(),
             };
@@ -256,9 +259,11 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         Ok(lease) => lease,
         Err(err_msg) => {
             error!("{}", err_msg);
+            timing.outcome = crate::timing::TimingOutcome::CameraUnavailable;
             return Response::Failure { reason: err_msg };
         }
     };
+    timing.camera_open = Some(timing.since_start());
 
     let attempt_id = format!(
         "auth-{}-{}",
@@ -297,8 +302,13 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         let frame = (*frame).clone();
         let i = frames_seen;
         frames_seen += 1;
+        timing.frames_seen = frames_seen;
+        timing.mark_first_frame();
 
-        let face = match state.ml_pipeline.detect_face(&frame).await {
+        let detect_started = std::time::Instant::now();
+        let detect_result = state.ml_pipeline.detect_face(&frame).await;
+        timing.detect.record(detect_started.elapsed());
+        let face = match detect_result {
             Ok(Some(f)) => f,
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
@@ -317,15 +327,21 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
             continue;
         }
+        timing.mark_first_valid_frame();
         if first_quality_face_area_frac.is_none() {
             first_quality_face_area_frac = face_area_frac(&face);
         }
         // First quality face: run the anti-spoofing depth gate ONCE.
         if !liveness_checked {
             liveness_checked = true;
-            match state.ml_pipeline.liveness_gate(&frame, &face).await {
+            let liveness_started = std::time::Instant::now();
+            let liveness_result = state.ml_pipeline.liveness_gate(&frame, &face).await;
+            timing.liveness = Some(liveness_started.elapsed());
+            timing.liveness_passed = liveness_result.as_ref().ok().copied();
+            match liveness_result {
                 Ok(true) => {}
                 Ok(false) => {
+                    timing.outcome = crate::timing::TimingOutcome::LivenessRejected;
                     warn!(
                         "Authentication failed for {}: liveness/anti-spoof gate rejected",
                         username
@@ -355,6 +371,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                     };
                 }
                 Err(e) => {
+                    timing.outcome = crate::timing::TimingOutcome::LivenessError;
                     warn!(
                         "Authentication failed for {}: liveness error: {}",
                         username, e
@@ -385,7 +402,10 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                 }
             }
         }
-        match state.ml_pipeline.extract_embedding(&frame, &face).await {
+        let embed_started = std::time::Instant::now();
+        let embed_result = state.ml_pipeline.extract_embedding(&frame, &face).await;
+        timing.embed.record(embed_started.elapsed());
+        match embed_result {
             Ok(embedding) => passed_embeddings.push(embedding),
             Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
         }
@@ -395,7 +415,9 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
     }
 
+    timing.frames_used = passed_embeddings.len();
     if frames_seen == 0 {
+        timing.outcome = crate::timing::TimingOutcome::NoFrames;
         error!("Failed to capture any frames");
         log_auth_failure_attempt(
             state,
@@ -420,6 +442,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     );
 
     if passed_embeddings.is_empty() {
+        timing.outcome = crate::timing::TimingOutcome::NoClearFace;
         warn!(
             "Authentication failed for {}: no quality-passed faces",
             username
@@ -458,6 +481,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         };
     }
 
+    let decision_started = std::time::Instant::now();
     let aggregated = crate::pipeline::aggregate_embeddings(&passed_embeddings)
         .unwrap_or_else(|| passed_embeddings[0].clone());
 
@@ -467,6 +491,13 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         .collect();
     let best_similarity = gallery_similarities.iter().copied().fold(0.0f32, f32::max);
     let matched = best_similarity >= threshold;
+    timing.decision = Some(decision_started.elapsed());
+    timing.similarity = Some(best_similarity);
+    timing.outcome = if matched {
+        crate::timing::TimingOutcome::Matched
+    } else {
+        crate::timing::TimingOutcome::NotMatched
+    };
     dataset::log_attempt_capped(
         &state.config.daemon.data_dir,
         state.config.dataset.logging_enabled,
