@@ -59,13 +59,11 @@ user="${1:-${USER:-angkira}}"
 locker="${2:-swaylock}"
 socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
 interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"
-max_interval="${DOORMAN_SWAY_MAX_INTERVAL:-15}"
 
 {
     echo "[$(date -Is)] start user=$user locker=$locker socket=$socket"
 
     i=0
-    delay="$interval"
     while pgrep -u "$user" -x "$locker" >/dev/null 2>&1; do
         i=$((i + 1))
 
@@ -85,13 +83,7 @@ max_interval="${DOORMAN_SWAY_MAX_INTERVAL:-15}"
             exit 0
         fi
 
-        sleep "$delay"
-        if [ "$delay" -lt "$max_interval" ]; then
-            delay=$((delay + interval))
-            if [ "$delay" -gt "$max_interval" ]; then
-                delay="$max_interval"
-            fi
-        fi
+        sleep "$interval"
     done
 
     echo "[$(date -Is)] $locker gone; stop"
