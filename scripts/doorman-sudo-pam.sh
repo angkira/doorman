@@ -2,8 +2,8 @@
 # Wire pam_doorman.so into the sudo PAM service, or take it out again.
 #
 #   doorman-sudo-pam.sh status
-#   doorman-sudo-pam.sh enable  --i-have-a-root-shell-open
-#   doorman-sudo-pam.sh disable --i-have-a-root-shell-open
+#   doorman-sudo-pam.sh enable  --i-acknowledge-root-shell-open
+#   doorman-sudo-pam.sh disable --i-acknowledge-root-shell-open
 #
 # Edits ${PAM_DIR:-/etc/pam.d}/sudo: a timestamped backup is taken first, the
 # line `auth sufficient pam_doorman.so` is inserted before the first `auth`
@@ -15,7 +15,7 @@ set -eu
 PAM_DIR="${PAM_DIR:-/etc/pam.d}"
 PAM_FILE="$PAM_DIR/sudo"
 MODULE_LINE="auth sufficient pam_doorman.so"
-FLAG="--i-have-a-root-shell-open"
+FLAG="--i-acknowledge-root-shell-open"
 
 EX_USAGE=64
 EX_REFUSED=2
@@ -49,12 +49,30 @@ warn_root_shell() {
 EOF
 }
 
-# Require the explicit acknowledgement flag before touching anything.
+# Number of root login sessions according to `who` and `loginctl` (0 when
+# neither tool is available or shows one).
+root_session_count() {
+    local count=0
+    if command -v who >/dev/null 2>&1; then
+        count="$(who 2>/dev/null | awk '$1 == "root" { c++ } END { print c + 0 }')"
+    fi
+    if [ "$count" -eq 0 ] && command -v loginctl >/dev/null 2>&1; then
+        count="$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3 == "root" { c++ } END { print c + 0 }')"
+    fi
+    echo "$count"
+}
+
+# Require the explicit acknowledgement flag before touching anything. The flag
+# only acknowledges the warning; it cannot prove a root shell exists, so also
+# warn (never refuse) when no root session is visible.
 require_ack() {
     warn_root_shell
     if [ "${1:-}" != "$FLAG" ]; then
-        echo "doorman-sudo-pam: refusing: pass $FLAG to confirm a root shell is open" >&2
+        echo "doorman-sudo-pam: refusing: pass $FLAG to acknowledge that you keep a root shell open" >&2
         exit "$EX_REFUSED"
+    fi
+    if [ "$(root_session_count)" -eq 0 ]; then
+        echo "doorman-sudo-pam: WARNING: no other root session found in 'who' or 'loginctl'; open one before continuing" >&2
     fi
 }
 

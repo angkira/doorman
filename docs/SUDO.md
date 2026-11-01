@@ -123,7 +123,7 @@ whole procedure.
 3. Wire the PAM file (as root, from the shell you are keeping open):
 
        sudo scripts/doorman-sudo-pam.sh status
-       sudo scripts/doorman-sudo-pam.sh enable --i-have-a-root-shell-open
+       sudo scripts/doorman-sudo-pam.sh enable --i-acknowledge-root-shell-open
 
    It makes a backup `/etc/pam.d/sudo.doorman-backup.<timestamp>`, inserts
    `auth sufficient pam_doorman.so` before the first `auth` line or `@include`,
@@ -135,7 +135,7 @@ whole procedure.
 
 ## Disable
 
-    sudo scripts/doorman-sudo-pam.sh disable --i-have-a-root-shell-open
+    sudo scripts/doorman-sudo-pam.sh disable --i-acknowledge-root-shell-open
 
 removes the line again (after taking a backup). Setting `enabled = false` in
 the daemon config is enough to stop face auth for sudo even with the PAM line
