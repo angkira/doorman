@@ -50,7 +50,7 @@ Done (commits after `a0edca4`, tests in each commit):
 
 CI on PR #13 @81a9686 (owner-verified): `check`, `ort-typecheck`, `deb` pass — so the default-feature build compiles and tests on GitHub. `shellcheck` failed (selected `.plans/HOST-FACTS.md` as a script) and `python` failed (numpy missing) — both fixed in round 3.
 
-Still unverified: all host checklists; ORT linkage on the running daemon (owner: `sudo grep -ci onnx /proc/$(pidof doormand)/maps`).
+Still unverified: all host checklists (ORT linkage is now confirmed, see "Round 4").
 
 ## Round 3 (owner verification, `ROUND3.md`)
 Owner decision: stays on one branch / PR #13 (ROUND3 task 8 not applied).
@@ -62,4 +62,20 @@ Owner decision: stays on one branch / PR #13 (ROUND3 task 8 not applied).
 - Task 6 (`docs/host-facts-answers.md` "Round 3"): `backend="ort", device="cpu"` ⇒ in-process ORT CPU on `depth_anything_v2_small_fp32.onnx`; `depth.ncnn.*` only with `backend="ncnn"`, which runs Vulkan even with `--device cpu` (`--device` overrides only `ml.device`). Which one the host runs: check the `Using ML backend:` startup line. Shipped configs are GPU-free (test `shared/tests/shipped_configs_no_gpu.rs`). **Fixed**: `doorman install` default `--auto` used to pick ROCm/CUDA when present; now CPU on Linux, GPU only via `--rocm`/`--cuda`/`--ncnn`.
 - Task 7: root `MODELS.md` licence table + used/legacy table. Flag: the deb ships `edgeface_s.onnx` without a verified redistribution licence (likely CC BY-NC-SA; HF card unreadable here) — owner decides. `minifasnet_v2se_int8.onnx` is packaged but unused.
 
-Owner checks: `journalctl -u doormand | grep "Using ML backend"`; `sudo grep -ci onnx /proc/$(pidof doormand)/maps`.
+Owner check: `journalctl -u doormand | grep "Using ML backend"` (the ORT maps check is done, see "Round 4").
+
+## Round 4 (owner follow-ups)
+CI on PR #13 @e50cd65 (owner-reported, all green):
+- `ci.yml` run https://github.com/angkira/doorman/actions/runs/41355386222: `check`, `python`, `shellcheck`, `ort-typecheck`, `deb`.
+- `release.yml` run https://github.com/angkira/doorman/actions/runs/41355386218: `deb`.
+This replaces the earlier "shellcheck/python fail" statements, which were fixed in round 3.
+
+What was verified by reading the workflows (not by re-running them):
+- `ci.yml` `check` runs `cargo test --locked --workspace $FEATURES -- --skip test_video_frame_detection` with `FEATURES=--no-default-features --features camera-mock,camera-ffmpeg,preview`: no ORT backend, and the test is skipped explicitly.
+- `ci.yml` `deb` does not run `cargo test` at all (packaging check, `build_deb.sh`, `dpkg-deb` inspection).
+- `release.yml` `deb` runs `cargo test --locked -p doormand` with the daemon's default features (`backend-ort`, see `daemon/Cargo.toml` `default`), with no `--skip`. It is therefore the only job that runs `test_video_frame_detection` with default features, as the owner stated. Whether that test passes there depends on `$HOME/.local/share/doorman/models`/frames being absent; the job is green at e50cd65 (the test body tolerates missing frames).
+- The `.deb` artifact is uploaded by `release.yml` `deb` step "Upload CI artifact" (`actions/upload-artifact@v4`, name `doorman-deb`, path `target/debian/dist/*.deb`, `if-no-files-found: error`). `ci.yml` builds the .deb but does not upload it. The GitHub-release upload step only runs on `v*` tags.
+
+Host facts (HOST-FACTS section 9): ORT is statically linked in the installed (old, ~5f78657) build (`grep -ci onnx /proc/<pid>/maps` = 0). `doorman config check` does not exist in the installed CLI ("unrecognized subcommand 'config'"); it exists only in the PR #13 build.
+
+Step-by-step host install of this build: `docs/INSTALL-FROM-BRANCH.md`.
