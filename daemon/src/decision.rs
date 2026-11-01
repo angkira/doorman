@@ -1,0 +1,163 @@
+//! Structured result of one `Authenticate` run.
+//!
+//! The decision core returns an [`AuthDecision`]; the wire [`Response`] and the
+//! `WaitForMatch` [`AttemptOutcome`] are both built from it, so nothing has to
+//! re-parse a message string to learn the similarity.
+
+use crate::liveness::LivenessOutcome;
+use crate::unlock_wait::AttemptOutcome;
+use doorman_shared::Response;
+
+/// How an authentication run ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuthOutcome {
+    Matched,
+    NotMatched,
+    NotEnrolled,
+    /// Camera lease failed; `message` is the user-facing reason.
+    CameraUnavailable { message: String },
+    NoFrames,
+    NoClearFace,
+    LivenessRejected,
+    LivenessError,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthDecision {
+    pub outcome: AuthOutcome,
+    /// Final cosine similarity, when a decision on embeddings was reached.
+    pub similarity: Option<f32>,
+    /// Quality embeddings that entered the decision.
+    pub frames_used: usize,
+    /// Frames pulled from the camera.
+    pub frames_seen: usize,
+    /// Liveness verdict; `None` when liveness was disabled or never evaluated.
+    pub liveness: Option<LivenessOutcome>,
+}
+
+/// Success message of `Authenticate` (wire format, unchanged).
+pub fn authenticated_message(similarity: f32) -> String {
+    format!("Authenticated (confidence: {:.2}%)", similarity * 100.0)
+}
+
+impl AuthDecision {
+    /// A decision that carries only an outcome (early exits).
+    pub fn bare(outcome: AuthOutcome) -> Self {
+        Self {
+            outcome,
+            similarity: None,
+            frames_used: 0,
+            frames_seen: 0,
+            liveness: None,
+        }
+    }
+
+    /// The wire response. A `Matched` without a similarity cannot be built by
+    /// the core; it fails closed here.
+    pub fn into_response(self) -> Response {
+        let failure = |reason: &str| Response::Failure {
+            reason: reason.to_string(),
+        };
+        match (self.outcome, self.similarity) {
+            (AuthOutcome::Matched, Some(similarity)) => Response::Success {
+                message: Some(authenticated_message(similarity)),
+                data: None,
+            },
+            (AuthOutcome::Matched, None) => failure("Authentication decision incomplete."),
+            (AuthOutcome::NotMatched, similarity) => Response::Failure {
+                reason: format!(
+                    "Face not recognized (confidence: {:.2}%)",
+                    similarity.unwrap_or(0.0) * 100.0
+                ),
+            },
+            (AuthOutcome::NotEnrolled, _) => failure("User not enrolled"),
+            (AuthOutcome::CameraUnavailable { message }, _) => {
+                Response::Failure { reason: message }
+            }
+            (AuthOutcome::NoFrames, _) => failure("Failed to capture frames"),
+            (AuthOutcome::NoClearFace, _) => failure(
+                "No clear face detected. Please ensure good lighting and look at the camera.",
+            ),
+            (AuthOutcome::LivenessRejected, _) => {
+                failure("Liveness check failed (not a live face).")
+            }
+            (AuthOutcome::LivenessError, _) => failure("Liveness check error."),
+        }
+    }
+
+    /// The `WaitForMatch` view of this decision.
+    pub fn attempt_outcome(&self) -> AttemptOutcome {
+        match (&self.outcome, self.similarity) {
+            (AuthOutcome::Matched, Some(similarity)) => AttemptOutcome::Matched { similarity },
+            (AuthOutcome::NotEnrolled, _) => AttemptOutcome::NotEnrolled,
+            _ => AttemptOutcome::NotMatched,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decision(outcome: AuthOutcome, similarity: Option<f32>) -> AuthDecision {
+        AuthDecision {
+            similarity,
+            ..AuthDecision::bare(outcome)
+        }
+    }
+
+    #[test]
+    fn matched_maps_to_wire_success_and_attempt_matched() {
+        let d = decision(AuthOutcome::Matched, Some(0.8123));
+        assert_eq!(
+            d.attempt_outcome(),
+            AttemptOutcome::Matched { similarity: 0.8123 }
+        );
+        match d.into_response() {
+            Response::Success { message, .. } => {
+                assert_eq!(message.as_deref(), Some("Authenticated (confidence: 81.23%)"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn matched_without_similarity_fails_closed() {
+        let d = decision(AuthOutcome::Matched, None);
+        assert_eq!(d.attempt_outcome(), AttemptOutcome::NotMatched);
+        assert!(matches!(d.into_response(), Response::Failure { .. }));
+    }
+
+    #[test]
+    fn failure_reasons_keep_their_wire_text() {
+        let reason = |o| match decision(o, None).into_response() {
+            Response::Failure { reason } => reason,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(reason(AuthOutcome::NotEnrolled), "User not enrolled");
+        assert_eq!(reason(AuthOutcome::NoFrames), "Failed to capture frames");
+        assert_eq!(reason(AuthOutcome::LivenessError), "Liveness check error.");
+        assert_eq!(
+            reason(AuthOutcome::LivenessRejected),
+            "Liveness check failed (not a live face)."
+        );
+        match decision(AuthOutcome::NotMatched, Some(0.3)).into_response() {
+            Response::Failure { reason } => {
+                assert_eq!(reason, "Face not recognized (confidence: 30.00%)")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_enrolled_is_terminal_for_wait_for_match() {
+        assert_eq!(
+            decision(AuthOutcome::NotEnrolled, None).attempt_outcome(),
+            AttemptOutcome::NotEnrolled
+        );
+        assert_eq!(
+            decision(AuthOutcome::LivenessRejected, None).attempt_outcome(),
+            AttemptOutcome::NotMatched
+        );
+    }
+}

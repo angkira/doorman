@@ -8,6 +8,8 @@ use doorman_shared::{
 };
 use async_trait::async_trait;
 use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
+use doormand::decision::{AuthDecision, AuthOutcome};
+use doormand::liveness::LivenessOutcome;
 use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
 use image::GenericImageView;
 use std::sync::Arc;
@@ -85,7 +87,9 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
     let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
-        Request::Authenticate { username } => handle_authenticate(state, &username).await,
+        Request::Authenticate { username } => {
+            run_authenticate(state, &username).await.into_response()
+        }
         Request::Enroll { username } => handle_enroll(state, &username).await,
         Request::ListUsers => handle_list_users(state).await,
         Request::RemoveUser { username } => handle_remove_user(state, &username).await,
@@ -146,22 +150,9 @@ impl DecisionSource for AuthenticateSource<'_> {
         {
             return AttemptOutcome::NotEnrolled;
         }
-        match handle_authenticate(self.state, username).await {
-            Response::Success { message, .. } => {
-                match message
-                    .as_deref()
-                    .and_then(unlock_wait::parse_authenticated_similarity)
-                {
-                    Some(similarity) => AttemptOutcome::Matched { similarity },
-                    None => {
-                        // Fail closed: a success we cannot read is not a match.
-                        error!("Authenticate succeeded with an unparsable message: {message:?}");
-                        AttemptOutcome::NotMatched
-                    }
-                }
-            }
-            _ => AttemptOutcome::NotMatched,
-        }
+        run_authenticate(self.state, username)
+            .await
+            .attempt_outcome()
     }
 }
 
@@ -284,7 +275,9 @@ async fn collect_frames_for_duration(
     frames
 }
 
-async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
+/// Decision core of `Authenticate` and `WaitForMatch`; callers build the wire
+/// response (or the wait outcome) from the returned [`AuthDecision`].
+async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
     info!("Authentication request for user: {}", username);
     // Emits one timing record (debug log + optional JSONL file) when dropped.
     let mut timing = crate::timing::AttemptTiming::start(&state.config.telemetry);
@@ -296,9 +289,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         None => {
             warn!("User not enrolled: {}", username);
             timing.outcome = crate::timing::TimingOutcome::NotEnrolled;
-            return Response::Failure {
-                reason: "User not enrolled".to_string(),
-            };
+            return AuthDecision::bare(AuthOutcome::NotEnrolled);
         }
     };
     drop(storage);
@@ -314,7 +305,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         Err(err_msg) => {
             error!("{}", err_msg);
             timing.outcome = crate::timing::TimingOutcome::CameraUnavailable;
-            return Response::Failure { reason: err_msg };
+            return AuthDecision::bare(AuthOutcome::CameraUnavailable { message: err_msg });
         }
     };
     timing.camera_open = Some(timing.since_start());
@@ -341,6 +332,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
     let mut liveness_checked = false;
+    let mut liveness: Option<LivenessOutcome> = None;
     let mut frames_seen = 0usize;
     let mut rx = state.latest_frame.clone();
     let mut maybe_frame = rx.borrow_and_update().clone();
@@ -389,12 +381,15 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         if !liveness_checked {
             liveness_checked = true;
             let liveness_started = std::time::Instant::now();
-            let liveness_result = state.ml_pipeline.liveness_gate(&frame, &face).await;
+            let liveness_result = state.ml_pipeline.liveness_check(&frame, &face).await;
             timing.liveness = Some(liveness_started.elapsed());
-            timing.liveness_passed = liveness_result.as_ref().ok().copied();
-            match liveness_result {
-                Ok(true) => {}
-                Ok(false) => {
+            timing.liveness_passed = liveness_result.as_ref().map(LivenessOutcome::is_pass);
+            liveness = liveness_result;
+            match &liveness {
+                None | Some(LivenessOutcome::Pass { .. }) => {}
+                // Step 0 keeps the wire behaviour: an unavailable check is
+                // reported like a rejection.
+                Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. }) => {
                     timing.outcome = crate::timing::TimingOutcome::LivenessRejected;
                     warn!(
                         "Authentication failed for {}: liveness/anti-spoof gate rejected",
@@ -420,38 +415,10 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
                         GtSource::PamFaceAuth,
                         raw_face_frames,
                     );
-                    return Response::Failure {
-                        reason: "Liveness check failed (not a live face).".to_string(),
-                    };
-                }
-                Err(e) => {
-                    timing.outcome = crate::timing::TimingOutcome::LivenessError;
-                    warn!(
-                        "Authentication failed for {}: liveness error: {}",
-                        username, e
-                    );
-                    log_auth_failure_attempt(
-                        state,
-                        &attempt_id,
-                        username,
-                        Outcome::SuspectedSpoof,
-                        Some(false),
-                        "liveness_error",
-                        AttemptConditions {
-                            face_area_frac: first_quality_face_area_frac,
-                            ..AttemptConditions::default()
-                        },
-                    );
-                    log_auth_capture_pack(
-                        state,
-                        &attempt_id,
-                        Some(username),
-                        Outcome::SuspectedSpoof,
-                        GtSource::PamFaceAuth,
-                        raw_face_frames,
-                    );
-                    return Response::Failure {
-                        reason: "Liveness check error.".to_string(),
+                    return AuthDecision {
+                        frames_seen,
+                        liveness,
+                        ..AuthDecision::bare(AuthOutcome::LivenessRejected)
                     };
                 }
             }
@@ -482,9 +449,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             "no_frames",
             AttemptConditions::default(),
         );
-        return Response::Failure {
-            reason: "Failed to capture frames".to_string(),
-        };
+        return AuthDecision::bare(AuthOutcome::NoFrames);
     }
 
     info!(
@@ -529,9 +494,10 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             GtSource::PamFaceAuth,
             raw_face_frames,
         );
-        return Response::Failure {
-            reason: "No clear face detected. Please ensure good lighting and look at the camera."
-                .to_string(),
+        return AuthDecision {
+            frames_seen,
+            liveness,
+            ..AuthDecision::bare(AuthOutcome::NoClearFace)
         };
     }
 
@@ -617,10 +583,6 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             "Authentication successful for {} (similarity: {:.4})",
             username, best_similarity
         );
-        Response::Success {
-            message: Some(unlock_wait::authenticated_message(best_similarity)),
-            data: None,
-        }
     } else {
         warn!(
             "Authentication failed for {} (aggregated similarity: {:.4})",
@@ -645,12 +607,17 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             GtSource::PamFaceAuth,
             raw_face_frames,
         );
-        Response::Failure {
-            reason: format!(
-                "Face not recognized (confidence: {:.2}%)",
-                best_similarity * 100.0
-            ),
-        }
+    }
+    AuthDecision {
+        outcome: if matched {
+            AuthOutcome::Matched
+        } else {
+            AuthOutcome::NotMatched
+        },
+        similarity: Some(best_similarity),
+        frames_used: passed_embeddings.len(),
+        frames_seen,
+        liveness,
     }
 }
 
