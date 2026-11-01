@@ -6,10 +6,10 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-repo_root="$(CDPATH= cd -- "${script_dir}/.." && pwd)"
+script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH='' cd -- "${script_dir}/.." && pwd)"
 ts="$(date +%Y%m%d-%H%M%S)"
-target_user="${SUDO_USER:-angkira}"
+target_user="${SUDO_USER:-${USER:?set SUDO_USER or USER}}"
 session_name="sway-system-mesa.desktop"
 sddm_override="/etc/sddm.conf.d/zz-doorman-sway.conf"
 sddm_theme="${DOORMAN_SDDM_THEME:-breeze}"
@@ -90,6 +90,7 @@ fi
 
 bindings="/home/${target_user}/.config/sway/conf.d/bindings.conf"
 if [ -f "$bindings" ] && ! grep -q 'sway-recover-display' "$bindings"; then
+    # shellcheck disable=SC2016 # the sway config needs a literal $mod; it must not expand here
     printf '\n# Emergency display/lock recovery\nbindsym --locked $mod+Shift+Escape exec /home/%s/.local/bin/sway-recover-display\nbindsym $mod+Shift+Escape exec /home/%s/.local/bin/sway-recover-display\n' "$target_user" "$target_user" >> "$bindings"
 fi
 
@@ -107,6 +108,7 @@ echo "SDDM final active override:"
 sed -n '1,80p' "$sddm_override"
 echo
 echo "Sway lock target:"
+# shellcheck disable=SC2016 # grep pattern: \$ is a literal dollar sign
 grep -H '^set \$lock' "/home/${target_user}/.config/sway/config" 2>/dev/null || true
 grep -Hn 'doorman --socket /run/doorman/doorman.sock' "/home/${target_user}/.local/bin/sway-doorman-watch" 2>/dev/null || true
 echo

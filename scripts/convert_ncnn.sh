@@ -117,7 +117,9 @@ header2="$(sed -n '2p' "$OUT_DIR/depth.ncnn.param")"
 layers="$(echo "$header2" | awk '{print $1}')"
 blobs="$(echo  "$header2" | awk '{print $2}')"
 [ "$magic" = "7767517" ] || die "bad .param magic ($magic) — expected 7767517"
+# shellcheck disable=SC2015 # intentional: die when either test fails
 [ -n "$layers" ] && [ "$layers" -gt 0 ] 2>/dev/null || die "empty layer count in .param header"
+# shellcheck disable=SC2015 # intentional: die when either test fails
 [ -n "$blobs" ]  && [ "$blobs"  -gt 0 ] 2>/dev/null || die "empty blob count in .param header"
 
 info "DONE. wrote ncnn depth model to $OUT_DIR"
