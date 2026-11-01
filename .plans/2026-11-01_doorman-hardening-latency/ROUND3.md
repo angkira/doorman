@@ -42,3 +42,7 @@ Gaps:
 - `sudo grep -ci onnx /proc/$(pidof doormand)/maps`
 - Cleanup of legacy model files and /etc/doorman/*.bak*
 - Install and config check
+
+## Update
+
+ORT linkage is now confirmed static for the installed build (maps count 0). The installed CLI has no `config` subcommand, so `doorman config check` can only be validated after the PR build is installed. The owner will run the host runbook (install, config check, timing) when ready and report numbers.
