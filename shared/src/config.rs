@@ -787,6 +787,8 @@ impl SudoConfig {
 pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
 /// Default cap for a single `WaitForMatch` (milliseconds).
 pub const DEFAULT_WAIT_FOR_MATCH_MAX_MS: u64 = 60_000;
+/// Default cap on simultaneously open command connections per peer uid.
+pub const DEFAULT_MAX_CONNECTIONS_PER_UID: u32 = 8;
 
 /// IPC peer-credential policy (`[ipc]`). See docs/ipc-security.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -815,6 +817,15 @@ pub struct IpcConfig {
     /// are clamped to it.
     #[serde(default = "default_wait_for_match_max_ms")]
     pub wait_for_match_max_ms: u64,
+
+    /// Simultaneously open command connections allowed per peer uid (the global
+    /// cap is 64). Extra connections are dropped. `0` disables the per-uid cap.
+    #[serde(default = "default_max_connections_per_uid")]
+    pub max_connections_per_uid: u32,
+}
+
+fn default_max_connections_per_uid() -> u32 {
+    DEFAULT_MAX_CONNECTIONS_PER_UID
 }
 
 fn default_wait_for_match_max_ms() -> u64 {
@@ -833,6 +844,7 @@ impl Default for IpcConfig {
             max_auth_attempts_per_minute: DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE,
             stream_socket_group: None,
             wait_for_match_max_ms: DEFAULT_WAIT_FOR_MATCH_MAX_MS,
+            max_connections_per_uid: DEFAULT_MAX_CONNECTIONS_PER_UID,
         }
     }
 }

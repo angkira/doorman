@@ -8,14 +8,16 @@
 //! can be tested at the handler level with an injected [`PeerCred`].
 
 use anyhow::{bail, Context, Result};
-use doorman_shared::{IpcConfig, Request, RequestEnvelope, Response, PROTOCOL_VERSION};
+use doorman_shared::{
+    IpcConfig, Request, RequestEnvelope, Response, PROTOCOL_VERSION, UNVERSIONED_PROTOCOL_VERSION,
+};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
@@ -32,6 +34,10 @@ pub const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 /// Upper bound on simultaneously open command connections; further ones are
 /// dropped. Connections are served concurrently, so this bounds task/fd use.
 pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+/// Longest accepted request line in bytes (including the newline). The socket is
+/// world-connectable, so an unauthenticated peer must not be able to make the
+/// daemon buffer an unbounded line. A longer line drops the connection.
+pub const MAX_REQUEST_LINE_BYTES: u64 = 64 * 1024;
 /// How long a connected peer may take to send its request line.
 pub const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -107,8 +113,13 @@ pub fn authorize(
 pub struct RateLimiter {
     max_per_window: u32,
     window: Duration,
-    hits: Mutex<HashMap<u32, VecDeque<Instant>>>,
+    hits: Mutex<HashMap<RateKey, VecDeque<Instant>>>,
 }
+
+/// Rate-limit bucket: the peer uid, plus the target username for root callers.
+/// Every PAM caller runs as uid 0, so a uid-only key would let attempts for one
+/// user (e.g. a locked-out login) exhaust the budget of all others.
+type RateKey = (u32, Option<String>);
 
 impl RateLimiter {
     /// `max_per_window == 0` disables limiting.
@@ -123,11 +134,16 @@ impl RateLimiter {
     /// Record an attempt by `uid` at `now`. `Err(retry_after_s)` when over budget
     /// (the attempt is then not recorded).
     pub fn check(&self, uid: u32, now: Instant) -> Result<(), u64> {
+        self.check_key((uid, None), now)
+    }
+
+    /// Like [`check`](Self::check) for an explicit bucket key.
+    fn check_key(&self, key: RateKey, now: Instant) -> Result<(), u64> {
         if self.max_per_window == 0 {
             return Ok(());
         }
         let mut map = self.hits.lock().unwrap_or_else(|e| e.into_inner());
-        let q = map.entry(uid).or_default();
+        let q = map.entry(key).or_default();
         while q
             .front()
             .is_some_and(|t| now.saturating_duration_since(*t) >= self.window)
@@ -146,6 +162,55 @@ impl RateLimiter {
 
 type UidResolver = Box<dyn Fn(&str) -> Option<u32> + Send + Sync>;
 type Clock = Box<dyn Fn() -> Instant + Send + Sync>;
+
+/// Per-uid cap on simultaneously open command connections, so one local user
+/// cannot take every slot of the global [`MAX_CONCURRENT_CONNECTIONS`] pool.
+pub struct UidConnectionLimiter {
+    max_per_uid: usize,
+    open: Arc<Mutex<HashMap<u32, usize>>>,
+}
+
+/// Holds one per-uid connection slot; released on drop.
+pub struct UidConnectionGuard {
+    uid: u32,
+    open: Arc<Mutex<HashMap<u32, usize>>>,
+}
+
+impl UidConnectionLimiter {
+    /// `max_per_uid == 0` disables the limit.
+    pub fn new(max_per_uid: u32) -> Self {
+        Self {
+            max_per_uid: max_per_uid as usize,
+            open: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// A slot for `uid`, or `None` when the uid already has the maximum open.
+    pub fn try_acquire(&self, uid: u32) -> Option<UidConnectionGuard> {
+        let mut map = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        let count = map.entry(uid).or_insert(0);
+        if self.max_per_uid != 0 && *count >= self.max_per_uid {
+            return None;
+        }
+        *count += 1;
+        Some(UidConnectionGuard {
+            uid,
+            open: self.open.clone(),
+        })
+    }
+}
+
+impl Drop for UidConnectionGuard {
+    fn drop(&mut self) {
+        let mut map = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(&self.uid) {
+            *count -= 1;
+            if *count == 0 {
+                map.remove(&self.uid);
+            }
+        }
+    }
+}
 
 /// Version check + authorization + rate limiting for one request.
 pub struct Gatekeeper {
@@ -185,7 +250,20 @@ impl Gatekeeper {
 
     /// `Ok(())` to proceed, `Err(response)` to send instead of handling.
     pub fn check(&self, peer: &PeerCred, env: &RequestEnvelope) -> Result<(), Response> {
-        let version = env.protocol_version.unwrap_or(PROTOCOL_VERSION);
+        let version = match effective_protocol_version(env.protocol_version, PROTOCOL_VERSION) {
+            Ok(v) => v,
+            Err(()) => {
+                warn!(
+                    peer_uid = peer.uid,
+                    peer_pid = ?peer.pid,
+                    "rejected request without protocol_version"
+                );
+                return Err(Response::UnsupportedProtocol {
+                    reason: "protocol_version is required".to_string(),
+                    supported_version: PROTOCOL_VERSION,
+                });
+            }
+        };
         if version != PROTOCOL_VERSION {
             warn!(
                 peer_uid = peer.uid,
@@ -213,11 +291,12 @@ impl Gatekeeper {
             });
         }
 
-        if matches!(
-            env.request,
-            Request::Authenticate { .. } | Request::WaitForMatch { .. }
-        ) {
-            if let Err(retry_after_s) = self.limiter.check(peer.uid, (self.clock)()) {
+        if let Request::Authenticate { username, .. } | Request::WaitForMatch { username, .. } =
+            &env.request
+        {
+            // PAM callers are all root: bucket them per target user (see RateKey).
+            let key = (peer.uid, (peer.uid == 0).then(|| username.clone()));
+            if let Err(retry_after_s) = self.limiter.check_key(key, (self.clock)()) {
                 warn!(
                     peer_uid = peer.uid,
                     peer_pid = ?peer.pid,
@@ -228,6 +307,17 @@ impl Gatekeeper {
             }
         }
         Ok(())
+    }
+}
+
+/// Protocol version a request is handled as. A missing `protocol_version` means
+/// [`UNVERSIONED_PROTOCOL_VERSION`] only while that is still the current
+/// version; afterwards it is an error so omission cannot select the old protocol.
+fn effective_protocol_version(declared: Option<u32>, current: u32) -> Result<u32, ()> {
+    match declared {
+        Some(v) => Ok(v),
+        None if current <= UNVERSIONED_PROTOCOL_VERSION => Ok(UNVERSIONED_PROTOCOL_VERSION),
+        None => Err(()),
     }
 }
 
@@ -268,8 +358,15 @@ pub async fn read_gated_request<R: AsyncBufRead + Unpin>(
     peer: &PeerCred,
     gate: &Gatekeeper,
 ) -> Result<Gated> {
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    // Read at most MAX_REQUEST_LINE_BYTES + 1 bytes: one byte more than allowed
+    // proves the cap was exceeded without ever buffering more than that.
+    let mut line = Vec::new();
+    let mut limited = (&mut *reader).take(MAX_REQUEST_LINE_BYTES + 1);
+    limited.read_until(b'\n', &mut line).await?;
+    if line.len() as u64 > MAX_REQUEST_LINE_BYTES {
+        bail!("request line exceeds {MAX_REQUEST_LINE_BYTES} bytes");
+    }
+    let line = std::str::from_utf8(&line).context("request line is not valid UTF-8")?;
     let env: RequestEnvelope =
         serde_json::from_str(line.trim()).context("Failed to parse request")?;
     Ok(match gate.check(peer, &env) {
@@ -287,19 +384,17 @@ pub async fn write_response(stream: &mut UnixStream, response: &Response) -> Res
     Ok(())
 }
 
-/// Serve one connection: peer credentials (fail closed), gate, `handler`, reply.
-async fn serve_connection<H, Fut>(stream: UnixStream, gate: &Gatekeeper, handler: &H) -> Result<()>
+/// Serve one connection from an already identified `peer`: gate, `handler`, reply.
+async fn serve_connection<H, Fut>(
+    stream: UnixStream,
+    peer: PeerCred,
+    gate: &Gatekeeper,
+    handler: &H,
+) -> Result<()>
 where
     H: Fn(PeerCred, Request) -> Fut,
     Fut: Future<Output = Response>,
 {
-    let peer = match peer_from_stream(&stream) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Rejecting connection: {e:#}");
-            return Ok(());
-        }
-    };
     let mut reader = BufReader::new(stream);
     let gated = tokio::time::timeout(
         REQUEST_READ_TIMEOUT,
@@ -348,6 +443,7 @@ where
     Fut: Future<Output = Response> + Send + 'static,
 {
     let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let uid_limits = UidConnectionLimiter::new(gate.config().max_connections_per_uid);
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -360,11 +456,28 @@ where
             warn!("Dropping connection: {MAX_CONCURRENT_CONNECTIONS} already open");
             continue;
         };
+        // Fail closed when the kernel cannot tell us who connected.
+        let peer = match peer_from_stream(&stream) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("Rejecting connection: {e:#}");
+                continue;
+            }
+        };
+        let Some(uid_slot) = uid_limits.try_acquire(peer.uid) else {
+            warn!(
+                peer_uid = peer.uid,
+                "Dropping connection: uid already has {} open",
+                gate.config().max_connections_per_uid
+            );
+            continue;
+        };
         let gate = gate.clone();
         let handler = handler.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            if let Err(e) = serve_connection(stream, &gate, &*handler).await {
+            let _uid_slot = uid_slot;
+            if let Err(e) = serve_connection(stream, peer, &gate, &*handler).await {
                 error!("Connection error: {:#}", e);
             }
         });
@@ -638,6 +751,69 @@ mod tests {
         for _ in 0..100 {
             assert!(rl.check(0, t0).is_ok());
         }
+    }
+
+    #[test]
+    fn missing_protocol_version_is_rejected_once_a_newer_version_exists() {
+        // Today (current == 1) a missing field means the unversioned protocol.
+        assert_eq!(
+            effective_protocol_version(None, UNVERSIONED_PROTOCOL_VERSION),
+            Ok(UNVERSIONED_PROTOCOL_VERSION)
+        );
+        // As soon as a v2 exists, omitting the field must not select v1 by default.
+        assert_eq!(
+            effective_protocol_version(None, UNVERSIONED_PROTOCOL_VERSION + 1),
+            Err(())
+        );
+        assert_eq!(effective_protocol_version(Some(2), 2), Ok(2));
+    }
+
+    #[test]
+    fn uid_connection_limiter_caps_and_releases() {
+        let lim = UidConnectionLimiter::new(2);
+        let a1 = lim.try_acquire(ALICE).expect("first");
+        let _a2 = lim.try_acquire(ALICE).expect("second");
+        assert!(lim.try_acquire(ALICE).is_none(), "third is over the cap");
+        // Another uid has its own budget.
+        assert!(lim.try_acquire(BOB).is_some());
+        drop(a1);
+        assert!(lim.try_acquire(ALICE).is_some(), "slot freed on drop");
+        // 0 disables the cap.
+        let unlimited = UidConnectionLimiter::new(0);
+        let _held: Vec<_> = (0..100).map(|_| unlimited.try_acquire(ALICE)).collect();
+        assert!(unlimited.try_acquire(ALICE).is_some());
+    }
+
+    #[test]
+    fn root_rate_limit_is_per_target_user_others_per_uid() {
+        let cfg = IpcConfig {
+            max_auth_attempts_per_minute: 1,
+            trusted_uids: vec![2000],
+            ..IpcConfig::default()
+        };
+        let now = Instant::now();
+        let gate = Gatekeeper::with_parts(cfg, Box::new(resolve), Box::new(move || now));
+        let env = |r| RequestEnvelope {
+            protocol_version: None,
+            request: r,
+        };
+        assert!(gate.check(&peer(0), &env(auth("alice"))).is_ok());
+        assert!(matches!(
+            gate.check(&peer(0), &env(auth("alice"))),
+            Err(Response::RateLimited { .. })
+        ));
+        // Exhausting root's budget for alice leaves bob's untouched.
+        assert!(gate.check(&peer(0), &env(auth("bob"))).is_ok());
+        assert!(matches!(
+            gate.check(&peer(0), &env(wait("bob"))),
+            Err(Response::RateLimited { .. })
+        ));
+        // Non-root callers stay keyed by uid alone, whatever the target.
+        assert!(gate.check(&peer(2000), &env(auth("alice"))).is_ok());
+        assert!(matches!(
+            gate.check(&peer(2000), &env(auth("bob"))),
+            Err(Response::RateLimited { .. })
+        ));
     }
 
     #[test]

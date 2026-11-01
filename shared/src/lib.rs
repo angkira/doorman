@@ -5,9 +5,14 @@ pub mod config;
 pub mod config_check;
 pub use config::{Config, DatasetConfig, IpcConfig, RecognitionConfig};
 
-/// Current IPC protocol major version. Requests without a `protocol_version`
-/// field (old PAM module / CLI) are treated as this version.
+/// Current IPC protocol major version.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Version assumed for a request without a `protocol_version` field (old PAM
+/// module / CLI that predate the field). Fixed forever at 1: once
+/// `PROTOCOL_VERSION` is greater than this, a missing field is rejected so a
+/// legacy client cannot talk the old protocol by omission (version-downgrade bypass).
+pub const UNVERSIONED_PROTOCOL_VERSION: u32 = 1;
 
 /// IPC protocol messages between PAM module/CLI and daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]

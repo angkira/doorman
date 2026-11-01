@@ -106,6 +106,7 @@ see the comments in `packaging/doorman.toml.example`).
 |---|---|
 | `admin_uids` | `[]` |
 | `max_auth_attempts_per_minute` | `20` |
+| `max_connections_per_uid` | `8` |
 | `stream_socket_group` | `unset` |
 | `trusted_uids` | `[]` |
 | `wait_for_match_max_ms` | `60000` |
