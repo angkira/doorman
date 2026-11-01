@@ -1,15 +1,16 @@
 use crate::dataset::{self, AttemptConditions, GtSource, LabelEvent, Outcome};
 use crate::DaemonState;
 use anyhow::Result;
+use async_trait::async_trait;
 use chrono::Timelike;
 use doorman_shared::{
     DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage,
     ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
 };
-use doormand::ipc_policy::{self, Gated, Gatekeeper};
+use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
+use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
 use image::GenericImageView;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// Select diverse embeddings from a larger set using maximal distance approach
@@ -65,62 +66,41 @@ pub async fn run_server(state: DaemonState) -> Result<()> {
     // World-connectable: PAM (root) and the CLI/lock watcher (user) differ in uid.
     // Authorization is entirely SO_PEERCRED policy, see ipc_policy / docs/ipc-security.md.
     let listener = ipc_policy::bind_socket(socket_path, ipc_policy::COMMAND_SOCKET_MODE, None)?;
-    let gate = Gatekeeper::new(state.config.ipc.clone());
+    let gate = Arc::new(Gatekeeper::new(state.config.ipc.clone()));
 
     info!("IPC server listening on {}", socket_path);
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                if let Err(e) = handle_connection(stream, state.clone(), &gate).await {
-                    error!("Connection error: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Accept error: {}", e);
-            }
-        }
-    }
+    // Connections are served concurrently (one task each); the camera producer
+    // is the single frame source and `DaemonState` is cheap to clone.
+    let handler = Arc::new(move |peer: PeerCred, request: Request| {
+        let state = state.clone();
+        async move { dispatch(&state, peer, request).await }
+    });
+    ipc_policy::serve(listener, gate, handler).await;
+    Ok(())
 }
 
-async fn handle_connection(
-    stream: UnixStream,
-    state: DaemonState,
-    gate: &Gatekeeper,
-) -> Result<()> {
-    // Fail closed: without peer credentials no request can be authorized.
-    let peer = match ipc_policy::peer_from_stream(&stream) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Rejecting connection: {e:#}");
-            return Ok(());
-        }
-    };
-    let mut reader = BufReader::new(stream);
-
-    let request = match ipc_policy::read_gated_request(&mut reader, &peer, gate).await? {
-        Gated::Allowed(request) => request,
-        Gated::Rejected(response) => {
-            return write_response(reader.into_inner(), &response).await;
-        }
-    };
-
+async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Response {
     debug!("Received request: {}", ipc_policy::request_name(&request));
     let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
-        Request::Authenticate { username } => handle_authenticate(&state, &username).await,
-        Request::Enroll { username } => handle_enroll(&state, &username, &mut reader).await,
-        Request::ListUsers => handle_list_users(&state).await,
-        Request::RemoveUser { username } => handle_remove_user(&state, &username).await,
-        Request::Status => handle_status(&state).await,
-        Request::DetectAndRecognize => handle_detect_and_recognize(&state).await,
+        Request::Authenticate { username } => handle_authenticate(state, &username).await,
+        Request::Enroll { username } => handle_enroll(state, &username).await,
+        Request::ListUsers => handle_list_users(state).await,
+        Request::RemoveUser { username } => handle_remove_user(state, &username).await,
+        Request::Status => handle_status(state).await,
+        Request::DetectAndRecognize => handle_detect_and_recognize(state).await,
         Request::GetLatestDetection => {
             // Not implemented yet - would return cached detection result
             Response::Failure {
                 reason: "GetLatestDetection not implemented".to_string(),
             }
         }
+        Request::WaitForMatch {
+            username,
+            timeout_ms,
+        } => handle_wait_for_match(state, &username, timeout_ms).await,
         Request::Shutdown => {
             info!("Shutdown requested");
             Response::Success {
@@ -143,16 +123,69 @@ async fn handle_connection(
         );
     }
 
-    write_response(reader.into_inner(), &response).await
+    response
 }
 
-async fn write_response(mut stream: UnixStream, response: &Response) -> Result<()> {
-    let response_json = serde_json::to_string(response)?;
-    stream.write_all(response_json.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
+/// `WaitForMatch` decision source: every attempt is a complete `Authenticate`
+/// (quality gate, liveness, aggregated threshold), so a `Matched` is never
+/// weaker than an `Authenticate` success.
+struct AuthenticateSource<'a> {
+    state: &'a DaemonState,
+}
 
-    Ok(())
+#[async_trait]
+impl DecisionSource for AuthenticateSource<'_> {
+    async fn attempt(&self, username: &str) -> AttemptOutcome {
+        if self
+            .state
+            .storage
+            .read()
+            .await
+            .get_embeddings(username)
+            .is_none()
+        {
+            return AttemptOutcome::NotEnrolled;
+        }
+        match handle_authenticate(self.state, username).await {
+            Response::Success { message, .. } => {
+                match message
+                    .as_deref()
+                    .and_then(unlock_wait::parse_authenticated_similarity)
+                {
+                    Some(similarity) => AttemptOutcome::Matched { similarity },
+                    None => {
+                        // Fail closed: a success we cannot read is not a match.
+                        error!("Authenticate succeeded with an unparsable message: {message:?}");
+                        AttemptOutcome::NotMatched
+                    }
+                }
+            }
+            _ => AttemptOutcome::NotMatched,
+        }
+    }
+}
+
+async fn handle_wait_for_match(state: &DaemonState, username: &str, timeout_ms: u64) -> Response {
+    let timeout =
+        unlock_wait::effective_timeout(timeout_ms, state.config.ipc.wait_for_match_max_ms);
+    info!(
+        timeout_ms = timeout.as_millis() as u64,
+        "WaitForMatch request"
+    );
+    let response = unlock_wait::wait_for_match(
+        &AuthenticateSource { state },
+        state.armed.clone(),
+        username,
+        timeout,
+    )
+    .await;
+    match &response {
+        Response::Matched { similarity, .. } => {
+            info!(similarity, "WaitForMatch decision: matched")
+        }
+        other => info!("WaitForMatch decision: {other:?}"),
+    }
+    response
 }
 
 /// Wait until the single-owner camera producer thread has published at least
@@ -585,10 +618,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             username, best_similarity
         );
         Response::Success {
-            message: Some(format!(
-                "Authenticated (confidence: {:.2}%)",
-                best_similarity * 100.0
-            )),
+            message: Some(unlock_wait::authenticated_message(best_similarity)),
             data: None,
         }
     } else {
@@ -822,11 +852,7 @@ mod tests {
     }
 }
 
-async fn handle_enroll(
-    state: &DaemonState,
-    username: &str,
-    _reader: &mut BufReader<UnixStream>,
-) -> Response {
+async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
     info!("Enrollment request for user: {}", username);
 
     // Turn the camera ON on-demand (works even when the screen is unlocked and the

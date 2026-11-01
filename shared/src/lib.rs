@@ -28,6 +28,10 @@ pub enum Request {
     DetectAndRecognize,
     /// Get latest cached detection result (fast, no processing)
     GetLatestDetection,
+    /// Hold the connection until `username` is recognized (same decision as
+    /// `Authenticate`), the (capped) timeout expires, or the session is not
+    /// armed. Answered with exactly one terminal `Matched` or `NoMatch`.
+    WaitForMatch { username: String, timeout_ms: u64 },
 }
 
 /// Wire envelope for a request: the `Request` fields stay at the top level of
@@ -82,6 +86,30 @@ pub enum Response {
         reason: String,
         supported_version: u32,
     },
+    /// Terminal answer to `WaitForMatch`: the user passed the full
+    /// authentication decision (quality gate, liveness, threshold).
+    Matched {
+        username: String,
+        similarity: f32,
+        /// Unix time of the decision, milliseconds.
+        ts_unix_ms: u64,
+    },
+    /// Terminal answer to `WaitForMatch`: no match was made.
+    NoMatch {
+        reason: NoMatchReason,
+    },
+}
+
+/// Why a `WaitForMatch` ended without a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoMatchReason {
+    /// The wait expired while the session was armed (or not lock-gated).
+    Timeout,
+    /// The session was not locked and awake for the whole wait.
+    NotArmed,
+    /// The user has no enrollment; waiting longer cannot help.
+    NotEnrolled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +248,43 @@ mod tests {
             serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
         assert_eq!(env.protocol_version, None);
         assert!(matches!(env.request, Request::Authenticate { ref username } if username == "bob"));
+    }
+
+    #[test]
+    fn wait_for_match_wire_format() {
+        let env: RequestEnvelope = serde_json::from_str(
+            r#"{"type":"wait_for_match","username":"bob","timeout_ms":5000,"protocol_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            env.request,
+            Request::WaitForMatch { ref username, timeout_ms: 5000 } if username == "bob"
+        ));
+
+        let matched = Response::Matched {
+            username: "bob".into(),
+            similarity: 0.5,
+            ts_unix_ms: 7,
+        };
+        assert_eq!(
+            serde_json::to_string(&matched).unwrap(),
+            r#"{"status":"matched","username":"bob","similarity":0.5,"ts_unix_ms":7}"#
+        );
+        let no_match = Response::NoMatch {
+            reason: NoMatchReason::NotArmed,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_match).unwrap(),
+            r#"{"status":"no_match","reason":"not_armed"}"#
+        );
+        let back: Response =
+            serde_json::from_str(r#"{"status":"no_match","reason":"timeout"}"#).unwrap();
+        assert!(matches!(
+            back,
+            Response::NoMatch {
+                reason: NoMatchReason::Timeout
+            }
+        ));
     }
 
     #[test]

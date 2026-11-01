@@ -37,6 +37,12 @@ install -D -m 0644 "$repo_dir/packaging/adapters/niri/waybar/config" "$HOME/.con
 install -D -m 0644 "$repo_dir/packaging/adapters/niri/waybar/style.css" "$HOME/.config/waybar-niri/style.css"
 install -D -m 0755 "$repo_dir/packaging/adapters/niri/waybar-niri-click" "$HOME/.config/waybar-niri/waybar-niri-click"
 
+# Event-driven face unlock for the niri lock key (needs `doorman` on PATH).
+backup_file "$HOME/.local/bin/doorman-lock"
+backup_file "$HOME/.local/bin/doorman-lock-watch-poll"
+install -D -m 0755 "$repo_dir/packaging/adapters/niri/bin/doorman-lock" "$HOME/.local/bin/doorman-lock"
+install -D -m 0755 "$repo_dir/packaging/adapters/niri/bin/doorman-lock-watch-poll" "$HOME/.local/bin/doorman-lock-watch-poll"
+
 mkdir -p "$HOME/.config/autostart"
 printf '%s\n' \
     '[Desktop Entry]' \
@@ -61,4 +67,5 @@ fi
 printf 'installed niri config: %s\n' "$HOME/.config/niri/config.kdl"
 printf 'installed niri waybar: %s\n' "$HOME/.config/waybar-niri/config"
 printf 'installed niri click helper: %s\n' "$HOME/.config/waybar-niri/waybar-niri-click"
+printf 'installed lock scripts in: %s\n' "$HOME/.local/bin"
 printf 'disabled duplicate waybar.service, 1Password autostart, and Xwayland Video Bridge autostart for this user\n'
