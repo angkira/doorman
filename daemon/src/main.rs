@@ -474,9 +474,10 @@ async fn main() -> Result<()> {
     let debug_server_task = {
         let debug_socket_path = config.daemon.debug_socket.clone();
         let debug_bcast = debug_broadcaster.clone();
+        let debug_ipc = config.ipc.clone();
         info!("Starting debug stream server on {}", debug_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_bcast).await {
+            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_bcast, debug_ipc).await {
                 error!("Debug stream server error: {}", e);
             }
         }))
@@ -486,9 +487,10 @@ async fn main() -> Result<()> {
     let frame_server_task = if let Some(ref frame_bcast) = frame_broadcaster {
         let frame_socket_path = config.daemon.frame_socket.clone();
         let frame_bcast_clone = frame_bcast.clone();
+        let frame_ipc = config.ipc.clone();
         info!("Starting frame stream server on {}", frame_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone).await {
+            if let Err(e) = frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone, frame_ipc).await {
                 error!("Frame stream server error: {}", e);
             }
         }))
