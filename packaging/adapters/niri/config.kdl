@@ -136,7 +136,7 @@ binds {
     Mod+Shift+Return hotkey-overlay-title="Open fallback terminal" { spawn "foot"; }
     Mod+D hotkey-overlay-title="Run application" { spawn "/home/angkira/.local/bin/sway-menu"; }
     Mod+Tab hotkey-overlay-title="Overview" { toggle-overview; }
-    Mod+L allow-inhibiting=false hotkey-overlay-title="Lock" { spawn "/home/angkira/.local/bin/doorman-lock"; }
+    Mod+L allow-inhibiting=false hotkey-overlay-title="Lock" { spawn-sh "exec \"$HOME/.local/bin/doorman-lock\""; }
     Mod+Escape allow-inhibiting=false { toggle-keyboard-shortcuts-inhibit; }
 
     Mod+Space allow-inhibiting=false hotkey-overlay-title="Switch keyboard layout" { switch-layout "next"; }
