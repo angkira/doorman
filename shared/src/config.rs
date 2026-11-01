@@ -24,6 +24,12 @@ pub const MAX_WARMUP_FRAMES: u32 = 10;
 pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
 /// Largest 8-bit luma value; upper bound of `[recognition] min_brightness`.
 pub const MAX_LUMA: f32 = 255.0;
+/// Largest `[liveness] frames`.
+pub const MAX_LIVENESS_FRAMES: usize = 9;
+/// Default `[liveness] depth_input_size` (Depth-Anything-V2 export, 37 * 14).
+pub const DEFAULT_DEPTH_INPUT_SIZE: u32 = 518;
+/// Depth-Anything-V2 patch size: `depth_input_size` must be a multiple of it.
+pub const DEPTH_INPUT_MULTIPLE: u32 = 14;
 /// Default `[decision] accept_n`: frames that must clear the threshold.
 pub const DEFAULT_ACCEPT_N: usize = 3;
 /// Default `[decision] window_m`: size of the sliding window of recent frames.
@@ -97,6 +103,9 @@ pub struct Config {
 
     #[serde(default)]
     pub decision: DecisionConfig,
+
+    #[serde(default)]
+    pub liveness: LivenessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,6 +501,87 @@ impl DecisionConfig {
     }
 }
 
+/// How per-frame liveness results become one verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LivenessAggregate {
+    /// Median relief over the evaluated frames (majority of frames on one
+    /// side of the threshold, which is equivalent for an odd frame count).
+    Median,
+}
+
+/// Statistic that turns a depth patch into the relief value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReliefStat {
+    /// `std(face depth) / (global max - global min)` (original behaviour).
+    #[serde(rename = "minmax")]
+    MinMax,
+    /// `(p90 - p10)` of the face depth over the same range of the whole map,
+    /// robust to outlier pixels. Thresholds are NOT comparable with `minmax`.
+    #[serde(rename = "p10_p90")]
+    P10P90,
+}
+
+/// `[liveness]`: how the depth-relief liveness gate is evaluated. The relief
+/// threshold itself stays `authentication.liveness_depth_threshold`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessConfig {
+    /// Frames to evaluate (odd, 1..=9). `1` is the original single-frame check.
+    #[serde(default = "default_liveness_frames")]
+    pub frames: usize,
+
+    #[serde(default = "default_liveness_aggregate")]
+    pub aggregate: LivenessAggregate,
+
+    #[serde(default = "default_relief_stat")]
+    pub relief_stat: ReliefStat,
+
+    /// Square depth network input size; a multiple of 14. Sizes other than the
+    /// default need a model exported for that size (or with dynamic axes).
+    #[serde(default = "default_depth_input_size")]
+    pub depth_input_size: u32,
+
+    /// Extra liveness signals (screen flash, head pose). None are implemented:
+    /// any entry is rejected so a security setting is never silently ignored.
+    #[serde(default)]
+    pub signals: Vec<String>,
+}
+
+impl Default for LivenessConfig {
+    fn default() -> Self {
+        Self {
+            frames: default_liveness_frames(),
+            aggregate: default_liveness_aggregate(),
+            relief_stat: default_relief_stat(),
+            depth_input_size: default_depth_input_size(),
+            signals: Vec::new(),
+        }
+    }
+}
+
+impl LivenessConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.frames % 2 == 0 || self.frames > MAX_LIVENESS_FRAMES {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.frames = {} must be odd and at most {MAX_LIVENESS_FRAMES}",
+                self.frames
+            )));
+        }
+        if self.depth_input_size == 0 || self.depth_input_size % DEPTH_INPUT_MULTIPLE != 0 {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.depth_input_size = {} must be a positive multiple of {DEPTH_INPUT_MULTIPLE}",
+                self.depth_input_size
+            )));
+        }
+        if let Some(name) = self.signals.first() {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.signals contains {name:?}, but no extra liveness signal is implemented yet"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Default per-uid Authenticate budget per sliding minute.
 pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
 /// Default cap for a single `WaitForMatch` (milliseconds).
@@ -739,6 +829,18 @@ fn default_window_m() -> usize {
 fn default_template_score() -> TemplateScore {
     TemplateScore::Max
 }
+fn default_liveness_frames() -> usize {
+    1
+}
+fn default_liveness_aggregate() -> LivenessAggregate {
+    LivenessAggregate::Median
+}
+fn default_relief_stat() -> ReliefStat {
+    ReliefStat::MinMax
+}
+fn default_depth_input_size() -> u32 {
+    DEFAULT_DEPTH_INPUT_SIZE
+}
 fn default_enroll_frames() -> usize {
     20
 }
@@ -933,6 +1035,7 @@ impl Default for Config {
             ipc: IpcConfig::default(),
             telemetry: TelemetryConfig::default(),
             decision: DecisionConfig::default(),
+            liveness: LivenessConfig::default(),
         }
     }
 }
@@ -942,6 +1045,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.camera.validate()?;
         self.decision.validate()?;
+        self.liveness.validate()?;
         let brightness = self.recognition.min_brightness;
         if !(0.0..=MAX_LUMA).contains(&brightness) {
             return Err(ConfigError::Invalid(format!(
@@ -1089,6 +1193,35 @@ mod tests {
         assert_eq!(new.decision.mode, DecisionMode::NOfM);
         assert_eq!(new.decision.template_score, TemplateScore::Top3Mean);
         assert!(new.validate().is_ok());
+    }
+
+    #[test]
+    fn liveness_defaults_keep_current_behaviour_and_are_validated() {
+        let old: Config = toml::from_str("[ml]\ndevice = \"cpu\"\n").unwrap();
+        assert_eq!(old.liveness.frames, 1);
+        assert_eq!(old.liveness.aggregate, LivenessAggregate::Median);
+        assert_eq!(old.liveness.relief_stat, ReliefStat::MinMax);
+        assert_eq!(old.liveness.depth_input_size, 518);
+        assert!(old.liveness.signals.is_empty());
+        assert!(old.validate().is_ok());
+
+        let new: Config = toml::from_str(
+            "[liveness]\nframes = 3\nrelief_stat = \"p10_p90\"\ndepth_input_size = 308\n",
+        )
+        .unwrap();
+        assert_eq!(new.liveness.relief_stat, ReliefStat::P10P90);
+        assert!(new.validate().is_ok());
+
+        let bad = |toml: &str| {
+            let cfg: Config = toml::from_str(toml).unwrap();
+            cfg.validate().unwrap_err().to_string()
+        };
+        assert!(bad("[liveness]\nframes = 2\n").contains("liveness.frames"));
+        assert!(bad("[liveness]\nframes = 11\n").contains("liveness.frames"));
+        assert!(bad("[liveness]\ndepth_input_size = 500\n").contains("multiple of 14"));
+        assert!(bad("[liveness]\ndepth_input_size = 0\n").contains("depth_input_size"));
+        assert!(bad("[liveness]\nsignals = [\"screen_flash\"]\n").contains("screen_flash"));
+        assert!(toml::from_str::<Config>("[liveness]\nrelief_stat = \"mean\"\n").is_err());
     }
 
     #[test]
