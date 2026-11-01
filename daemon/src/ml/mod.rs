@@ -30,7 +30,7 @@ pub mod ncnn_hybrid;
 mod tests;
 
 #[allow(unused_imports)]
-pub use model_config::{DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig};
+pub use model_config::{DepthPadConfig, DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig};
 
 use anyhow::Result;
 #[allow(dead_code)]
