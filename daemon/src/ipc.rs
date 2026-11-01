@@ -1093,6 +1093,9 @@ fn log_auth_capture_pack(
 // Production handlers follow this module; relocating the tests would be a large move.
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
+mod real_path_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
