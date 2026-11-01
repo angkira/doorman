@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+name="${1:-unknown}"
+printf '%s %s\n' "$(date -Is)" "$name" >> /tmp/waybar-niri-click.log
+
+case "$name" in
+  launcher)
+    exec /home/angkira/.local/bin/sway-menu
+    ;;
+  lock)
+    exec /home/angkira/.local/bin/doorman-lock
+    ;;
+  power)
+    if command -v wlogout >/dev/null 2>&1; then
+      wlogout && exit 0
+    fi
+    exec niri msg action quit
+    ;;
+  network)
+    exec nm-connection-editor
+    ;;
+  audio)
+    exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+    ;;
+  language-next)
+    exec niri msg action switch-layout next
+    ;;
+  language-prev)
+    exec niri msg action switch-layout prev
+    ;;
+esac

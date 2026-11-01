@@ -1,0 +1,121 @@
+{
+  "layer": "top",
+  "position": "top",
+  "height": 34,
+  "spacing": 4,
+  "margin-top": 3,
+  "margin-left": 4,
+  "margin-right": 4,
+  "modules-left": [
+    "custom/launcher",
+    "niri/workspaces"
+  ],
+  "modules-center": [
+    "niri/window"
+  ],
+  "modules-right": [
+    "tray",
+    "niri/language",
+    "network",
+    "pulseaudio",
+    "custom/igpu",
+    "custom/dgpu",
+    "cpu",
+    "memory",
+    "temperature",
+    "clock",
+    "custom/lock",
+    "custom/power"
+  ],
+  "custom/launcher": {
+    "format": "",
+    "tooltip": "Launcher",
+    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click launcher"
+  },
+  "niri/workspaces": {
+    "all-outputs": true,
+    "format": "{value}",
+    "disable-click": false,
+    "format-icons": {
+      "focused": "●",
+      "active": "●",
+      "default": "○"
+    }
+  },
+  "niri/window": {
+    "format": "{}",
+    "max-length": 90,
+    "rewrite": {
+      "(.*) - Google Chrome": "$1",
+      "(.*) - Chromium": "$1",
+      "(.*) - Mozilla Firefox": "$1"
+    }
+  },
+  "tray": {
+    "icon-size": 16,
+    "spacing": 8
+  },
+  "niri/language": {
+    "format": "kb {shortDescription}",
+    "tooltip-format": "{long}",
+    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click language-next",
+    "on-click-right": "/home/angkira/.config/waybar-niri/waybar-niri-click language-prev"
+  },
+  "network": {
+    "format-wifi": "wifi {essid}",
+    "format-ethernet": "eth {ipaddr}",
+    "format-disconnected": "offline",
+    "tooltip-format": "{ifname}: {ipaddr}/{cidr}",
+    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click network"
+  },
+  "pulseaudio": {
+    "format": "{icon} {volume}%",
+    "format-muted": "muted",
+    "format-icons": {
+      "default": [
+        "vol",
+        "vol",
+        "vol"
+      ]
+    },
+    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click audio",
+    "on-click-right": "pavucontrol"
+  },
+  "custom/igpu": {
+    "exec": "/home/angkira/.local/bin/waybar-gpu igpu",
+    "interval": 2,
+    "tooltip": "AMD Phoenix iGPU"
+  },
+  "custom/dgpu": {
+    "exec": "/home/angkira/.local/bin/waybar-gpu dgpu",
+    "interval": 2,
+    "tooltip": "AMD Radeon AI PRO R9700 dGPU"
+  },
+  "cpu": {
+    "format": "cpu {usage}%",
+    "interval": 3
+  },
+  "memory": {
+    "format": "mem {percentage}%",
+    "interval": 3
+  },
+  "temperature": {
+    "format": "tmp {temperatureC}C",
+    "critical-threshold": 85
+  },
+  "clock": {
+    "format": "{:%a %d %b  %H:%M}",
+    "tooltip-format": "{:%Y-%m-%d %H:%M:%S}"
+  },
+  "custom/lock": {
+    "format": "",
+    "tooltip": "Lock",
+    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click lock"
+  },
+  "custom/power": {
+    "format": "",
+    "tooltip": "Power menu",
+    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click power",
+    "on-click-right": "wlogout"
+  }
+}
