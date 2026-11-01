@@ -63,3 +63,64 @@ jobs:
         run: |
           echo "SKIPPED: latency needs ONNX model files and a doorman-bench build with --features ort."
           echo "CI builds the model-free subset; run 'doorman-bench latency' on a host with models (docs/bench/README.md)."
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shellcheck all tracked shell scripts
+        run: |
+          # Select by shebang so extensionless scripts (packaging/, scripts/) are covered.
+          git ls-files -z | xargs -0 grep -lZE '^#!.*[/ ](ba)?sh( |$)' | xargs -0 shellcheck
+
+  python:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: Byte-compile Python sources
+        run: python -m compileall -q src tests
+
+      - name: Test
+        run: PYTHONPATH=src python -m pytest tests -q
+
+  deb:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang dpkg-dev libclang-dev libpam0g-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate Debian packaging
+        run: bash scripts/check_deb_packaging.sh
+
+      - name: Build Debian package
+        run: bash scripts/build_deb.sh
+
+      - name: Inspect package
+        run: |
+          for deb in target/debian/dist/*.deb; do
+            dpkg-deb -I "$deb"
+            dpkg-deb -c "$deb"
+          done
