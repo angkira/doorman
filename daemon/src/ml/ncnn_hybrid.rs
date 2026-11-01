@@ -19,6 +19,7 @@ use super::ort_backend::OrtBackend;
 pub struct NcnnHybridBackend {
     inner: OrtBackend,
     depth_net: Option<Mutex<NcnnNet>>,
+    relief_stat: doorman_shared::config::ReliefStat,
 }
 
 impl NcnnHybridBackend {
@@ -47,7 +48,11 @@ impl NcnnHybridBackend {
             }
         };
 
-        Ok(Self { inner, depth_net })
+        Ok(Self {
+            inner,
+            depth_net,
+            relief_stat: config.liveness.relief_stat,
+        })
     }
 }
 
@@ -88,7 +93,13 @@ impl MLBackend for NcnnHybridBackend {
                             warn!("ncnn depth: unexpected output shape, falling back to CPU ORT");
                             return self.inner.depth_relief(image, face).await;
                         }
-                        let relief = super::ort_backend::relief_from_depth_map(vec, d_h, d_w, face);
+                        let relief = super::ort_backend::relief_from_depth_map(
+                            self.relief_stat,
+                            vec,
+                            d_h,
+                            d_w,
+                            face,
+                        );
                         Ok(Some(relief))
                     }
                     Err(e) => {

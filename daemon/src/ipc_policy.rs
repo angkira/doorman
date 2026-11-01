@@ -540,6 +540,7 @@ mod tests {
                 peer(0),
                 Request::Enroll {
                     username: "alice".into(),
+                    add: false,
                 },
                 &def,
                 allow.clone(),
@@ -549,6 +550,7 @@ mod tests {
                 peer(ALICE),
                 Request::Enroll {
                     username: "alice".into(),
+                    add: false,
                 },
                 &def,
                 deny_adm.clone(),

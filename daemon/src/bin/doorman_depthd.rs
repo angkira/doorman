@@ -184,7 +184,7 @@ fn run(config: &Config, socket_path: &str, depth_ep: &str) -> Result<()> {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                if let Err(e) = handle_conn(stream, depth.as_ref()) {
+                if let Err(e) = handle_conn(stream, depth.as_ref(), &config.liveness) {
                     tracing::warn!("connection error: {}", e);
                 }
             }
@@ -195,7 +195,11 @@ fn run(config: &Config, socket_path: &str, depth_ep: &str) -> Result<()> {
 }
 
 #[cfg(feature = "_ort")]
-fn handle_conn(mut stream: UnixStream, depth: Option<&DepthSession>) -> Result<()> {
+fn handle_conn(
+    mut stream: UnixStream,
+    depth: Option<&DepthSession>,
+    liveness: &doorman_shared::config::LivenessConfig,
+) -> Result<()> {
     use doormand::ml::Face;
 
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
@@ -235,7 +239,7 @@ fn handle_conn(mut stream: UnixStream, depth: Option<&DepthSession>) -> Result<(
 
     let resp = match depth {
         None => depth_ipc::encode_resp(depth_ipc::RESP_NONE, 0.0),
-        Some(session) => match ort_backend::compute_depth_relief(session, &img, &face) {
+        Some(session) => match ort_backend::compute_depth_relief(session, &img, &face, liveness) {
             Ok(relief) => {
                 tracing::debug!("relief={:.4} for bbox={:?}", relief, req.bbox);
                 depth_ipc::encode_resp(depth_ipc::RESP_OK, relief)

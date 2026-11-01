@@ -14,8 +14,13 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub enum Request {
     /// Authenticate a user with face recognition
     Authenticate { username: String },
-    /// Enroll a new user
-    Enroll { username: String },
+    /// Enroll a new user. With `add`, the captured templates are appended to the
+    /// user's existing ones without evicting any (absent = false: old clients).
+    Enroll {
+        username: String,
+        #[serde(default)]
+        add: bool,
+    },
     /// List enrolled users
     ListUsers,
     /// Remove a user's enrollment
@@ -248,6 +253,15 @@ mod tests {
             serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
         assert_eq!(env.protocol_version, None);
         assert!(matches!(env.request, Request::Authenticate { ref username } if username == "bob"));
+    }
+
+    #[test]
+    fn enroll_add_defaults_to_false_for_old_clients() {
+        let old: Request = serde_json::from_str(r#"{"type":"enroll","username":"bob"}"#).unwrap();
+        assert!(matches!(old, Request::Enroll { add: false, .. }));
+        let new: Request =
+            serde_json::from_str(r#"{"type":"enroll","username":"bob","add":true}"#).unwrap();
+        assert!(matches!(new, Request::Enroll { add: true, .. }));
     }
 
     #[test]

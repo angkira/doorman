@@ -90,6 +90,10 @@ enum Command {
     Enroll {
         /// Username to enroll.
         username: String,
+        /// Add templates (for example another lighting condition) to the
+        /// existing ones without evicting any.
+        #[arg(long)]
+        add: bool,
     },
     /// List all enrolled users.
     List,
@@ -288,7 +292,7 @@ fn main() {
     let sockets = Sockets::resolve(cli.socket.clone(), cli.runtime_dir.clone());
 
     let result = match &cli.command {
-        Command::Enroll { username } => cmd_enroll(&sockets, username, cli.json),
+        Command::Enroll { username, add } => cmd_enroll(&sockets, username, *add, cli.json),
         Command::List => cmd_list(&sockets, cli.json),
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
         Command::Test { username } => cmd_test(&sockets, username, cli.json),
@@ -862,7 +866,7 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
 // enroll
 // ---------------------------------------------------------------------------
 
-fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliError> {
+fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Result<(), CliError> {
     // Start a background progress watcher on the debug socket. Enrollment
     // progress is published there as StreamMessage::Enrollment frames while the
     // command connection below blocks waiting for the final reply.
@@ -879,12 +883,14 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
 
     if !json {
         println!("Enrolling '{username}' — look at the camera...");
+        println!("Hint: slowly turn your head a little and vary the lighting; use --add for another lighting condition.");
     }
 
     let response = send_request(
         &sockets.command,
         &Request::Enroll {
             username: username.to_string(),
+            add,
         },
         ENROLL_TIMEOUT,
     );

@@ -26,6 +26,8 @@ pub mod ncnn_backend;
 #[cfg(all(feature = "_ort", feature = "backend-ncnn"))]
 pub mod ncnn_hybrid;
 
+mod tta;
+
 #[cfg(test)]
 mod tests;
 
@@ -34,6 +36,7 @@ pub use model_config::{
     DepthPadConfig, DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig,
 };
 
+use crate::liveness::LivenessOutcome;
 use anyhow::Result;
 #[allow(dead_code)]
 pub use backend::Face;
@@ -189,17 +192,22 @@ impl MLPipeline {
         Ok(Some((face, embedding)))
     }
 
-    /// Run ONLY the FATAL depth-liveness gate on an already-detected face.
-    /// Returns Ok(true) = live, Ok(false) = spoof / rejected / model-missing
-    /// (same fail-safe semantics as `process_frame`). The auth path calls this
-    /// ONCE per attempt instead of per-frame: depth is the slow stage on CPU
-    /// (~0.5s), and running it on every one of the ~10 auth frames overran the
-    /// PAM screen-unlock deadline even though the face authenticated fine.
-    pub async fn liveness_gate(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
+    /// Run ONLY the FATAL depth-liveness gate on an already-detected face and
+    /// return the typed outcome (with the relief value). `None` = liveness is
+    /// disabled by config. A missing model or inference error is
+    /// [`LivenessOutcome::Unavailable`] (fail closed, never a silent pass).
+    /// The auth path calls this ONCE per attempt instead of per-frame: depth is
+    /// the slow stage on CPU (~0.5s), and running it on every one of the ~10
+    /// auth frames overran the PAM screen-unlock deadline.
+    pub async fn liveness_check(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Option<LivenessOutcome> {
         if !self.config.authentication.liveness_enabled {
-            return Ok(true);
+            return None;
         }
-        match self.backend.depth_relief(image, face).await {
+        Some(match self.backend.depth_relief(image, face).await {
             Ok(Some(relief)) => {
                 let t = self.config.authentication.liveness_depth_threshold;
                 if relief < t {
@@ -207,27 +215,40 @@ impl MLPipeline {
                         "Liveness REJECTED (depth gate): relief={:.4} < threshold={:.4} — treating as spoof",
                         relief, t
                     );
-                    Ok(false)
+                    LivenessOutcome::Fail { relief }
                 } else {
                     tracing::debug!(
                         "Liveness passed (depth gate): relief={:.4} >= {:.4}",
                         relief,
                         t
                     );
-                    Ok(true)
+                    LivenessOutcome::Pass { relief }
                 }
             }
             Ok(None) => {
                 tracing::error!(
                     "Liveness ENABLED but depth-PAD model not loaded — reject (fail-safe)"
                 );
-                Ok(false)
+                LivenessOutcome::Unavailable {
+                    reason: "depth model not loaded".to_string(),
+                }
             }
             Err(e) => {
                 tracing::error!("Liveness depth check errored — reject (fail-safe): {}", e);
-                Ok(false)
+                LivenessOutcome::Unavailable {
+                    reason: format!("depth inference error: {e}"),
+                }
             }
-        }
+        })
+    }
+
+    /// Boolean view of [`Self::liveness_check`]: `Ok(true)` = live or liveness
+    /// disabled, `Ok(false)` = spoof / rejected / model missing.
+    pub async fn liveness_gate(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
+        Ok(self
+            .liveness_check(image, face)
+            .await
+            .map_or(true, |outcome| outcome.is_pass()))
     }
 
     /// Fast detection only - no embedding extraction (for real-time preview)

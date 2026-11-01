@@ -1,7 +1,9 @@
 // Public modules for integration tests and examples
 pub mod camera;
 pub mod dataset;
+pub mod decision;
 pub mod ipc_policy;
+pub mod liveness;
 pub mod ml;
 pub mod storage;
 pub mod timing;
