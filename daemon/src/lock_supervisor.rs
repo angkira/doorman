@@ -30,6 +30,9 @@ use tracing::{info, warn};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::Connection;
 
+/// One `ListSessions` row: (session_id, uid, user_name, seat_id, object_path).
+type LogindSessionEntry = (String, u32, String, String, OwnedObjectPath);
+
 /// logind Manager proxy: enumerate sessions.
 #[zbus::proxy(
     interface = "org.freedesktop.login1.Manager",
@@ -38,7 +41,7 @@ use zbus::Connection;
 )]
 trait LoginManager {
     /// Returns (session_id, uid, user_name, seat_id, object_path).
-    fn list_sessions(&self) -> zbus::Result<Vec<(String, u32, String, String, OwnedObjectPath)>>;
+    fn list_sessions(&self) -> zbus::Result<Vec<LogindSessionEntry>>;
 }
 
 /// logind Session proxy: lock/unlock signals + the hint properties we gate on.
@@ -136,7 +139,12 @@ pub async fn spawn() -> LockSupervisor {
             warn!(
                 "lock-supervisor: cannot connect to system D-Bus ({e}); pipeline lock-gating disabled (armed=false)"
             );
-            return LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker: None };
+            return LockSupervisor {
+                armed_rx,
+                locked_rx,
+                lock_gen_rx,
+                unlocker: None,
+            };
         }
     };
 
@@ -146,13 +154,24 @@ pub async fn spawn() -> LockSupervisor {
             warn!(
                 "lock-supervisor: no active graphical seat0 session found; pipeline lock-gating disabled (armed=false)"
             );
-            return LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker: None };
+            return LockSupervisor {
+                armed_rx,
+                locked_rx,
+                lock_gen_rx,
+                unlocker: None,
+            };
         }
     };
 
-    info!("lock-supervisor: tracking logind session {}", session_path.as_str());
+    info!(
+        "lock-supervisor: tracking logind session {}",
+        session_path.as_str()
+    );
 
-    let unlocker = Some(Unlocker { conn: conn.clone(), session_path: session_path.clone() });
+    let unlocker = Some(Unlocker {
+        conn: conn.clone(),
+        session_path: session_path.clone(),
+    });
 
     // Background watcher. Robust: if it can't build the session proxy it just
     // emits armed=false and exits (daemon keeps running, pipeline stays gated
@@ -168,7 +187,12 @@ pub async fn spawn() -> LockSupervisor {
         lock_gen_tx,
     ));
 
-    LockSupervisor { armed_rx, locked_rx, lock_gen_rx, unlocker }
+    LockSupervisor {
+        armed_rx,
+        locked_rx,
+        lock_gen_rx,
+        unlocker,
+    }
 }
 
 async fn build_session_proxy(
@@ -181,6 +205,7 @@ async fn build_session_proxy(
 /// Pick the active graphical session on seat0. Preference order:
 ///   1. seat0 + graphical (wayland/x11) + Active=true
 ///   2. seat0 + graphical (first match)
+///
 /// Falls back to `None` if none qualifies.
 async fn resolve_graphical_session(conn: &Connection) -> Option<OwnedObjectPath> {
     let manager = match LoginManagerProxy::new(conn).await {

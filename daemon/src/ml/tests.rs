@@ -1,5 +1,6 @@
 /// Unit tests for ML backends
 #[cfg(test)]
+#[allow(clippy::module_inception)] // file is `ml::tests`; kept to avoid moving every test
 mod tests {
     use super::super::*;
 
@@ -8,10 +9,10 @@ mod tests {
         // BlazeFace outputs scores in format: [bg0, face0, bg1, face1, ...]
         // Test the parsing logic extracts face scores correctly
 
-        let scores = vec![
-            0.9, 0.1,  // anchor 0: high background, low face
-            0.2, 0.8,  // anchor 1: low background, high face
-            0.7, 0.3,  // anchor 2: high background, low face
+        let scores = [
+            0.9, 0.1, // anchor 0: high background, low face
+            0.2, 0.8, // anchor 1: low background, high face
+            0.7, 0.3, // anchor 2: high background, low face
         ];
 
         let num_classes = 2;
@@ -46,7 +47,7 @@ mod tests {
         let num_classes = 2;
 
         // Number of anchors derived from scores
-        let num_anchors = scores_len / num_classes; // 8840
+        let _num_anchors = scores_len / num_classes; // 8840
 
         // Number of boxes (each box has 4 coordinates)
         let num_boxes = boxes_len / 4; // 2210
@@ -85,7 +86,8 @@ mod tests {
         assert!(
             num_boxes < num_score_anchors,
             "Boxes {} should be less than score anchors {}",
-            num_boxes, num_score_anchors
+            num_boxes,
+            num_score_anchors
         );
     }
 

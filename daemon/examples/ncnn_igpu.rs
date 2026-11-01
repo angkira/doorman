@@ -95,12 +95,19 @@ fn main() -> anyhow::Result<()> {
 
     let mut all_ok = true;
     for spec in &specs {
-        println!("\n===== {} on iGPU (Vulkan) =====", spec.name.to_uppercase());
+        println!(
+            "\n===== {} on iGPU (Vulkan) =====",
+            spec.name.to_uppercase()
+        );
         let param = format!("{models}/{}", spec.param);
         let bin = format!("{models}/{}", spec.bin);
 
         // Select the integrated RADV PHOENIX device by name (never the dGPU).
-        let net = NcnnNet::new(&param, &bin, DeviceSelector::NameSubstring("RADV PHOENIX".into()))?;
+        let net = NcnnNet::new(
+            &param,
+            &bin,
+            DeviceSelector::NameSubstring("RADV PHOENIX".into()),
+        )?;
         println!(
             "  SELECTED device index={} name='{}'",
             net.device_index(),
@@ -122,12 +129,19 @@ fn main() -> anyhow::Result<()> {
         let out = net.infer("in0", &input, spec.shape, spec.output)?;
         let (data, oshape) = &out[spec.output];
         let mean = data.iter().sum::<f32>() / data.len() as f32;
-        let (mn, mx) = data.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| {
-            (a.min(x), b.max(x))
-        });
+        let (mn, mx) = data
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         println!(
             "  output '{}' shape=[{},{},{}] len={} mean={:.5} min={:.4} max={:.4}",
-            spec.output, oshape[0], oshape[1], oshape[2], data.len(), mean, mn, mx
+            spec.output,
+            oshape[0],
+            oshape[1],
+            oshape[2],
+            data.len(),
+            mean,
+            mn,
+            mx
         );
 
         // Dump input + output for the python ORT cosine check.
@@ -155,7 +169,10 @@ fn main() -> anyhow::Result<()> {
 
     println!("\n== summary ==");
     println!("  integrated device idx = {:?}", integrated_idx);
-    println!("  discrete device idx   = {:?} (never selected)", discrete_idx);
+    println!(
+        "  discrete device idx   = {:?} (never selected)",
+        discrete_idx
+    );
     if all_ok {
         println!("  ALL MODELS RAN ON iGPU OK");
     } else {

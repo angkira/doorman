@@ -165,7 +165,11 @@ pub fn relief_from_patch(
             .collect(),
         None => patch.to_vec(),
     };
-    let face = if selected.is_empty() { reference } else { &selected[..] };
+    let face = if selected.is_empty() {
+        reference
+    } else {
+        &selected[..]
+    };
 
     let relief = match stat {
         ReliefStat::MinMax => {
@@ -233,10 +237,13 @@ mod tests {
     fn p10_p90_value_on_a_known_patch() {
         let reference = ramp();
         let patch: Vec<f32> = (0..=10).map(|v| v as f32 * 10.0).collect(); // 0..100 step 10
-        // p10 = 10, p90 = 90 -> 80 / 79.2, clamped to 1.
-        assert_eq!(relief_from_patch(ReliefStat::P10P90, &patch, None, &reference), 1.0);
+                                                                           // p10 = 10, p90 = 90 -> 80 / 79.2, clamped to 1.
+        assert_eq!(
+            relief_from_patch(ReliefStat::P10P90, &patch, None, &reference),
+            1.0
+        );
         let narrow: Vec<f32> = (0..=10).map(|v| 40.0 + v as f32).collect(); // 40..50
-        // p10 = 41, p90 = 49 -> 8 / 79.2.
+                                                                            // p10 = 41, p90 = 49 -> 8 / 79.2.
         let got = relief_from_patch(ReliefStat::P10P90, &narrow, None, &reference);
         assert!((got - 8.0 / (79.2 + RELIEF_EPS)).abs() < 1e-4, "{got}");
     }
@@ -318,7 +325,11 @@ mod tests {
                         break;
                     }
                 }
-                assert_eq!(verdict, Some(expected_pass), "frames {frames} pattern {pattern:b}");
+                assert_eq!(
+                    verdict,
+                    Some(expected_pass),
+                    "frames {frames} pattern {pattern:b}"
+                );
             }
         }
     }
@@ -343,7 +354,10 @@ mod tests {
     fn result_is_clamped_to_unit_interval() {
         let reference = [0.0, 1.0];
         let patch = [-100.0, 100.0];
-        assert_eq!(relief_from_patch(ReliefStat::MinMax, &patch, None, &reference), 1.0);
+        assert_eq!(
+            relief_from_patch(ReliefStat::MinMax, &patch, None, &reference),
+            1.0
+        );
     }
 
     #[test]

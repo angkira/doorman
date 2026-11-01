@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod config;
+pub mod config_check;
 pub use config::{Config, DatasetConfig, IpcConfig, RecognitionConfig};
 
 /// Current IPC protocol major version. Requests without a `protocol_version`
@@ -164,6 +165,10 @@ pub struct DaemonInfo {
     pub camera_available: bool,
     pub models_loaded: bool,
     pub enrolled_users: usize,
+    /// Loaded ONNX Runtime linkage and version; absent from old daemons and
+    /// from builds without an ORT backend. Additive (protocol_version stays 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ort_runtime: Option<String>,
 }
 
 /// Configuration paths
@@ -256,11 +261,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_daemon_info_without_ort_runtime_parses() {
+        let info: DaemonInfo = serde_json::from_str(
+            r#"{"version":"0.1.0","uptime_secs":1,"camera_available":true,"models_loaded":true,"enrolled_users":2}"#,
+        )
+        .unwrap();
+        assert_eq!(info.ort_runtime, None);
+    }
+
+    #[test]
     fn legacy_request_without_version_parses() {
         let env: RequestEnvelope =
             serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
         assert_eq!(env.protocol_version, None);
-        assert!(matches!(env.request, Request::Authenticate { ref username, service: None, tty: None } if username == "bob"));
+        assert!(
+            matches!(env.request, Request::Authenticate { ref username, service: None, tty: None } if username == "bob")
+        );
     }
 
     #[test]

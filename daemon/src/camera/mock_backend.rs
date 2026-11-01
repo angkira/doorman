@@ -39,19 +39,36 @@ pub struct MockCamera {
 impl MockCamera {
     /// Synthetic-only mock camera (no video source).
     pub fn synthetic(width: u32, height: u32, fps: u32) -> Self {
-        info!("Initializing mock camera backend (synthetic frames {}x{} @ {}fps)", width, height, fps);
+        info!(
+            "Initializing mock camera backend (synthetic frames {}x{} @ {}fps)",
+            width, height, fps
+        );
         Self::build(width, height, fps, None, false)
     }
 
     /// Mock camera that loops a video file through the `ffmpeg` CLI when available,
     /// falling back to synthetic frames otherwise.
-    pub fn from_video_file(video_path: PathBuf, width: u32, height: u32, fps: u32, loop_playback: bool) -> Self {
-        info!("Initializing mock camera backend (video file {:?}, {}x{} @ {}fps, loop={})",
-            video_path, width, height, fps, loop_playback);
+    pub fn from_video_file(
+        video_path: PathBuf,
+        width: u32,
+        height: u32,
+        fps: u32,
+        loop_playback: bool,
+    ) -> Self {
+        info!(
+            "Initializing mock camera backend (video file {:?}, {}x{} @ {}fps, loop={})",
+            video_path, width, height, fps, loop_playback
+        );
         Self::build(width, height, fps, Some(video_path), loop_playback)
     }
 
-    fn build(width: u32, height: u32, fps: u32, video_path: Option<PathBuf>, loop_playback: bool) -> Self {
+    fn build(
+        width: u32,
+        height: u32,
+        fps: u32,
+        video_path: Option<PathBuf>,
+        loop_playback: bool,
+    ) -> Self {
         let fps = fps.max(1);
         Self {
             width,
@@ -115,17 +132,23 @@ impl MockCamera {
         if self.loop_playback {
             cmd.arg("-stream_loop").arg("-1");
         }
-        cmd.arg("-i").arg(video_path)
-            .arg("-vf").arg(format!("scale={}:{}", self.width, self.height))
-            .arg("-f").arg("rawvideo")
-            .arg("-pix_fmt").arg("rgb24")
-            .arg("-r").arg(self.fps.to_string())
+        cmd.arg("-i")
+            .arg(video_path)
+            .arg("-vf")
+            .arg(format!("scale={}:{}", self.width, self.height))
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("rgb24")
+            .arg("-r")
+            .arg(self.fps.to_string())
             .arg("-")
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
         debug!("Starting ffmpeg for mock camera: {:?}", cmd);
-        cmd.spawn().map_err(|e| anyhow!("Failed to spawn ffmpeg: {}", e))
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn ffmpeg: {}", e))
     }
 
     /// Try to read one frame from the ffmpeg pipe. Returns Ok(None) if ffmpeg is
@@ -174,7 +197,10 @@ impl MockCamera {
 
         let mut guard = self.process.lock().unwrap();
         let child = guard.as_mut().ok_or_else(|| anyhow!("No ffmpeg process"))?;
-        let stdout = child.stdout.as_mut().ok_or_else(|| anyhow!("No ffmpeg stdout"))?;
+        let stdout = child
+            .stdout
+            .as_mut()
+            .ok_or_else(|| anyhow!("No ffmpeg stdout"))?;
         stdout
             .read_exact(&mut buffer)
             .map_err(|e| anyhow!("Failed to read frame from ffmpeg: {}", e))?;
@@ -191,7 +217,11 @@ impl MockCamera {
 
 impl CameraBackend for MockCamera {
     async fn new_with_config(config: &doorman_shared::Config) -> Result<Self> {
-        Ok(Self::synthetic(config.camera.width, config.camera.height, config.camera.fps))
+        Ok(Self::synthetic(
+            config.camera.width,
+            config.camera.height,
+            config.camera.fps,
+        ))
     }
 
     fn capture_frame(&mut self) -> Result<DynamicImage> {
@@ -207,7 +237,9 @@ impl CameraBackend for MockCamera {
     }
 
     fn capture_frames(&mut self, count: usize) -> Vec<DynamicImage> {
-        (0..count).filter_map(|_| self.capture_frame().ok()).collect()
+        (0..count)
+            .filter_map(|_| self.capture_frame().ok())
+            .collect()
     }
 
     fn is_ready(&self) -> bool {

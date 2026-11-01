@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use doorman_shared::Config;
-use doormand::ml::MLBackend;
 use doormand::ml::ncnn_hybrid::NcnnHybridBackend;
 use doormand::ml::ort_backend::OrtBackend;
+use doormand::ml::MLBackend;
 
 struct Stats {
     n: usize,
@@ -41,7 +41,12 @@ struct Stats {
 
 fn stats(v: &[f64]) -> Stats {
     if v.is_empty() {
-        return Stats { n: 0, mean: f64::NAN, min: f64::NAN, max: f64::NAN };
+        return Stats {
+            n: 0,
+            mean: f64::NAN,
+            min: f64::NAN,
+            max: f64::NAN,
+        };
     }
     let n = v.len();
     let sum: f64 = v.iter().sum();
@@ -93,12 +98,10 @@ fn list_images(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn gpu_busy(card: &str) -> i64 {
-    std::fs::read_to_string(format!(
-        "/sys/class/drm/{card}/device/gpu_busy_percent"
-    ))
-    .ok()
-    .and_then(|s| s.trim().parse::<i64>().ok())
-    .unwrap_or(-1)
+    std::fs::read_to_string(format!("/sys/class/drm/{card}/device/gpu_busy_percent"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(-1)
 }
 
 struct ClassResult {
@@ -129,7 +132,12 @@ async fn run_class(
     for d in dirs {
         images.extend(list_images(d));
     }
-    println!("\n== class '{}' : {} image(s) from {:?} ==", name, images.len(), dirs);
+    println!(
+        "\n== class '{}' : {} image(s) from {:?} ==",
+        name,
+        images.len(),
+        dirs
+    );
 
     for path in &images {
         let img = match image::open(path) {
@@ -159,7 +167,10 @@ async fn run_class(
         let ncnn_relief = match hybrid.depth_relief(&img, &face).await {
             Ok(Some(r)) => r,
             Ok(None) => {
-                eprintln!("  ncnn depth returned None for {} (model not loaded?)", path.display());
+                eprintln!(
+                    "  ncnn depth returned None for {} (model not loaded?)",
+                    path.display()
+                );
                 continue;
             }
             Err(e) => {
@@ -219,9 +230,7 @@ async fn main() -> anyhow::Result<()> {
     let genuine_dir = std::env::var("DOORMAN_VAL_GENUINE")
         .unwrap_or_else(|_| format!("{home}/datasets/insitu/genuine"));
     let spoof_dirs_env = std::env::var("DOORMAN_VAL_SPOOF").unwrap_or_else(|_| {
-        format!(
-            "{home}/datasets/insitu/attack_screen,{home}/datasets/insitu/attack_screen2"
-        )
+        format!("{home}/datasets/insitu/attack_screen,{home}/datasets/insitu/attack_screen2")
     });
     let spoof_dirs: Vec<PathBuf> = spoof_dirs_env.split(',').map(PathBuf::from).collect();
 
@@ -258,7 +267,13 @@ async fn main() -> anyhow::Result<()> {
         igpu_before, dgpu_before
     );
 
-    let genuine = run_class("genuine", &[PathBuf::from(&genuine_dir)], &hybrid, &reference).await;
+    let genuine = run_class(
+        "genuine",
+        &[PathBuf::from(&genuine_dir)],
+        &hybrid,
+        &reference,
+    )
+    .await;
 
     // Sample the iGPU mid-run (after the genuine batch, which drove many ncnn calls).
     let igpu_mid = gpu_busy("card2");
@@ -276,8 +291,12 @@ async fn main() -> anyhow::Result<()> {
         println!("\n[{}]  (no-face skipped: {})", cls, c.no_face);
         print_stats("ncnn-iGPU relief", &stats(&c.ncnn));
         print_stats("ORT-CPU  relief", &stats(&c.ort));
-        let mut diffs: Vec<f64> =
-            c.ncnn.iter().zip(c.ort.iter()).map(|(a, b)| (a - b).abs()).collect();
+        let mut diffs: Vec<f64> = c
+            .ncnn
+            .iter()
+            .zip(c.ort.iter())
+            .map(|(a, b)| (a - b).abs())
+            .collect();
         diffs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         print_stats("|ncnn - ORT|", &stats(&diffs));
         println!("    pearson(ncnn,ORT) = {:.4}", pearson(&c.ncnn, &c.ort));
@@ -289,17 +308,36 @@ async fn main() -> anyhow::Result<()> {
     let g = stats(&genuine.ncnn);
     let s = stats(&spoof.ncnn);
     println!("\n[THRESHOLD 0.05 verdict — ncnn-iGPU path]");
-    let genuine_ge: Vec<f64> = genuine.ncnn.iter().cloned().filter(|&x| x >= THRESH).collect();
+    let genuine_ge: Vec<f64> = genuine
+        .ncnn
+        .iter()
+        .cloned()
+        .filter(|&x| x >= THRESH)
+        .collect();
     let spoof_lt: Vec<f64> = spoof.ncnn.iter().cloned().filter(|&x| x < THRESH).collect();
-    let genuine_pass = if g.n > 0 { genuine_ge.len() as f64 / g.n as f64 } else { f64::NAN };
-    let spoof_pass = if s.n > 0 { spoof_lt.len() as f64 / s.n as f64 } else { f64::NAN };
+    let genuine_pass = if g.n > 0 {
+        genuine_ge.len() as f64 / g.n as f64
+    } else {
+        f64::NAN
+    };
+    let spoof_pass = if s.n > 0 {
+        spoof_lt.len() as f64 / s.n as f64
+    } else {
+        f64::NAN
+    };
     println!(
         "  genuine >= 0.05 : {}/{} ({:.1}%)   [min genuine = {:.4}]",
-        genuine_ge.len(), g.n, genuine_pass * 100.0, g.min
+        genuine_ge.len(),
+        g.n,
+        genuine_pass * 100.0,
+        g.min
     );
     println!(
         "  spoof   <  0.05 : {}/{} ({:.1}%)   [max spoof   = {:.4}]",
-        spoof_lt.len(), s.n, spoof_pass * 100.0, s.max
+        spoof_lt.len(),
+        s.n,
+        spoof_pass * 100.0,
+        s.max
     );
     let clean_sep = g.n > 0 && s.n > 0 && g.min >= THRESH && s.max < THRESH;
     if clean_sep {

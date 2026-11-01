@@ -1,11 +1,11 @@
-use tempfile::TempDir;
 use std::path::PathBuf;
+use tempfile::TempDir;
 
 // Mock storage for testing
 mod storage_mock {
     use super::*;
-    use std::collections::HashMap;
     use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct UserEmbedding {
@@ -50,7 +50,11 @@ mod storage_mock {
             Ok(())
         }
 
-        pub async fn store_embedding(&mut self, username: String, embedding: Vec<f32>) -> anyhow::Result<()> {
+        pub async fn store_embedding(
+            &mut self,
+            username: String,
+            embedding: Vec<f32>,
+        ) -> anyhow::Result<()> {
             let enrolled_at = chrono::Local::now().to_rfc3339();
             let user_embedding = UserEmbedding {
                 username: username.clone(),
@@ -176,10 +180,7 @@ async fn test_storage_multiple_users() {
     for i in 0..10 {
         let username = format!("user{}", i);
         let embedding = vec![i as f32; 512];
-        storage
-            .store_embedding(username, embedding)
-            .await
-            .unwrap();
+        storage.store_embedding(username, embedding).await.unwrap();
     }
 
     assert_eq!(storage.count(), 10);
@@ -192,4 +193,3 @@ async fn test_storage_multiple_users() {
         assert_eq!(embedding[0], i as f32);
     }
 }
-

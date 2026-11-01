@@ -1,7 +1,7 @@
 #[cfg(feature = "camera-gstreamer")]
 mod gstreamer_tests {
     use doorman_shared::Config;
-    use doormand::camera::{GStreamerCamera, CameraBackend};
+    use doormand::camera::{CameraBackend, GStreamerCamera};
 
     #[tokio::test]
     async fn test_gstreamer_init() {
@@ -18,7 +18,7 @@ mod gstreamer_tests {
         };
 
         let result = GStreamerCamera::new_with_config(&config).await;
-        
+
         match result {
             Ok(camera) => {
                 println!("GStreamer camera initialized successfully");
@@ -52,7 +52,7 @@ mod gstreamer_tests {
         if let Ok(mut camera) = GStreamerCamera::new_with_config(&config).await {
             // Wait a moment for pipeline to stabilize
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
+
             match camera.capture_frame() {
                 Ok(frame) => {
                     println!("Frame captured: {}x{}", frame.width(), frame.height());
@@ -81,10 +81,10 @@ mod gstreamer_tests {
 
         if let Ok(mut camera) = GStreamerCamera::new_with_config(&config).await {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
+
             let frames = camera.capture_frames(5);
             println!("Captured {} frames", frames.len());
-            
+
             // Should capture at least some frames
             if !frames.is_empty() {
                 for (i, frame) in frames.iter().enumerate() {
@@ -109,7 +109,7 @@ mod gstreamer_tests {
 
         let result = GStreamerCamera::new_with_config(&config).await;
         assert!(result.is_err());
-        
+
         if let Err(e) = result {
             let err_msg = e.to_string();
             assert!(err_msg.contains("exceeds maximum"));
@@ -131,23 +131,27 @@ mod gstreamer_tests {
 
         if let Ok(mut camera) = GStreamerCamera::new_with_config(&config).await {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
+
             let start = std::time::Instant::now();
             let mut success_count = 0;
-            
+
             // Try to capture 30 frames
             for _ in 0..30 {
                 if camera.capture_frame().is_ok() {
                     success_count += 1;
                 }
             }
-            
+
             let elapsed = start.elapsed();
             let fps = success_count as f64 / elapsed.as_secs_f64();
-            
-            println!("Captured {} frames in {:.2}s = {:.1} fps", 
-                     success_count, elapsed.as_secs_f64(), fps);
-            
+
+            println!(
+                "Captured {} frames in {:.2}s = {:.1} fps",
+                success_count,
+                elapsed.as_secs_f64(),
+                fps
+            );
+
             // GStreamer should be much faster than FFmpeg
             // Even 10fps would be acceptable, but we expect 20-30fps
             if success_count > 0 {
@@ -164,7 +168,7 @@ fn test_gstreamer_feature_available() {
     {
         println!("✓ camera-gstreamer feature is enabled");
     }
-    
+
     #[cfg(not(feature = "camera-gstreamer"))]
     {
         println!("✗ camera-gstreamer feature is NOT enabled");

@@ -35,6 +35,13 @@ pub const DEFAULT_ACCEPT_N: usize = 3;
 /// Default `[decision] window_m`: size of the sliding window of recent frames.
 pub const DEFAULT_WINDOW_M: usize = 5;
 
+/// Current `schema_version` of the config file format.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    CONFIG_SCHEMA_VERSION
+}
+
 fn default_prearm_window_ms() -> u32 {
     5000
 }
@@ -68,6 +75,11 @@ impl CameraFourcc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Config schema version (see docs/CONFIG.md). Files that omit it are read
+    /// as the current version; a version newer than this build is rejected.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+
     #[serde(default)]
     pub daemon: DaemonConfig,
 
@@ -570,7 +582,8 @@ impl LivenessConfig {
                 self.frames
             )));
         }
-        if self.depth_input_size == 0 || !self.depth_input_size.is_multiple_of(DEPTH_INPUT_MULTIPLE) {
+        if self.depth_input_size == 0 || !self.depth_input_size.is_multiple_of(DEPTH_INPUT_MULTIPLE)
+        {
             return Err(ConfigError::Invalid(format!(
                 "liveness.depth_input_size = {} must be a positive multiple of {DEPTH_INPUT_MULTIPLE}",
                 self.depth_input_size
@@ -751,7 +764,10 @@ impl SudoConfig {
         }
         if self.enabled {
             if self.service_names.is_empty() {
-                return invalid("pam.sudo.enabled = true needs at least one pam.sudo.service_names entry".to_string());
+                return invalid(
+                    "pam.sudo.enabled = true needs at least one pam.sudo.service_names entry"
+                        .to_string(),
+                );
             }
             if !auth.liveness_enabled {
                 return invalid("pam.sudo.enabled = true requires authentication.liveness_enabled = true (liveness is never advisory for sudo)".to_string());
@@ -858,6 +874,11 @@ pub struct DatasetConfig {
     /// here because they are low-volume ground-truth events.
     #[serde(default = "default_dataset_max_attempt_records_per_day")]
     pub max_attempt_records_per_day: usize,
+
+    /// Age in days used by `doorman dataset purge` when `--older-than` is
+    /// omitted. Advisory only: the daemon never deletes dataset files itself.
+    #[serde(default = "default_dataset_retention_days")]
+    pub retention_days: u32,
 }
 
 impl Default for DatasetConfig {
@@ -869,6 +890,7 @@ impl Default for DatasetConfig {
             max_capture_packs_per_day: default_max_capture_packs_per_day(),
             raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
+            retention_days: default_dataset_retention_days(),
         }
     }
 }
@@ -1053,11 +1075,18 @@ fn default_min_face_area_frac() -> f32 {
 fn default_dataset_max_attempt_records_per_day() -> usize {
     50_000
 }
+/// Frames per raw capture bundle (only used when `keep_raw_frames = true`).
 fn default_raw_frame_bundle_size() -> usize {
-    10
+    5
 }
+/// Raw capture bundles per day (only used when `keep_raw_frames = true`).
 fn default_max_capture_packs_per_day() -> usize {
-    500
+    20
+}
+/// Advisory age in days that `doorman dataset purge` uses when `--older-than`
+/// is omitted. Nothing is ever deleted automatically.
+fn default_dataset_retention_days() -> u32 {
+    14
 }
 fn default_raw_frame_jpeg_quality() -> u8 {
     92
@@ -1208,6 +1237,7 @@ impl Default for ModelsConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
             daemon: DaemonConfig::default(),
             camera: CameraConfig::default(),
             ml: MLConfig::default(),
@@ -1229,6 +1259,12 @@ impl Default for Config {
 impl Config {
     /// Validate every section that has range or consistency rules.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.schema_version > CONFIG_SCHEMA_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "schema_version = {} is newer than this build supports ({CONFIG_SCHEMA_VERSION}); upgrade doorman",
+                self.schema_version
+            )));
+        }
         self.camera.validate()?;
         self.decision.validate()?;
         self.liveness.validate()?;
@@ -1259,6 +1295,16 @@ impl Config {
     /// Load config from standard locations
     /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
     pub fn load() -> Result<Self, ConfigError> {
+        if let Some(path) = Self::find_config_path() {
+            return Self::load_from(&path);
+        }
+
+        // If no config found, use defaults
+        Ok(Self::default())
+    }
+
+    /// The config file `load` would use: the first existing standard location.
+    pub fn find_config_path() -> Option<PathBuf> {
         let locations = vec![
             PathBuf::from("doorman.toml"),
             dirs::config_dir()
@@ -1266,15 +1312,7 @@ impl Config {
                 .unwrap_or_default(),
             PathBuf::from("/etc/doorman/doorman.toml"),
         ];
-
-        for path in locations {
-            if path.exists() {
-                return Self::load_from(&path);
-            }
-        }
-
-        // If no config found, use defaults
-        Ok(Self::default())
+        locations.into_iter().find(|path| path.exists())
     }
 
     /// Load config from specific path
@@ -1287,8 +1325,7 @@ impl Config {
 
     /// Save config to path
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         fs::write(path, content)?;
         Ok(())
     }
@@ -1419,7 +1456,11 @@ mod tests {
         for bad in ["-1.0", "256.0"] {
             let cfg: Config =
                 toml::from_str(&format!("[recognition]\nmin_brightness = {bad}\n")).unwrap();
-            assert!(cfg.validate().unwrap_err().to_string().contains("min_brightness"));
+            assert!(cfg
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("min_brightness"));
         }
     }
 
@@ -1445,14 +1486,19 @@ mod tests {
         assert!(bad(1, 1).validate().is_ok());
         for (n, m) in [(0, 5), (6, 5)] {
             let err = bad(n, m).validate().unwrap_err().to_string();
-            assert!(err.contains("accept_n") && err.contains("window_m"), "{err}");
+            assert!(
+                err.contains("accept_n") && err.contains("window_m"),
+                "{err}"
+            );
         }
-        let short_budget: Config = toml::from_str(
-            "[authentication]\nauth_frames = 2\n[decision]\nmode = \"n_of_m\"\n",
-        )
-        .unwrap();
+        let short_budget: Config =
+            toml::from_str("[authentication]\nauth_frames = 2\n[decision]\nmode = \"n_of_m\"\n")
+                .unwrap();
         let err = short_budget.validate().unwrap_err().to_string();
-        assert!(err.contains("auth_frames") && err.contains("accept_n"), "{err}");
+        assert!(
+            err.contains("auth_frames") && err.contains("accept_n"),
+            "{err}"
+        );
         assert!(toml::from_str::<Config>("[decision]\nmode = \"sum\"\n").is_err());
         assert!(toml::from_str::<Config>("[decision]\ntemplate_score = \"min\"\n").is_err());
     }
@@ -1522,7 +1568,10 @@ mod tests {
         assert_eq!(sudo.service_names, vec!["sudo".to_string()]);
         assert_eq!((sudo.accept_n, sudo.window_m), (4, 5));
         assert_eq!(sudo.liveness_frames, 3);
-        assert_eq!((sudo.timeout_ms, sudo.max_failures, sudo.suspend_secs), (4000, 3, 600));
+        assert_eq!(
+            (sudo.timeout_ms, sudo.max_failures, sudo.suspend_secs),
+            (4000, 3, 600)
+        );
         assert_eq!(sudo.effective_threshold(&old.authentication), 0.4);
         assert!(old.validate().is_ok());
     }
@@ -1541,11 +1590,16 @@ mod tests {
         assert!(bad("[pam.sudo]\nmax_failures = 0").contains("max_failures"));
         assert!(bad("[pam.sudo]\nservice_names = [\"su do\"]").contains("service_names"));
         assert!(bad("[pam.sudo]\nenabled = true\nservice_names = []").contains("service_names"));
-        assert!(bad("[authentication]\nliveness_enabled = false\n[pam.sudo]\nenabled = true")
-            .contains("liveness_enabled"));
-        assert!(bad("[authentication]\nauth_frames = 3\n[pam.sudo]\nenabled = true")
-            .contains("auth_frames"));
-        let ok: Config = toml::from_str("[pam.sudo]\nenabled = true\nsimilarity_threshold = 0.5").unwrap();
+        assert!(
+            bad("[authentication]\nliveness_enabled = false\n[pam.sudo]\nenabled = true")
+                .contains("liveness_enabled")
+        );
+        assert!(
+            bad("[authentication]\nauth_frames = 3\n[pam.sudo]\nenabled = true")
+                .contains("auth_frames")
+        );
+        let ok: Config =
+            toml::from_str("[pam.sudo]\nenabled = true\nsimilarity_threshold = 0.5").unwrap();
         assert!(ok.validate().is_ok());
         assert_eq!(ok.pam.sudo.effective_threshold(&ok.authentication), 0.5);
     }

@@ -76,8 +76,18 @@ pub fn decode(
         let n = cols * cols;
         debug_assert_eq!(s.cls.len(), n, "cls len mismatch for stride {}", stride);
         debug_assert_eq!(s.obj.len(), n, "obj len mismatch for stride {}", stride);
-        debug_assert_eq!(s.bbox.len(), 4 * n, "bbox len mismatch for stride {}", stride);
-        debug_assert_eq!(s.kps.len(), 10 * n, "kps len mismatch for stride {}", stride);
+        debug_assert_eq!(
+            s.bbox.len(),
+            4 * n,
+            "bbox len mismatch for stride {}",
+            stride
+        );
+        debug_assert_eq!(
+            s.kps.len(),
+            10 * n,
+            "kps len mismatch for stride {}",
+            stride
+        );
 
         let sf = stride as f32;
         for i in 0..n {
@@ -111,7 +121,11 @@ pub fn decode(
                 *lm = (lx * inv_in, ly * inv_in);
             }
 
-            out.push(YuNetDetection { bbox, score, landmarks });
+            out.push(YuNetDetection {
+                bbox,
+                score,
+                landmarks,
+            });
         }
     }
 
@@ -139,7 +153,11 @@ fn iou(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
 
 /// Greedy Non-Maximum Suppression by descending score. Returns kept detections.
 pub fn nms(mut dets: Vec<YuNetDetection>, iou_threshold: f32) -> Vec<YuNetDetection> {
-    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut keep: Vec<YuNetDetection> = Vec::new();
     for d in dets {
         if keep.iter().all(|k| iou(d.bbox, k.bbox) < iou_threshold) {
@@ -155,13 +173,17 @@ mod tests {
 
     /// Build a single-anchor stride set that activates exactly one grid cell,
     /// so we can assert the decode math against hand-computed values.
-    fn one_hot_stride(stride: u32, input_size: u32, active: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    fn one_hot_stride(
+        stride: u32,
+        input_size: u32,
+        active: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let cols = (input_size / stride) as usize;
         let n = cols * cols;
         let mut cls = vec![0.01f32; n];
         let mut obj = vec![0.0f32; n];
         let mut bbox = vec![0.0f32; 4 * n];
-        let mut kps = vec![0.0f32; 10 * n];
+        let kps = vec![0.0f32; 10 * n];
         cls[active] = 0.81; // sqrt(0.81*1.0) = 0.9
         obj[active] = 1.0;
         // dx=dy=0.5 (center of cell), dw=dh=0 -> w=h=stride
@@ -246,7 +268,13 @@ mod tests {
         let obj = vec![0.1f32; n]; // score = sqrt(0.01) = 0.1 < 0.6
         let bbox = vec![0.0f32; 4 * n];
         let kps = vec![0.0f32; 10 * n];
-        let strides = vec![StrideOutputs { stride, cls: &cls, obj: &obj, bbox: &bbox, kps: &kps }];
+        let strides = vec![StrideOutputs {
+            stride,
+            cls: &cls,
+            obj: &obj,
+            bbox: &bbox,
+            kps: &kps,
+        }];
         let dets = decode(&strides, input_size, input_size, input_size, 0.6);
         assert!(dets.is_empty());
     }

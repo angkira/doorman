@@ -36,7 +36,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Test doormand
-        run: cargo test -p doormand
+        run: cargo test --locked -p doormand
 
       - name: Validate Debian packaging
         run: bash scripts/check_deb_packaging.sh
