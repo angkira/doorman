@@ -872,3 +872,8 @@ w600k_mbf.onnx                      13616099
 - Many files look legacy (blazeface*, ultraface*, scrfd, liveness.*, mobilefacenet, w600k_mbf, tflite); which are used by the current code is for the cloud session to determine (see ROUND3.md). Nothing is to be deleted; the owner decides.
 - Having BOTH depth_anything_v2_small_fp32.onnx and depth.ncnn.* means the loaded depth path (ORT vs ncnn/Vulkan) cannot be inferred from the directory alone.
 - NOT yet confirmed: the result of `sudo grep -i onnx /proc/<pid>/maps` (which onnxruntime library is mapped). The owner will re-run `sudo grep -ci onnx /proc/<pid>/maps`. Until then ORT linkage is unverified.
+
+## 9. Owner-run results (2026-11-01, later)
+
+- `sudo grep -ci onnx /proc/$(pidof doormand)/maps` printed `0` on the installed (old, ~5f78657) build. No shared libonnxruntime is mapped, so ONNX Runtime is statically linked in the installed daemon.
+- `doorman config check` on the installed build fails with "unrecognized subcommand 'config'". This is expected: the installed CLI predates the subcommand (it ships with the PR #13 build).
