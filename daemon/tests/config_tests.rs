@@ -28,8 +28,9 @@ fn test_default_config() {
 
     assert!(!config.dataset.logging_enabled);
     assert!(!config.dataset.keep_raw_frames);
-    assert_eq!(config.dataset.raw_frame_bundle_size, 10);
-    assert_eq!(config.dataset.max_capture_packs_per_day, 500);
+    assert_eq!(config.dataset.raw_frame_bundle_size, 5);
+    assert_eq!(config.dataset.max_capture_packs_per_day, 20);
+    assert_eq!(config.dataset.retention_days, 14);
     assert_eq!(config.dataset.raw_frame_jpeg_quality, 92);
     assert_eq!(config.dataset.max_attempt_records_per_day, 50_000);
 }

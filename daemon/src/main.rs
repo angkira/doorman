@@ -357,6 +357,15 @@ async fn main() -> Result<()> {
     info!("Mode: {}", if config.daemon.user_mode { "user service" } else { "system service (root)" });
     info!("Socket: {}", config.daemon.socket_path);
     info!("Data dir: {}", config.daemon.data_dir);
+    info!(
+        "Dataset capture (effective): logging_enabled={} keep_raw_frames={} raw_frame_bundle_size={} max_capture_packs_per_day={} max_attempt_records_per_day={} retention_days={} (retention is advisory: purge manually with `doorman dataset purge`)",
+        config.dataset.logging_enabled,
+        config.dataset.keep_raw_frames,
+        config.dataset.raw_frame_bundle_size,
+        config.dataset.max_capture_packs_per_day,
+        config.dataset.max_attempt_records_per_day,
+        config.dataset.retention_days,
+    );
     info!("ML backend: {}", config.ml.backend);
     info!("Device: {}", config.ml.device);
     if config.daemon.debug_mode {

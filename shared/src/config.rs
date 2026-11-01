@@ -870,6 +870,11 @@ pub struct DatasetConfig {
     /// here because they are low-volume ground-truth events.
     #[serde(default = "default_dataset_max_attempt_records_per_day")]
     pub max_attempt_records_per_day: usize,
+
+    /// Age in days used by `doorman dataset purge` when `--older-than` is
+    /// omitted. Advisory only: the daemon never deletes dataset files itself.
+    #[serde(default = "default_dataset_retention_days")]
+    pub retention_days: u32,
 }
 
 impl Default for DatasetConfig {
@@ -881,6 +886,7 @@ impl Default for DatasetConfig {
             max_capture_packs_per_day: default_max_capture_packs_per_day(),
             raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
+            retention_days: default_dataset_retention_days(),
         }
     }
 }
@@ -1065,11 +1071,18 @@ fn default_min_face_area_frac() -> f32 {
 fn default_dataset_max_attempt_records_per_day() -> usize {
     50_000
 }
+/// Frames per raw capture bundle (only used when `keep_raw_frames = true`).
 fn default_raw_frame_bundle_size() -> usize {
-    10
+    5
 }
+/// Raw capture bundles per day (only used when `keep_raw_frames = true`).
 fn default_max_capture_packs_per_day() -> usize {
-    500
+    20
+}
+/// Advisory age in days that `doorman dataset purge` uses when `--older-than`
+/// is omitted. Nothing is ever deleted automatically.
+fn default_dataset_retention_days() -> u32 {
+    14
 }
 fn default_raw_frame_jpeg_quality() -> u8 {
     92

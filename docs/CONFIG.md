@@ -77,9 +77,10 @@ see the comments in `packaging/doorman.toml.example`).
 | `keep_raw_frames` | `false` |
 | `logging_enabled` | `false` |
 | `max_attempt_records_per_day` | `50000` |
-| `max_capture_packs_per_day` | `500` |
-| `raw_frame_bundle_size` | `10` |
+| `max_capture_packs_per_day` | `20` |
+| `raw_frame_bundle_size` | `5` |
 | `raw_frame_jpeg_quality` | `92` |
+| `retention_days` | `14` |
 
 ## `[decision]`
 
@@ -198,3 +199,13 @@ see the comments in `packaging/doorman.toml.example`).
   default therefore changes the behaviour of an existing install whose file
   omits that key. `doorman config check` does not report omitted keys; compare
   the file with this reference.
+* Dataset capture defaults were tightened for new installs: `raw_frame_bundle_size`
+  10 -> 5 and `max_capture_packs_per_day` 500 -> 20 (both only matter with
+  `keep_raw_frames = true`, which stays `false`, as does `logging_enabled`).
+  `retention_days = 14` is new. An existing file that sets these keys keeps its
+  values; a file that omits them now gets the smaller caps. The daemon logs the
+  effective `[dataset]` values once at start.
+* `retention_days` is advisory: the daemon never deletes data. Remove old
+  files yourself with `sudo doorman dataset purge [--older-than DAYS] [--dry-run]`
+  (root only; it deletes `attempts-*.jsonl`, `labels-*.jsonl` and
+  `captures/<day>/` entries whose UTC day is older than the cutoff).

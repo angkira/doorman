@@ -161,6 +161,16 @@ const MIGRATION_NOTES: &str = "
   default therefore changes the behaviour of an existing install whose file
   omits that key. `doorman config check` does not report omitted keys; compare
   the file with this reference.
+* Dataset capture defaults were tightened for new installs: `raw_frame_bundle_size`
+  10 -> 5 and `max_capture_packs_per_day` 500 -> 20 (both only matter with
+  `keep_raw_frames = true`, which stays `false`, as does `logging_enabled`).
+  `retention_days = 14` is new. An existing file that sets these keys keeps its
+  values; a file that omits them now gets the smaller caps. The daemon logs the
+  effective `[dataset]` values once at start.
+* `retention_days` is advisory: the daemon never deletes data. Remove old
+  files yourself with `sudo doorman dataset purge [--older-than DAYS] [--dry-run]`
+  (root only; it deletes `attempts-*.jsonl`, `labels-*.jsonl` and
+  `captures/<day>/` entries whose UTC day is older than the cutoff).
 ";
 
 /// The generated docs/CONFIG.md body: every section and key with its default.

@@ -97,6 +97,24 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum DatasetAction {
+    /// Delete dataset files (attempt/label shards, capture packs) older than N days.
+    /// Root only; never run automatically.
+    Purge {
+        /// Delete entries whose UTC day is more than this many days old
+        /// (default: `[dataset] retention_days`).
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u32>,
+        /// List what would be deleted and delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Data directory containing dataset/ (default: `[daemon] data_dir`).
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Enroll a new user (records from the daemon's current camera source).
     Enroll {
@@ -183,6 +201,11 @@ enum Command {
         /// Maximum allowed absolute FRR regression.
         #[arg(long, default_value_t = 0.01)]
         max_frr_regression: f32,
+    },
+    /// Manage stored dataset files (see docs/datasets.md).
+    Dataset {
+        #[command(subcommand)]
+        action: DatasetAction,
     },
     /// Validate or document the daemon config (see docs/CONFIG.md).
     Config {
@@ -353,6 +376,13 @@ fn main() {
             *max_frr_regression,
             cli.json,
         ),
+        Command::Dataset { action } => match action {
+            DatasetAction::Purge {
+                older_than,
+                dry_run,
+                data_dir,
+            } => cmd_dataset_purge(*older_than, *dry_run, data_dir.as_deref()),
+        },
         Command::Config { action } => match action {
             ConfigAction::Check { config } => std::process::exit(cmd_config_check(config.as_deref())),
             ConfigAction::DumpDefaults => {
@@ -427,6 +457,41 @@ fn cmd_train(
         println!("  output: {}", report.output_dir.display());
         println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
     }
+    Ok(())
+}
+
+fn cmd_dataset_purge(
+    older_than: Option<u32>,
+    dry_run: bool,
+    data_dir: Option<&Path>,
+) -> Result<(), CliError> {
+    // Dataset files are root-owned 0700; refuse early with a clear message
+    // instead of failing half way through a deletion.
+    if !nix::unistd::geteuid().is_root() {
+        return Err(CliError::new(
+            "dataset purge must run as root (the dataset directory is private to the daemon); try: sudo doorman dataset purge ...",
+        ));
+    }
+    let config = doorman_shared::Config::load()
+        .map_err(|e| CliError::new(format!("cannot load config: {e}")))?;
+    let days = older_than.unwrap_or(config.dataset.retention_days);
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.daemon.data_dir));
+    let dataset_dir = data_dir.join("dataset");
+    let today = chrono::Utc::now().date_naive();
+    let entries = doormand::dataset_purge::purge_candidates(&dataset_dir, today, days)
+        .map_err(|e| CliError::new(format!("cannot scan {}: {e}", dataset_dir.display())))?;
+    for path in &entries {
+        println!("{}{}", if dry_run { "would delete " } else { "deleting " }, path.display());
+    }
+    if dry_run {
+        println!("{} entries older than {days} days (dry run, nothing deleted)", entries.len());
+        return Ok(());
+    }
+    let removed = doormand::dataset_purge::delete_entries(&entries)
+        .map_err(|e| CliError::new(format!("delete failed: {e}")))?;
+    println!("deleted {removed} entries older than {days} days from {}", dataset_dir.display());
     Ok(())
 }
 
