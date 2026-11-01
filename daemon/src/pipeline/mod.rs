@@ -15,7 +15,7 @@ mod scoring;
 mod sequential;
 mod types;
 
-pub use aggregate::{aggregate_embeddings, sharpness_score};
+pub use aggregate::{aggregate_embeddings, face_brightness, sharpness_score};
 pub use camera_producer::{spawn_camera_producer, CameraSource};
 pub use frame_fanout::run_frame_fanout;
 pub use detection_pipeline::run_detection_pipeline;

@@ -22,6 +22,8 @@ pub enum ConfigError {
 pub const MAX_WARMUP_FRAMES: u32 = 10;
 /// Upper bound (inclusive, ms) for `[camera] prearm_window_ms`.
 pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
+/// Largest 8-bit luma value; upper bound of `[recognition] min_brightness`.
+pub const MAX_LUMA: f32 = 255.0;
 /// Default `[decision] accept_n`: frames that must clear the threshold.
 pub const DEFAULT_ACCEPT_N: usize = 3;
 /// Default `[decision] window_m`: size of the sliding window of recent frames.
@@ -399,6 +401,11 @@ pub struct RecognitionConfig {
     /// frame area. Rejects tiny / far-away faces. `0.0` disables the size gate.
     #[serde(default = "default_min_face_area_frac")]
     pub min_face_area_frac: f32,
+
+    /// Frame-quality gate: minimum mean luma (0..=255) inside the face box.
+    /// Rejects frames that are too dark to embed reliably. `0.0` disables it.
+    #[serde(default)]
+    pub min_brightness: f32,
 }
 
 impl Default for RecognitionConfig {
@@ -408,6 +415,7 @@ impl Default for RecognitionConfig {
             hysteresis_frames: default_hysteresis_frames(),
             min_sharpness: default_min_sharpness(),
             min_face_area_frac: default_min_face_area_frac(),
+            min_brightness: 0.0,
         }
     }
 }
@@ -934,6 +942,12 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.camera.validate()?;
         self.decision.validate()?;
+        let brightness = self.recognition.min_brightness;
+        if !(0.0..=MAX_LUMA).contains(&brightness) {
+            return Err(ConfigError::Invalid(format!(
+                "recognition.min_brightness = {brightness} is out of range (0..={MAX_LUMA})"
+            )));
+        }
         let prune = self.enrollment.prune_cosine;
         if !(prune > 0.0 && prune <= 1.0) {
             return Err(ConfigError::Invalid(format!(
@@ -1075,6 +1089,18 @@ mod tests {
         assert_eq!(new.decision.mode, DecisionMode::NOfM);
         assert_eq!(new.decision.template_score, TemplateScore::Top3Mean);
         assert!(new.validate().is_ok());
+    }
+
+    #[test]
+    fn min_brightness_is_off_by_default_and_range_checked() {
+        let old: Config = toml::from_str("[recognition]\nmin_sharpness = 8.0\n").unwrap();
+        assert_eq!(old.recognition.min_brightness, 0.0);
+        assert!(old.validate().is_ok());
+        for bad in ["-1.0", "256.0"] {
+            let cfg: Config =
+                toml::from_str(&format!("[recognition]\nmin_brightness = {bad}\n")).unwrap();
+            assert!(cfg.validate().unwrap_err().to_string().contains("min_brightness"));
+        }
     }
 
     #[test]

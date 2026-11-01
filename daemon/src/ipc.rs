@@ -685,15 +685,20 @@ fn frame_passes_quality_gate(
     };
     let sharp_ok = rec.min_sharpness <= 0.0 || sharpness >= rec.min_sharpness;
 
-    let pass = area_ok && sharp_ok;
+    let brightness = crate::pipeline::face_brightness(frame, face.bbox);
+    let bright_ok = rec.min_brightness <= 0.0 || brightness >= rec.min_brightness;
+
+    let pass = area_ok && sharp_ok && bright_ok;
     debug!(
-        "{} quality gate frame {}: sharpness={:.2} (min {:.2}) area_frac={:.4} (min {:.4}) -> {}",
+        "{} quality gate frame {}: sharpness={:.2} (min {:.2}) area_frac={:.4} (min {:.4}) brightness={:.1} (min {:.1}) -> {}",
         ctx,
         idx,
         sharpness,
         rec.min_sharpness,
         area_frac,
         rec.min_face_area_frac,
+        brightness,
+        rec.min_brightness,
         if pass { "PASS" } else { "REJECT" }
     );
     pass
