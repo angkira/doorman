@@ -43,6 +43,8 @@ pub struct OrtBackend {
     depth_source: DepthSource,
     recognizer_pool: Vec<Mutex<Session>>,
     pool_index: AtomicUsize,
+    /// `[decision] flip_tta`: also embed the mirrored aligned crop and average.
+    flip_tta: bool,
 }
 
 /// Source of the depth-relief PAD pass. See `OrtBackend::depth_source`.
@@ -333,6 +335,7 @@ impl OrtBackend {
             depth_source,
             recognizer_pool,
             pool_index: AtomicUsize::new(0),
+            flip_tta: config.decision.flip_tta,
         })
     }
 
@@ -1083,6 +1086,30 @@ impl MLBackend for OrtBackend {
             None => Self::bbox_crop_resize(image, face, SIZE),
         };
 
+        let embedding = Self::embed_aligned(recognizer, &aligned)?;
+        if self.flip_tta {
+            let mirrored = Self::embed_aligned(recognizer, &super::tta::flip_horizontal(&aligned))?;
+            return Ok(super::tta::average_normalized(&embedding, &mirrored));
+        }
+        Ok(embedding)
+    }
+
+    fn is_ready(&self) -> bool {
+        // Liveness is a non-fatal convenience check and does NOT gate readiness.
+        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
+    }
+
+    fn name(&self) -> &'static str {
+        "ONNX Runtime"
+    }
+}
+
+#[cfg(feature = "_ort")]
+impl OrtBackend {
+    /// Run the recognizer on one aligned 112x112 RGB crop and return the
+    /// L2-normalised embedding.
+    fn embed_aligned(recognizer: &Mutex<Session>, aligned: &image::RgbImage) -> Result<Vec<f32>> {
+        const SIZE: u32 = 112;
         // Preprocess: RGB, (x - 127.5)/127.5, NCHW planar.
         let n = (SIZE * SIZE) as usize;
         let mut input = vec![0.0f32; 3 * n];
@@ -1111,14 +1138,5 @@ impl MLBackend for OrtBackend {
         };
 
         Ok(normalized)
-    }
-
-    fn is_ready(&self) -> bool {
-        // Liveness is a non-fatal convenience check and does NOT gate readiness.
-        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
-    }
-
-    fn name(&self) -> &'static str {
-        "ONNX Runtime"
     }
 }

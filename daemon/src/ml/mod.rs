@@ -26,6 +26,8 @@ pub mod ncnn_backend;
 #[cfg(all(feature = "_ort", feature = "backend-ncnn"))]
 pub mod ncnn_hybrid;
 
+mod tta;
+
 #[cfg(test)]
 mod tests;
 

@@ -452,6 +452,11 @@ pub struct DecisionConfig {
 
     #[serde(default = "default_template_score")]
     pub template_score: TemplateScore,
+
+    /// Flip test-time augmentation: embed the aligned crop and its mirror,
+    /// average and renormalise. Costs one extra recognizer pass per frame.
+    #[serde(default)]
+    pub flip_tta: bool,
 }
 
 impl Default for DecisionConfig {
@@ -461,6 +466,7 @@ impl Default for DecisionConfig {
             accept_n: default_accept_n(),
             window_m: default_window_m(),
             template_score: default_template_score(),
+            flip_tta: false,
         }
     }
 }
@@ -1059,6 +1065,7 @@ mod tests {
         assert_eq!(old.decision.mode, DecisionMode::Mean);
         assert_eq!(old.decision.template_score, TemplateScore::Max);
         assert_eq!((old.decision.accept_n, old.decision.window_m), (3, 5));
+        assert!(!old.decision.flip_tta);
         assert!(old.validate().is_ok());
 
         let new: Config = toml::from_str(
