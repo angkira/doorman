@@ -4,6 +4,7 @@ pub mod dataset;
 pub mod ipc_policy;
 pub mod ml;
 pub mod storage;
+pub mod timing;
 pub mod training;
 
 // Re-export commonly used types

@@ -1287,6 +1287,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "doorman-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "doorman-shared",
+ "doormand",
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "doorman-shared"
 version = "0.1.0"
 dependencies = [
