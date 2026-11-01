@@ -2,7 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod config;
-pub use config::{Config, DatasetConfig, RecognitionConfig};
+pub use config::{Config, DatasetConfig, IpcConfig, RecognitionConfig};
+
+/// Current IPC protocol major version. Requests without a `protocol_version`
+/// field (old PAM module / CLI) are treated as this version.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// IPC protocol messages between PAM module/CLI and daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +30,28 @@ pub enum Request {
     GetLatestDetection,
 }
 
+/// Wire envelope for a request: the `Request` fields stay at the top level of
+/// the JSON object (flattened), with an optional `protocol_version` beside them,
+/// so the old wire format `{"type":"authenticate","username":"x"}` still parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestEnvelope {
+    /// Absent means [`PROTOCOL_VERSION`] 1 (clients that predate the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+    #[serde(flatten)]
+    pub request: Request,
+}
+
+impl RequestEnvelope {
+    /// Wrap a request, stamping the current protocol version.
+    pub fn new(request: Request) -> Self {
+        Self {
+            protocol_version: Some(PROTOCOL_VERSION),
+            request,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
@@ -42,6 +68,19 @@ pub enum Response {
         message: String,
         current: u32,
         total: u32,
+    },
+    /// The peer is not authorized for this request (peer-credential policy).
+    Denied {
+        reason: String,
+    },
+    /// Too many authenticate attempts from this peer uid.
+    RateLimited {
+        retry_after_s: u64,
+    },
+    /// The request's `protocol_version` major is not supported by the daemon.
+    UnsupportedProtocol {
+        reason: String,
+        supported_version: u32,
     },
 }
 
@@ -169,4 +208,52 @@ pub enum Error {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_request_without_version_parses() {
+        let env: RequestEnvelope =
+            serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
+        assert_eq!(env.protocol_version, None);
+        assert!(matches!(env.request, Request::Authenticate { ref username } if username == "bob"));
+    }
+
+    #[test]
+    fn unit_variant_with_version_parses() {
+        let env: RequestEnvelope =
+            serde_json::from_str(r#"{"type":"status","protocol_version":2}"#).unwrap();
+        assert_eq!(env.protocol_version, Some(2));
+        assert!(matches!(env.request, Request::Status));
+    }
+
+    #[test]
+    fn new_envelope_stamps_version_and_keeps_flat_layout() {
+        let json = serde_json::to_string(&RequestEnvelope::new(Request::Authenticate {
+            username: "bob".into(),
+        }))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "authenticate");
+        assert_eq!(v["username"], "bob");
+        assert_eq!(v["protocol_version"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn new_response_variants_roundtrip() {
+        for r in [
+            Response::Denied { reason: "x".into() },
+            Response::RateLimited { retry_after_s: 7 },
+            Response::UnsupportedProtocol {
+                reason: "x".into(),
+                supported_version: PROTOCOL_VERSION,
+            },
+        ] {
+            let back: Response = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+            assert_eq!(format!("{r:?}"), format!("{back:?}"));
+        }
+    }
 }

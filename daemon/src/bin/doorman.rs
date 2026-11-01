@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use doorman_shared::{
-    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage, UserInfo,
+    DaemonInfo, EnrollmentPhase, Request, RequestEnvelope, Response, ResponseData, StreamMessage, UserInfo,
 };
 
 // Self-contained installer (doctor / install / uninstall). Kept in a sibling
@@ -549,7 +549,7 @@ fn send_request(
         .map_err(|e| CliError::new(format!("failed to set write timeout: {e}")))?;
 
     let mut writer = stream;
-    let request_json = serde_json::to_string(request)
+    let request_json = serde_json::to_string(&RequestEnvelope::new(request.clone()))
         .map_err(|e| CliError::new(format!("failed to serialize request: {e}")))?;
     writeln!(writer, "{request_json}")
         .map_err(|e| CliError::new(format!("failed to send request: {e}")))?;
@@ -572,8 +572,21 @@ fn send_request(
         ));
     }
 
-    serde_json::from_str(line.trim())
-        .map_err(|e| CliError::new(format!("failed to parse daemon response: {e} (raw: {})", line.trim())))
+    let response: Response = serde_json::from_str(line.trim())
+        .map_err(|e| CliError::new(format!("failed to parse daemon response: {e} (raw: {})", line.trim())))?;
+    match response {
+        Response::Denied { reason } => Err(CliError::new(format!("denied by daemon: {reason}"))),
+        Response::RateLimited { retry_after_s } => Err(CliError::new(format!(
+            "rate limited by daemon: retry in {retry_after_s}s"
+        ))),
+        Response::UnsupportedProtocol {
+            reason,
+            supported_version,
+        } => Err(CliError::new(format!(
+            "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
+        ))),
+        other => Ok(other),
+    }
 }
 
 fn print_raw(response: &Response) -> Result<(), CliError> {
@@ -834,6 +847,12 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
         // defensively so an unexpected frame doesn't crash the CLI.
         Response::Progress { message, current, total } => Err(CliError::new(format!(
             "unexpected progress on command socket: {message} ({current}/{total})"
+        ))),
+        // send_request already turns these into errors; arm kept for exhaustiveness.
+        Response::Denied { .. }
+        | Response::RateLimited { .. }
+        | Response::UnsupportedProtocol { .. } => Err(CliError::new(format!(
+            "unexpected response: {response:?}"
         ))),
     }
 }
