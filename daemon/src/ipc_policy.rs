@@ -69,8 +69,9 @@ pub fn authorize(
     resolve_uid: impl Fn(&str) -> Option<u32>,
 ) -> Decision {
     match req {
-        // Self, root, or an explicitly trusted uid.
-        Request::Authenticate { username } => {
+        // Self, root, or an explicitly trusted uid. WaitForMatch yields the same
+        // decision as Authenticate, so it needs exactly the same authority.
+        Request::Authenticate { username } | Request::WaitForMatch { username, .. } => {
             let allowed = peer.uid == 0
                 || cfg.trusted_uids.contains(&peer.uid)
                 || resolve_uid(username) == Some(peer.uid);
@@ -212,7 +213,10 @@ impl Gatekeeper {
             });
         }
 
-        if matches!(env.request, Request::Authenticate { .. }) {
+        if matches!(
+            env.request,
+            Request::Authenticate { .. } | Request::WaitForMatch { .. }
+        ) {
             if let Err(retry_after_s) = self.limiter.check(peer.uid, (self.clock)()) {
                 warn!(
                     peer_uid = peer.uid,
@@ -238,6 +242,7 @@ pub fn request_name(req: &Request) -> &'static str {
         Request::Shutdown => "shutdown",
         Request::DetectAndRecognize => "detect_and_recognize",
         Request::GetLatestDetection => "get_latest_detection",
+        Request::WaitForMatch { .. } => "wait_for_match",
     }
 }
 
@@ -410,6 +415,13 @@ mod tests {
         }
     }
 
+    fn wait(name: &str) -> Request {
+        Request::WaitForMatch {
+            username: name.into(),
+            timeout_ms: 1000,
+        }
+    }
+
     #[test]
     fn policy_table() {
         let mut trusted = IpcConfig::default();
@@ -456,6 +468,29 @@ mod tests {
                 auth("alice"),
                 &def,
                 deny_a.clone(),
+            ),
+            ("wait self", peer(ALICE), wait("alice"), &def, allow.clone()),
+            ("wait root", peer(0), wait("alice"), &def, allow.clone()),
+            (
+                "wait other uid",
+                peer(BOB),
+                wait("alice"),
+                &def,
+                deny_a.clone(),
+            ),
+            (
+                "wait unknown user as user",
+                peer(BOB),
+                wait("ghost"),
+                &def,
+                deny_a.clone(),
+            ),
+            (
+                "wait trusted uid",
+                peer(2000),
+                wait("alice"),
+                &trusted,
+                allow.clone(),
             ),
             (
                 "admin_uid cannot auth for others",

@@ -45,6 +45,9 @@ trusted_uids = []
 admin_uids = []
 # Authenticate attempts per uid per sliding minute (0 = unlimited).
 max_auth_attempts_per_minute = 20
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
 # Frame/debug stream sockets are 0600 by default. Set a group to make them
 # 0660 and owned by that group.
 # stream_socket_group = "doorman"

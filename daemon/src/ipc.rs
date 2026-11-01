@@ -95,6 +95,9 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
                 reason: "GetLatestDetection not implemented".to_string(),
             }
         }
+        Request::WaitForMatch { .. } => Response::Failure {
+            reason: "WaitForMatch not implemented".to_string(),
+        },
         Request::Shutdown => {
             info!("Shutdown requested");
             Response::Success {

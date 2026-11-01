@@ -309,6 +309,8 @@ impl Default for RecognitionConfig {
 
 /// Default per-uid Authenticate budget per sliding minute.
 pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
+/// Default cap for a single `WaitForMatch` (milliseconds).
+pub const DEFAULT_WAIT_FOR_MATCH_MAX_MS: u64 = 60_000;
 
 /// IPC peer-credential policy (`[ipc]`). See docs/ipc-security.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +334,15 @@ pub struct IpcConfig {
     /// 0660; otherwise they are 0600 (owner/root only).
     #[serde(default)]
     pub stream_socket_group: Option<String>,
+
+    /// Upper bound for the `timeout_ms` of one `WaitForMatch`; larger requests
+    /// are clamped to it.
+    #[serde(default = "default_wait_for_match_max_ms")]
+    pub wait_for_match_max_ms: u64,
+}
+
+fn default_wait_for_match_max_ms() -> u64 {
+    DEFAULT_WAIT_FOR_MATCH_MAX_MS
 }
 
 fn default_max_auth_attempts_per_minute() -> u32 {
@@ -345,6 +356,7 @@ impl Default for IpcConfig {
             admin_uids: Vec::new(),
             max_auth_attempts_per_minute: DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE,
             stream_socket_group: None,
+            wait_for_match_max_ms: DEFAULT_WAIT_FOR_MATCH_MAX_MS,
         }
     }
 }
@@ -729,15 +741,17 @@ mod tests {
         assert!(cfg.ipc.admin_uids.is_empty());
         assert_eq!(cfg.ipc.max_auth_attempts_per_minute, 20);
         assert_eq!(cfg.ipc.stream_socket_group, None);
+        assert_eq!(cfg.ipc.wait_for_match_max_ms, 60_000);
 
         let cfg: super::Config = toml::from_str(
-            "[ipc]\ntrusted_uids=[1000]\nadmin_uids=[1001]\nmax_auth_attempts_per_minute=5\nstream_socket_group=\"doorman\"\n",
+            "[ipc]\ntrusted_uids=[1000]\nadmin_uids=[1001]\nmax_auth_attempts_per_minute=5\nstream_socket_group=\"doorman\"\nwait_for_match_max_ms=1500\n",
         )
         .unwrap();
         assert_eq!(cfg.ipc.trusted_uids, vec![1000]);
         assert_eq!(cfg.ipc.admin_uids, vec![1001]);
         assert_eq!(cfg.ipc.max_auth_attempts_per_minute, 5);
         assert_eq!(cfg.ipc.stream_socket_group.as_deref(), Some("doorman"));
+        assert_eq!(cfg.ipc.wait_for_match_max_ms, 1500);
     }
 
     use super::*;

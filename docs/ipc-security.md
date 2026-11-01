@@ -17,6 +17,7 @@ connection is dropped (fail closed).
 | Request | Allowed for |
 |---|---|
 | `Authenticate{username}` | peer uid == uid of `username`, root, or `trusted_uids` |
+| `WaitForMatch{username, timeout_ms}` | same as `Authenticate` (it yields the same decision) |
 | `Enroll`, `RemoveUser`, `ListUsers`, `DetectAndRecognize`, `GetLatestDetection`, `Shutdown` | root or `admin_uids` |
 | `Status` | anyone (no biometric data, no user names) |
 
@@ -33,7 +34,8 @@ syslog; the CLI prints the reason and exits non-zero.
 
 ### Rate limiting
 
-Authenticate attempts are limited per peer uid over a sliding 60 s window
+Authenticate and WaitForMatch attempts (one per call, however long the wait)
+are limited per peer uid over a sliding 60 s window
 (`max_auth_attempts_per_minute`, default 20, `0` = off). Root is limited too,
 to bound brute force through PAM. State is in memory and resets on restart.
 
@@ -67,6 +69,7 @@ non-root user it is skipped silently unless the group option is used.
 trusted_uids = []                 # may Authenticate for any user
 admin_uids = []                   # may run admin operations
 max_auth_attempts_per_minute = 20 # 0 disables
+wait_for_match_max_ms = 60000     # cap for one WaitForMatch, see docs/unlock-path.md
 # stream_socket_group = "doorman"
 ```
 

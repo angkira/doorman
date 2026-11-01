@@ -851,7 +851,9 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
         // send_request already turns these into errors; arm kept for exhaustiveness.
         Response::Denied { .. }
         | Response::RateLimited { .. }
-        | Response::UnsupportedProtocol { .. } => Err(CliError::new(format!(
+        | Response::UnsupportedProtocol { .. }
+        | Response::Matched { .. }
+        | Response::NoMatch { .. } => Err(CliError::new(format!(
             "unexpected response: {response:?}"
         ))),
     }
