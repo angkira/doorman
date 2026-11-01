@@ -69,6 +69,7 @@ impl SequentialDecider {
     }
 
     /// Frames scored so far.
+    #[cfg(test)]
     pub fn frames_seen(&self) -> usize {
         self.seen
     }

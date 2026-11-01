@@ -561,13 +561,13 @@ impl Default for LivenessConfig {
 
 impl LivenessConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.frames % 2 == 0 || self.frames > MAX_LIVENESS_FRAMES {
+        if self.frames.is_multiple_of(2) || self.frames > MAX_LIVENESS_FRAMES {
             return Err(ConfigError::Invalid(format!(
                 "liveness.frames = {} must be odd and at most {MAX_LIVENESS_FRAMES}",
                 self.frames
             )));
         }
-        if self.depth_input_size == 0 || self.depth_input_size % DEPTH_INPUT_MULTIPLE != 0 {
+        if self.depth_input_size == 0 || !self.depth_input_size.is_multiple_of(DEPTH_INPUT_MULTIPLE) {
             return Err(ConfigError::Invalid(format!(
                 "liveness.depth_input_size = {} must be a positive multiple of {DEPTH_INPUT_MULTIPLE}",
                 self.depth_input_size
