@@ -63,9 +63,19 @@ Which one wins is an empirical question for your data: compare them with
 ## Enrolment
 
 * `embeddings.bin` is versioned (magic + version 2). The old headerless file is
-  still read; it is rewritten in the new layout on the next save. Back up the
-  file before the first enrol after upgrading if you may roll back, because an
-  older daemon cannot read version 2.
+  still read; it is rewritten in the new layout on the next save. An older
+  daemon cannot read version 2.
+* Before that first version-2 write the daemon copies the old file to
+  `embeddings.bin.v1.bak` (mode 0600, same directory, `create_new`, so an
+  existing backup is never overwritten). It is made once; later saves and a
+  v1 file that reappears do not touch it. **Rollback:** stop the daemon, install
+  the older build, `mv embeddings.bin.v1.bak embeddings.bin` (users enrolled
+  after the upgrade are lost), start it. To get a fresh backup for a later
+  upgrade, move the old backup away first.
+* Saves write `embeddings.bin.tmp` with mode 0600 from creation, fsync it,
+  rename it over `embeddings.bin` and fsync the directory. `/var/lib/doorman`
+  is 0700 (`StateDirectoryMode=0700` in the unit, `0700` in the installer and
+  the deb; the daemon also tightens a directory it owns).
 * Near-duplicates (`cosine >= prune_cosine`) are dropped before the existing
   union and diverse selection (at most 30 templates).
 * Plain `doorman enroll` merges with the stored templates and may evict
