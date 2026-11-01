@@ -81,6 +81,8 @@ pub struct TimingRecord {
     /// Depth relief of the liveness evaluation (calibration signal, see
     /// docs/decision-and-liveness.md); `null` when it produced none.
     pub liveness_relief: Option<f32>,
+    /// Frames the liveness check was evaluated on (1 for the single-frame gate).
+    pub liveness_frames: u32,
     pub decision_ms: Option<f64>,
     pub total_ms: f64,
     pub frames_seen: usize,
@@ -107,6 +109,7 @@ pub struct AttemptTiming {
     pub liveness: Option<Duration>,
     pub liveness_passed: Option<bool>,
     pub liveness_relief: Option<f32>,
+    pub liveness_frames: u32,
     pub decision: Option<Duration>,
     pub frames_seen: usize,
     pub frames_used: usize,
@@ -130,6 +133,7 @@ impl AttemptTiming {
             liveness: None,
             liveness_passed: None,
             liveness_relief: None,
+            liveness_frames: 0,
             decision: None,
             frames_seen: 0,
             frames_used: 0,
@@ -173,6 +177,7 @@ impl AttemptTiming {
             liveness_ms: self.liveness.map(ms),
             liveness_passed: self.liveness_passed,
             liveness_relief: self.liveness_relief,
+            liveness_frames: self.liveness_frames,
             decision_ms: self.decision.map(ms),
             total_ms: ms(self.start.elapsed()),
             frames_seen: self.frames_seen,

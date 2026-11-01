@@ -45,6 +45,73 @@ impl LivenessOutcome {
     }
 }
 
+/// Progress of a multi-frame liveness evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LivenessProgress {
+    /// More frames are needed.
+    Pending,
+    /// Final verdict, with the median relief of the frames evaluated.
+    Decided(LivenessOutcome),
+}
+
+/// Combines per-frame outcomes into one verdict (`[liveness] aggregate =
+/// "median"`). The aggregate passes when the median relief of `frames` frames
+/// is at or above the threshold; for an odd `frames` that is exactly "a
+/// majority (`frames / 2 + 1`) of the frames pass", so the verdict is final as
+/// soon as one side holds a majority. For the recommended 3 frames this is the
+/// early exit "the first two frames agree". A frame whose check is unavailable
+/// decides at once as unavailable (fail closed).
+pub struct LivenessAggregator {
+    majority: usize,
+    outcomes: Vec<LivenessOutcome>,
+}
+
+impl LivenessAggregator {
+    /// `frames` must be odd (validated by the config).
+    pub fn new(frames: usize) -> Self {
+        Self {
+            majority: frames / 2 + 1,
+            outcomes: Vec::with_capacity(frames),
+        }
+    }
+
+    /// Frames evaluated so far.
+    pub fn evaluated(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    pub fn push(&mut self, outcome: LivenessOutcome) -> LivenessProgress {
+        if matches!(outcome, LivenessOutcome::Unavailable { .. }) {
+            return LivenessProgress::Decided(outcome);
+        }
+        self.outcomes.push(outcome);
+        let passes = self.outcomes.iter().filter(|o| o.is_pass()).count();
+        let fails = self.outcomes.len() - passes;
+        let relief = self.median_relief();
+        if passes >= self.majority {
+            LivenessProgress::Decided(LivenessOutcome::Pass { relief })
+        } else if fails >= self.majority {
+            LivenessProgress::Decided(LivenessOutcome::Fail { relief })
+        } else {
+            LivenessProgress::Pending
+        }
+    }
+
+    /// Median of the collected reliefs (mean of the middle two for an even count).
+    fn median_relief(&self) -> f32 {
+        let mut reliefs: Vec<f32> = self.outcomes.iter().filter_map(|o| o.relief()).collect();
+        reliefs.sort_by(|a, b| a.total_cmp(b));
+        let n = reliefs.len();
+        if n == 0 {
+            0.0
+        } else if n % 2 == 1 {
+            reliefs[n / 2]
+        } else {
+            (reliefs[n / 2 - 1] + reliefs[n / 2]) * 0.5
+        }
+    }
+}
+
 /// Linear-interpolated percentile (`q` in 0..=1) of `values`; 0.0 when empty.
 fn percentile(values: &[f32], q: f32) -> f32 {
     if values.is_empty() {
@@ -169,6 +236,80 @@ mod tests {
         let fallback = relief_from_patch(ReliefStat::MinMax, &patch, Some(&none), &reference);
         let whole = relief_from_patch(ReliefStat::MinMax, &reference, None, &reference);
         assert_eq!(fallback, whole);
+    }
+
+    fn pass(relief: f32) -> LivenessOutcome {
+        LivenessOutcome::Pass { relief }
+    }
+    fn fail(relief: f32) -> LivenessOutcome {
+        LivenessOutcome::Fail { relief }
+    }
+
+    #[test]
+    fn single_frame_decides_immediately_like_the_original_gate() {
+        let mut agg = LivenessAggregator::new(1);
+        assert_eq!(agg.push(pass(0.2)), LivenessProgress::Decided(pass(0.2)));
+        let mut agg = LivenessAggregator::new(1);
+        assert_eq!(agg.push(fail(0.01)), LivenessProgress::Decided(fail(0.01)));
+    }
+
+    #[test]
+    fn three_frames_exit_early_when_the_first_two_agree() {
+        let mut agg = LivenessAggregator::new(3);
+        assert_eq!(agg.push(pass(0.30)), LivenessProgress::Pending);
+        assert_eq!(agg.push(pass(0.10)), LivenessProgress::Decided(pass(0.20)));
+        assert_eq!(agg.evaluated(), 2);
+
+        let mut agg = LivenessAggregator::new(3);
+        agg.push(fail(0.01));
+        assert_eq!(agg.push(fail(0.03)), LivenessProgress::Decided(fail(0.02)));
+    }
+
+    #[test]
+    fn three_frames_disagreeing_use_the_third_as_tiebreak_and_match_the_median() {
+        let mut agg = LivenessAggregator::new(3);
+        agg.push(pass(0.30));
+        assert_eq!(agg.push(fail(0.02)), LivenessProgress::Pending);
+        // Median of {0.30, 0.02, 0.04} is 0.04: below a 0.05 threshold -> fail.
+        assert_eq!(agg.push(fail(0.04)), LivenessProgress::Decided(fail(0.04)));
+    }
+
+    /// Property (exhaustive over pass/fail patterns): the majority verdict
+    /// equals "median relief >= threshold" for every odd frame count.
+    #[test]
+    fn majority_verdict_equals_the_median_threshold_rule() {
+        const THRESHOLD: f32 = 0.05;
+        for frames in [1usize, 3, 5, 7] {
+            for pattern in 0u32..(1 << frames) {
+                let reliefs: Vec<f32> = (0..frames)
+                    .map(|i| {
+                        let base = if pattern >> i & 1 == 1 { 0.10 } else { 0.01 };
+                        base + i as f32 * 0.001
+                    })
+                    .collect();
+                let mut sorted = reliefs.clone();
+                sorted.sort_by(|a, b| a.total_cmp(b));
+                let expected_pass = sorted[frames / 2] >= THRESHOLD;
+                let mut agg = LivenessAggregator::new(frames);
+                let mut verdict = None;
+                for r in &reliefs {
+                    let o = if *r >= THRESHOLD { pass(*r) } else { fail(*r) };
+                    if let LivenessProgress::Decided(v) = agg.push(o) {
+                        verdict = Some(v.is_pass());
+                        break;
+                    }
+                }
+                assert_eq!(verdict, Some(expected_pass), "frames {frames} pattern {pattern:b}");
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_frame_decides_unavailable_at_once() {
+        let mut agg = LivenessAggregator::new(5);
+        agg.push(pass(0.3));
+        let u = LivenessOutcome::Unavailable { reason: "x".into() };
+        assert_eq!(agg.push(u.clone()), LivenessProgress::Decided(u));
     }
 
     #[test]

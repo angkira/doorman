@@ -11,7 +11,7 @@ use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
 use crate::pipeline::{LivenessState, SequentialDecider, Step};
 use doorman_shared::config::DecisionMode;
 use doormand::decision::{AuthDecision, AuthOutcome};
-use doormand::liveness::LivenessOutcome;
+use doormand::liveness::{LivenessAggregator, LivenessOutcome, LivenessProgress};
 use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
 use image::GenericImageView;
 use std::sync::Arc;
@@ -339,7 +339,13 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
     let mut sequential_step = Step::Continue;
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
-    let mut liveness_checked = false;
+    // Liveness: the aggregator exists while the check is enabled; `liveness`
+    // holds its final verdict once decided (None = disabled or still pending).
+    let mut liveness_agg = state
+        .config
+        .authentication
+        .liveness_enabled
+        .then(|| LivenessAggregator::new(state.config.liveness.frames));
     let mut liveness: Option<LivenessOutcome> = None;
     let mut frames_seen = 0usize;
     let mut rx = state.latest_frame.clone();
@@ -385,76 +391,48 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
         if first_quality_face_area_frac.is_none() {
             first_quality_face_area_frac = face_area_frac(&face);
         }
-        // First quality face: run the anti-spoofing depth gate ONCE.
-        if !liveness_checked {
-            liveness_checked = true;
+        // Anti-spoofing depth gate: evaluated on the first quality frames until the
+        // aggregate (`[liveness] frames`, median) is decided; 1 frame by default.
+        if let (Some(agg), None) = (liveness_agg.as_mut(), liveness.as_ref()) {
             let liveness_started = std::time::Instant::now();
-            let liveness_result = state.ml_pipeline.liveness_check(&frame, &face).await;
-            timing.liveness = Some(liveness_started.elapsed());
-            timing.liveness_passed = liveness_result.as_ref().map(LivenessOutcome::is_pass);
-            timing.liveness_relief = liveness_result.as_ref().and_then(LivenessOutcome::relief);
+            let frame_result = state.ml_pipeline.liveness_check(&frame, &face).await;
+            let depth_elapsed = liveness_started.elapsed();
+            timing.liveness = Some(timing.liveness.unwrap_or_default() + depth_elapsed);
+            timing.liveness_frames += 1;
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let (_, _, box_w, box_h) = face.bbox;
                 debug!(
                     "Liveness frame {}: relief={:?} face_box={:.0}x{:.0}px sharpness={:.2} brightness={:.1} depth_ms={:.1}",
                     i,
-                    timing.liveness_relief,
+                    frame_result.as_ref().and_then(LivenessOutcome::relief),
                     box_w * frame.width() as f32,
                     box_h * frame.height() as f32,
                     crate::pipeline::sharpness_score(&frame),
                     crate::pipeline::face_brightness(&frame, face.bbox),
-                    liveness_started.elapsed().as_secs_f64() * 1000.0,
+                    depth_elapsed.as_secs_f64() * 1000.0,
                 );
             }
-            liveness = liveness_result;
-            match &liveness {
-                None | Some(LivenessOutcome::Pass { .. }) => {}
-                Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. }) => {
-                    let unavailable = matches!(liveness, Some(LivenessOutcome::Unavailable { .. }));
-                    let (auth_outcome, timing_outcome, code) = if unavailable {
-                        (
-                            AuthOutcome::LivenessError,
-                            crate::timing::TimingOutcome::LivenessError,
-                            doormand::liveness::LIVENESS_UNAVAILABLE_CODE,
-                        )
-                    } else {
-                        (
-                            AuthOutcome::LivenessRejected,
-                            crate::timing::TimingOutcome::LivenessRejected,
-                            doormand::liveness::LIVENESS_REJECTED_CODE,
-                        )
-                    };
-                    timing.outcome = timing_outcome;
-                    warn!(
-                        "Authentication failed for {}: liveness gate [{}]: {:?}",
-                        username, code, liveness
-                    );
-                    log_auth_failure_attempt(
-                        state,
-                        &attempt_id,
-                        username,
-                        Outcome::SuspectedSpoof,
-                        Some(false),
-                        code,
-                        AttemptConditions {
-                            face_area_frac: first_quality_face_area_frac,
-                            ..AttemptConditions::default()
-                        },
-                    );
-                    log_auth_capture_pack(
-                        state,
-                        &attempt_id,
-                        Some(username),
-                        Outcome::SuspectedSpoof,
-                        GtSource::PamFaceAuth,
-                        raw_face_frames,
-                    );
-                    return AuthDecision {
-                        frames_seen,
-                        liveness,
-                        ..AuthDecision::bare(auth_outcome)
-                    };
+            if let Some(outcome) = frame_result {
+                if let LivenessProgress::Decided(verdict) = agg.push(outcome) {
+                    timing.liveness_passed = Some(verdict.is_pass());
+                    timing.liveness_relief = verdict.relief();
+                    liveness = Some(verdict);
                 }
+            }
+            if matches!(
+                liveness,
+                Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. })
+            ) {
+                return liveness_failure(
+                    state,
+                    &mut timing,
+                    &attempt_id,
+                    username,
+                    first_quality_face_area_frac,
+                    raw_face_frames,
+                    frames_seen,
+                    liveness,
+                );
             }
         }
         let embed_started = std::time::Instant::now();
@@ -469,7 +447,10 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
                         &stored_embeddings,
                     );
                     debug!("Frame {}: template score {:.4}", i, score);
-                    sequential_step = decider.push(score, liveness_state(&liveness));
+                    sequential_step = decider.push(
+                        score,
+                        liveness_state(liveness_agg.is_some(), &liveness),
+                    );
                 }
                 passed_embeddings.push(embedding);
             }
@@ -544,6 +525,24 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
             liveness,
             ..AuthDecision::bare(AuthOutcome::NoClearFace)
         };
+    }
+
+    // The authentication timeout ended the run before the liveness aggregate
+    // was decided: fail closed, as unavailable.
+    if liveness_agg.is_some() && liveness.is_none() {
+        let undecided = Some(LivenessOutcome::Unavailable {
+            reason: "liveness undecided before the authentication timeout".to_string(),
+        });
+        return liveness_failure(
+            state,
+            &mut timing,
+            &attempt_id,
+            username,
+            first_quality_face_area_frac,
+            raw_face_frames,
+            frames_seen,
+            undecided,
+        );
     }
 
     let decision_started = std::time::Instant::now();
@@ -681,12 +680,73 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
 
 /// Liveness as the sequential decider sees it. A rejected or unavailable check
 /// ends the run before any frame is scored, so only pass or disabled reach it.
-fn liveness_state(liveness: &Option<LivenessOutcome>) -> LivenessState {
-    match liveness {
-        None | Some(LivenessOutcome::Pass { .. }) => LivenessState::Passed,
-        Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. }) => {
+fn liveness_state(enabled: bool, verdict: &Option<LivenessOutcome>) -> LivenessState {
+    match (enabled, verdict) {
+        (false, _) | (true, Some(LivenessOutcome::Pass { .. })) => LivenessState::Passed,
+        (true, None) => LivenessState::Pending,
+        (true, Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. })) => {
             LivenessState::Failed
         }
+    }
+}
+
+/// Terminal liveness failure (rejected, unavailable or undecided): record the
+/// attempt and build the decision. `liveness` is the final `Fail` or
+/// `Unavailable` verdict.
+#[allow(clippy::too_many_arguments)]
+fn liveness_failure(
+    state: &DaemonState,
+    timing: &mut crate::timing::AttemptTiming,
+    attempt_id: &str,
+    username: &str,
+    face_area_frac: Option<f32>,
+    raw_face_frames: Vec<dataset::CaptureFrameImage>,
+    frames_seen: usize,
+    liveness: Option<LivenessOutcome>,
+) -> AuthDecision {
+    let (auth_outcome, timing_outcome, code) =
+        if matches!(liveness, Some(LivenessOutcome::Unavailable { .. })) {
+            (
+                AuthOutcome::LivenessError,
+                crate::timing::TimingOutcome::LivenessError,
+                doormand::liveness::LIVENESS_UNAVAILABLE_CODE,
+            )
+        } else {
+            (
+                AuthOutcome::LivenessRejected,
+                crate::timing::TimingOutcome::LivenessRejected,
+                doormand::liveness::LIVENESS_REJECTED_CODE,
+            )
+        };
+    timing.outcome = timing_outcome;
+    warn!(
+        "Authentication failed for {}: liveness gate [{}]: {:?}",
+        username, code, liveness
+    );
+    log_auth_failure_attempt(
+        state,
+        attempt_id,
+        username,
+        Outcome::SuspectedSpoof,
+        Some(false),
+        code,
+        AttemptConditions {
+            face_area_frac,
+            ..AttemptConditions::default()
+        },
+    );
+    log_auth_capture_pack(
+        state,
+        attempt_id,
+        Some(username),
+        Outcome::SuspectedSpoof,
+        GtSource::PamFaceAuth,
+        raw_face_frames,
+    );
+    AuthDecision {
+        frames_seen,
+        liveness,
+        ..AuthDecision::bare(auth_outcome)
     }
 }
 
