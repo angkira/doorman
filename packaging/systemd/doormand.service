@@ -68,11 +68,11 @@ RuntimeDirectory=doorman
 ReadWritePaths=/var/lib/doorman
 
 # Camera device access. ProtectSystem=strict makes /dev mostly read-only and
-# DevicePolicy=closed denies devices by default; explicitly allow video nodes.
+# DevicePolicy=closed denies devices by default; explicitly allow video nodes only.
+# No GPU nodes (/dev/dri, /dev/kfd, /dev/nvidia*): inference is CPU. See docs/systemd-hardening.md.
 DevicePolicy=closed
 DeviceAllow=/dev/video0 rw
 DeviceAllow=char-video4linux rw
-DeviceAllow=/dev/dri rw
 
 # Resource ceilings — single-camera CPU inference is light.
 MemoryMax=1G
