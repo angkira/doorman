@@ -51,3 +51,15 @@ Done (commits after `a0edca4`, tests in each commit):
 CI on PR #13 @81a9686 (owner-verified): `check`, `ort-typecheck`, `deb` pass — so the default-feature build compiles and tests on GitHub. `shellcheck` failed (selected `.plans/HOST-FACTS.md` as a script) and `python` failed (numpy missing) — both fixed in round 3.
 
 Still unverified: all host checklists; ORT linkage on the running daemon (owner: `sudo grep -ci onnx /proc/$(pidof doormand)/maps`).
+
+## Round 3 (owner verification, `ROUND3.md`)
+Owner decision: stays on one branch / PR #13 (ROUND3 task 8 not applied).
+- Task 1: CI shellcheck selects tracked `*.sh` + shebang files, excluding `.plans/`, `docs/`, `*.md`.
+- Task 2: python CI job installs numpy; `test_rnd_depth_fusion_experiment.py` uses `importorskip`.
+- Task 3: this file corrected (pr/* branches remain — proxy refuses deletion; models_dir exists).
+- Task 4: `[liveness] mean_mode_depth_samples` (default 0 = unchanged) depth-checks K evenly sampled frames in mean mode; swap tests in `daemon/src/ipc.rs`. Cost ≈ K × per-frame depth latency — measure with `doorman-bench latency` (command in `docs/decision-and-liveness.md`). Residual: a single photo frame no sample lands on is still averaged in.
+- Task 5: `tests/test_packaging_gpu_free.py` (service + postinst).
+- Task 6 (`docs/host-facts-answers.md` "Round 3"): `backend="ort", device="cpu"` ⇒ in-process ORT CPU on `depth_anything_v2_small_fp32.onnx`; `depth.ncnn.*` only with `backend="ncnn"`, which runs Vulkan even with `--device cpu` (`--device` overrides only `ml.device`). Which one the host runs: check the `Using ML backend:` startup line. Shipped configs are GPU-free (test `shared/tests/shipped_configs_no_gpu.rs`). **Fixed**: `doorman install` default `--auto` used to pick ROCm/CUDA when present; now CPU on Linux, GPU only via `--rocm`/`--cuda`/`--ncnn`.
+- Task 7: root `MODELS.md` licence table + used/legacy table. Flag: the deb ships `edgeface_s.onnx` without a verified redistribution licence (likely CC BY-NC-SA; HF card unreadable here) — owner decides. `minifasnet_v2se_int8.onnx` is packaged but unused.
+
+Owner checks: `journalctl -u doormand | grep "Using ML backend"`; `sudo grep -ci onnx /proc/$(pidof doormand)/maps`.
