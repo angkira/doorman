@@ -336,10 +336,14 @@ mod tests {
 
     #[test]
     fn policy_table() {
-        let mut trusted = IpcConfig::default();
-        trusted.trusted_uids = vec![2000];
-        let mut admin = IpcConfig::default();
-        admin.admin_uids = vec![3000];
+        let trusted = IpcConfig {
+            trusted_uids: vec![2000],
+            ..IpcConfig::default()
+        };
+        let admin = IpcConfig {
+            admin_uids: vec![3000],
+            ..IpcConfig::default()
+        };
         let def = IpcConfig::default();
         let allow = Decision::Allow;
         let deny_a = Decision::Denied {
