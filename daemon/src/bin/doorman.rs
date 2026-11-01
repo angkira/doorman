@@ -834,6 +834,8 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
         &sockets.command,
         &Request::Authenticate {
             username: username.to_string(),
+            service: None,
+            tty: None,
         },
         // Daemon captures AUTH_FRAMES frames; allow a little headroom over DEFAULT.
         Duration::from_secs(15),

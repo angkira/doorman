@@ -82,7 +82,7 @@ pub enum CameraSource {
 pub fn spawn_camera_producer(
     source: CameraSource,
     config: Arc<Config>,
-    latest_frame_tx: watch::Sender<Option<Arc<image::DynamicImage>>>,
+    latest_frame_tx: watch::Sender<Option<RawFrame>>,
     frame_tx: mpsc::Sender<RawFrame>,
     // Capture gate: when `false` the LIVE camera is RELEASED (V4L2 device closed,
     // LED off) and the thread idles at ~0 CPU; when `true` it (re)opens and
@@ -107,7 +107,7 @@ pub fn spawn_camera_producer(
 fn spawn_camera_producer_with(
     source: CameraSource,
     config: Arc<Config>,
-    latest_frame_tx: watch::Sender<Option<Arc<image::DynamicImage>>>,
+    latest_frame_tx: watch::Sender<Option<RawFrame>>,
     frame_tx: mpsc::Sender<RawFrame>,
     capture_active: watch::Receiver<bool>,
     mut open_camera: impl FnMut() -> anyhow::Result<Camera> + Send + 'static,
@@ -247,14 +247,15 @@ fn spawn_camera_producer_with(
             sequence += 1;
             let image = Arc::new(frame);
 
-            // Publish latest frame for IPC consumers (ignore if no receivers).
-            let _ = latest_frame_tx.send(Some(image.clone()));
-
             let raw_frame = RawFrame {
                 image,
                 timestamp: std::time::Instant::now(),
                 sequence,
             };
+
+            // Publish latest frame (with its capture time) for IPC consumers
+            // (ignore if no receivers).
+            let _ = latest_frame_tx.send(Some(raw_frame.clone()));
 
             // Non-blocking send to the pipeline (drop frame if channel full).
             if let Err(mpsc::error::TrySendError::Closed(_)) = frame_tx.try_send(raw_frame) {
@@ -278,7 +279,7 @@ mod tests {
 
     struct Harness {
         rx: mpsc::Receiver<RawFrame>,
-        latest: watch::Receiver<Option<Arc<image::DynamicImage>>>,
+        latest: watch::Receiver<Option<RawFrame>>,
         gate: watch::Sender<bool>,
         opens: Arc<AtomicU32>,
     }

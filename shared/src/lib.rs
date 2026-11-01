@@ -12,8 +12,16 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    /// Authenticate a user with face recognition
-    Authenticate { username: String },
+    /// Authenticate a user with face recognition. `service` and `tty` are the
+    /// PAM_SERVICE / PAM_TTY hints of the PAM module; absent for old clients
+    /// and the CLI (additive: protocol_version stays 1).
+    Authenticate {
+        username: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tty: Option<String>,
+    },
     /// Enroll a new user. With `add`, the captured templates are appended to the
     /// user's existing ones without evicting any (absent = false: old clients).
     Enroll {
@@ -252,7 +260,9 @@ mod tests {
         let env: RequestEnvelope =
             serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
         assert_eq!(env.protocol_version, None);
-        assert!(matches!(env.request, Request::Authenticate { ref username } if username == "bob"));
+        assert!(
+            matches!(env.request, Request::Authenticate { ref username, service: None, tty: None } if username == "bob")
+        );
     }
 
     #[test]
@@ -313,12 +323,35 @@ mod tests {
     fn new_envelope_stamps_version_and_keeps_flat_layout() {
         let json = serde_json::to_string(&RequestEnvelope::new(Request::Authenticate {
             username: "bob".into(),
+            service: None,
+            tty: None,
         }))
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["type"], "authenticate");
         assert_eq!(v["username"], "bob");
         assert_eq!(v["protocol_version"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn authenticate_service_and_tty_are_additive() {
+        let env: RequestEnvelope = serde_json::from_str(
+            r#"{"type":"authenticate","username":"bob","service":"sudo","tty":"/dev/pts/3","protocol_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            env.request,
+            Request::Authenticate { ref service, ref tty, .. }
+                if service.as_deref() == Some("sudo") && tty.as_deref() == Some("/dev/pts/3")
+        ));
+        // Without hints the serialized form is the old wire format.
+        let json = serde_json::to_string(&Request::Authenticate {
+            username: "bob".into(),
+            service: None,
+            tty: None,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"type":"authenticate","username":"bob"}"#);
     }
 
     #[test]

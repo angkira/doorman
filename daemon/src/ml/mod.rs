@@ -123,13 +123,82 @@ impl MLPipeline {
         }
     }
 
+    /// Build a pipeline around an arbitrary backend (tests with a mock backend).
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: Arc<dyn MLBackend>, config: &Config) -> Self {
+        Self {
+            backend,
+            config: config.clone(),
+        }
+    }
+
+    /// Run one backend call on tokio's blocking pool instead of an async worker.
+    ///
+    /// ONNX inference is CPU-bound and the backend takes a std `Mutex` on its
+    /// session pool, so calling it directly from an async task can park a
+    /// runtime worker for the whole inference (and stall `Status` and every
+    /// other connection when several attempts overlap). The backend futures
+    /// never await real I/O, so `block_on` on the blocking thread is safe (same
+    /// reasoning as `detect_face_sync`). The image is cloned: the blocking task
+    /// must be `'static`.
+    async fn run_blocking<T, F>(&self, image: &DynamicImage, call: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn MLBackend, &DynamicImage) -> Result<T> + Send + 'static,
+    {
+        let backend = self.backend.clone();
+        let image = image.clone();
+        tokio::task::spawn_blocking(move || call(backend.as_ref(), &image))
+            .await
+            .map_err(|e| anyhow::anyhow!("inference task failed: {e}"))?
+    }
+
+    async fn detect_blocking(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
+        self.run_blocking(image, |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.detect_face(image))
+        })
+        .await
+    }
+
+    async fn depth_relief_blocking(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<Option<f32>> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.depth_relief(image, &face))
+        })
+        .await
+    }
+
+    async fn embed_blocking(&self, image: &DynamicImage, face: &backend::Face) -> Result<Vec<f32>> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.extract_embedding(image, &face))
+        })
+        .await
+    }
+
+    async fn check_liveness_blocking(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<bool> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.check_liveness(image, &face))
+        })
+        .await
+    }
+
     /// Full processing: detection + liveness + embedding (for recognition)
     pub async fn process_frame(
         &self,
         image: &DynamicImage,
     ) -> Result<Option<(backend::Face, Vec<f32>)>> {
         // Stage 1: Detect (on full-size image, detector will resize internally)
-        let face = match self.backend.detect_face(image).await? {
+        let face = match self.detect_blocking(image).await? {
             Some(f) => f,
             None => return Ok(None),
         };
@@ -147,7 +216,7 @@ impl MLPipeline {
         // rejected genuine faces and was non-fatal. The depth-relief gate is the
         // real anti-spoofing check.
         if self.config.authentication.liveness_enabled {
-            match self.backend.depth_relief(image, &face).await {
+            match self.depth_relief_blocking(image, &face).await {
                 Ok(Some(relief)) => {
                     let threshold = self.config.authentication.liveness_depth_threshold;
                     if relief < threshold {
@@ -187,7 +256,7 @@ impl MLPipeline {
         }
 
         // Stage 3: Embedding — aligns via landmarks, then ArcFace 512-d.
-        let embedding = self.backend.extract_embedding(image, &face).await?;
+        let embedding = self.embed_blocking(image, &face).await?;
 
         Ok(Some((face, embedding)))
     }
@@ -207,7 +276,7 @@ impl MLPipeline {
         if !self.config.authentication.liveness_enabled {
             return None;
         }
-        Some(match self.backend.depth_relief(image, face).await {
+        Some(match self.depth_relief_blocking(image, face).await {
             Ok(Some(relief)) => {
                 let t = self.config.authentication.liveness_depth_threshold;
                 if relief < t {
@@ -254,7 +323,7 @@ impl MLPipeline {
     /// Fast detection only - no embedding extraction (for real-time preview)
     /// Returns face bounding box without embedding (~2x faster)
     pub async fn detect_only(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
-        self.backend.detect_face(image).await
+        self.detect_blocking(image).await
     }
 
     pub fn models_loaded(&self) -> bool {
@@ -267,7 +336,7 @@ impl MLPipeline {
 
     /// Detect face in image (for preview/debugging)
     pub async fn detect_face(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
-        self.backend.detect_face(image).await
+        self.detect_blocking(image).await
     }
 
     /// Extract embedding from detected face (for preview/debugging)
@@ -276,13 +345,13 @@ impl MLPipeline {
         image: &DynamicImage,
         face: &backend::Face,
     ) -> Result<Vec<f32>> {
-        self.backend.extract_embedding(image, face).await
+        self.embed_blocking(image, face).await
     }
 
     /// Run the liveness check on a detected face (for preview/debugging/tests).
     /// Returns `true` if the face is considered real (or if liveness is skipped).
     pub async fn check_liveness(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
-        self.backend.check_liveness(image, face).await
+        self.check_liveness_blocking(image, face).await
     }
 
     /// Warmup models by running dummy inference

@@ -28,7 +28,7 @@ pub struct DaemonState {
     /// solely by that thread and is never shared across threads; consumers
     /// (IPC enroll/auth/status/detect) read frames from this watch channel
     /// instead of touching the camera directly.
-    pub latest_frame: tokio::sync::watch::Receiver<Option<Arc<image::DynamicImage>>>,
+    pub latest_frame: tokio::sync::watch::Receiver<Option<pipeline::RawFrame>>,
     pub ml_pipeline: Arc<ml::MLPipeline>,
     pub storage: Arc<RwLock<storage::Storage>>,
     pub start_time: std::time::Instant,
@@ -41,6 +41,11 @@ pub struct DaemonState {
     /// lock-gated (`--user`/preview/dev mode). `WaitForMatch` only attempts
     /// recognition while this is `true`.
     pub armed: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Raw `LockedHint` of the tracked session. `None` when there is no lock
+    /// supervisor or it found no session; the sudo profile then fails closed.
+    pub locked: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Per-user suspension of the sudo profile (`[pam.sudo]`).
+    pub sudo_guard: Arc<doormand::sudo_policy::SudoGuard>,
     /// On-demand camera capture leases. IPC operations that need live frames
     /// (enroll, `test`/PAM auth) increment this; the camera gate keeps the camera ON
     /// while it is > 0, so capture works even when the screen is unlocked and the
@@ -71,6 +76,16 @@ impl Drop for CaptureLease {
 }
 
 impl DaemonState {
+    /// What the lock supervisor knows about the tracked session.
+    pub fn presence(&self) -> doormand::sudo_policy::Presence {
+        use doormand::sudo_policy::Presence;
+        match &self.locked {
+            None => Presence::Unavailable,
+            Some(rx) if *rx.borrow() => Presence::Locked,
+            Some(_) => Presence::Unlocked,
+        }
+    }
+
     /// Acquire an on-demand capture lease and wait (up to `timeout`) for the camera
     /// to produce a live frame. This turns the camera ON via the gate even when the
     /// screen is unlocked (enroll/preview/test). Returns a guard that releases the
@@ -339,8 +354,13 @@ async fn main() -> Result<()> {
     // logs ("Successfully registered ROCMExecutionProvider" / CPU fallback) are
     // visible — otherwise an operator can't tell a GPU run from a silent CPU
     // fallback. Still overridable via RUST_LOG.
-    let log_level = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| format!("doormand={},ort=info", config.daemon.log_level));
+    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        format!(
+            "doormand={},ort=info,{}=info",
+            config.daemon.log_level,
+            doormand::sudo_policy::AUDIT_TARGET
+        )
+    });
 
     tracing_subscriber::registry()
         .with(
@@ -426,7 +446,7 @@ async fn main() -> Result<()> {
     // frame to `latest_frame_rx` (for IPC consumers) and forwards `RawFrame`s to
     // the pipeline via `camera_rx`.
     let (latest_frame_tx, latest_frame_rx) =
-        tokio::sync::watch::channel::<Option<Arc<image::DynamicImage>>>(None);
+        tokio::sync::watch::channel::<Option<pipeline::RawFrame>>(None);
     let (camera_tx, camera_rx) = tokio::sync::mpsc::channel::<pipeline::RawFrame>(30);
     // Camera capture gate. The producer opens/holds the live camera only while this
     // is `true`. Initial value = `always_track` (super-security: camera on from boot);
@@ -485,6 +505,14 @@ async fn main() -> Result<()> {
         frame_broadcaster: frame_broadcaster.clone(),
         system_locked: Arc::new(RwLock::new(initial_locked)),
         armed: lock_sup.as_ref().map(|sup| sup.armed_rx.clone()),
+        locked: lock_sup
+            .as_ref()
+            .filter(|sup| sup.unlocker.is_some())
+            .map(|sup| sup.locked_rx.clone()),
+        sudo_guard: Arc::new(doormand::sudo_policy::SudoGuard::new(
+            config.pam.sudo.max_failures,
+            std::time::Duration::from_secs(config.pam.sudo.suspend_secs),
+        )),
         capture_requests: capture_requests.clone(),
     };
 
