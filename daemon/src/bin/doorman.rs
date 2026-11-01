@@ -522,7 +522,7 @@ fn cmd_dataset_purge(
         );
         return Ok(());
     }
-    let removed = doormand::dataset_purge::delete_entries(&entries)
+    let removed = doormand::dataset_purge::delete_entries(&dataset_dir, &entries)
         .map_err(|e| CliError::new(format!("delete failed: {e}")))?;
     println!(
         "deleted {removed} entries older than {days} days from {}",
