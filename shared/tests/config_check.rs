@@ -58,3 +58,17 @@ fn config_reference_doc_is_up_to_date() {
         "docs/CONFIG.md is stale; run: doorman config dump-defaults > docs/CONFIG.md"
     );
 }
+
+#[test]
+fn removed_dataset_key_is_reported_as_deprecated_only() {
+    let report = check_str(&fixture("deprecated_keys.toml")).expect("still valid");
+    // Reported once, as deprecated; not additionally as unknown.
+    assert!(report.unknown_keys.is_empty(), "{:?}", report.unknown_keys);
+    assert_eq!(report.deprecated_keys.len(), 1);
+    let (key, hint) = &report.deprecated_keys[0];
+    assert_eq!(key, "dataset.raw_face_frame_bundle_size");
+    assert!(hint.contains("raw_frame_bundle_size"), "{hint}");
+    assert!(hint.contains("ignored"), "{hint}");
+    // The key it points to stays valid.
+    assert_eq!(report.config.dataset.raw_frame_bundle_size, 5);
+}

@@ -211,3 +211,6 @@ see the comments in `packaging/doorman.toml.example`).
   files yourself with `sudo doorman dataset purge [--older-than DAYS] [--dry-run]`
   (root only; it deletes `attempts-*.jsonl`, `labels-*.jsonl` and
   `captures/<day>/` entries whose UTC day is older than the cutoff).
+* `dataset.raw_face_frame_bundle_size` was removed (commit 7c511d9) and has no
+  effect. `doorman config check` reports it as deprecated (exit 2); delete it
+  from the file. See `dataset.raw_frame_bundle_size` for the remaining cap.

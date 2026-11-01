@@ -8,9 +8,15 @@
 use crate::config::{Config, ConfigError, CONFIG_SCHEMA_VERSION};
 use std::collections::BTreeMap;
 
-/// Keys that are still read but replaced by another key: `(dotted old key, hint)`.
-/// Empty at schema version 1; add an entry when a key is renamed or removed.
-pub const DEPRECATED_KEYS: &[(&str, &str)] = &[];
+/// Keys that were renamed or removed and are no longer read: `(dotted old key, hint)`.
+/// Add an entry when a key is renamed or removed. Such a key is reported once, as
+/// deprecated (not additionally as unknown).
+pub const DEPRECATED_KEYS: &[(&str, &str)] = &[(
+    "dataset.raw_face_frame_bundle_size",
+    "removed in 7c511d9 and ignored: every detector-positive auth frame is captured and \
+     capture packs are bounded by dataset.max_capture_packs_per_day; the remaining \
+     generic cap is dataset.raw_frame_bundle_size. Delete the key",
+)];
 
 /// Result of checking a config file that parsed and validated.
 #[derive(Debug)]
@@ -82,6 +88,7 @@ pub fn check_str(content: &str) -> Result<CheckReport, ConfigError> {
     let known = known_keys();
     let mut unknown_keys = Vec::new();
     unknown_paths(&raw, "", &known, &mut unknown_keys);
+    unknown_keys.retain(|path| !DEPRECATED_KEYS.iter().any(|(old, _)| old == path));
     let deprecated_keys = DEPRECATED_KEYS
         .iter()
         .filter(|(old, _)| path_present(&raw, old))
@@ -170,6 +177,9 @@ const MIGRATION_NOTES: &str = "
   files yourself with `sudo doorman dataset purge [--older-than DAYS] [--dry-run]`
   (root only; it deletes `attempts-*.jsonl`, `labels-*.jsonl` and
   `captures/<day>/` entries whose UTC day is older than the cutoff).
+* `dataset.raw_face_frame_bundle_size` was removed (commit 7c511d9) and has no
+  effect. `doorman config check` reports it as deprecated (exit 2); delete it
+  from the file. See `dataset.raw_frame_bundle_size` for the remaining cap.
 ";
 
 /// The generated docs/CONFIG.md body: every section and key with its default.
