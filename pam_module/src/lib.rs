@@ -23,12 +23,13 @@
 //! ------------------
 //! * match              -> `PAM_SUCCESS`        (login proceeds)
 //! * no match           -> `PAM_AUTH_ERR`       (try next module / password)
+//! * denied / rate-limited / protocol mismatch -> `PAM_AUTHINFO_UNAVAIL` (logged to syslog)
 //! * daemon unreachable -> `PAM_AUTHINFO_UNAVAIL` (auth source down; fall through)
 //! * timeout / IO error -> `PAM_AUTHINFO_UNAVAIL` (never block the greeter)
 //! * root / no username -> `PAM_AUTHINFO_UNAVAIL` (let password handle it)
 #![cfg(target_os = "linux")]
 
-use doorman_shared::{Request, Response, AUTH_TIMEOUT_SECS, SOCKET_PATH};
+use doorman_shared::{Request, RequestEnvelope, Response, AUTH_TIMEOUT_SECS, SOCKET_PATH};
 use std::ffi::CStr;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -59,8 +60,25 @@ enum AuthOutcome {
     Matched,
     /// Daemon replied: face not matched (or user not enrolled).
     NotMatched,
+    /// Daemon refused to decide (peer policy denied, or rate limited). Fall
+    /// through to the next PAM module like an unreachable daemon.
+    Refused,
     /// Could not reach / get a usable reply from the daemon.
     Unavailable,
+}
+
+/// Log to syslog (AUTHPRIV). The message is a fixed format string argument so
+/// daemon-supplied text can never be interpreted as a format string.
+fn log_syslog(msg: &str) {
+    if let Ok(c) = std::ffi::CString::new(msg.replace('\0', " ")) {
+        unsafe {
+            libc::syslog(
+                libc::LOG_AUTHPRIV | libc::LOG_WARNING,
+                c"%s".as_ptr(),
+                c.as_ptr(),
+            )
+        };
+    }
 }
 
 /// Connect to the daemon and run one authenticate exchange.
@@ -82,9 +100,9 @@ fn authenticate_ipc(username: &str) -> AuthOutcome {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(AUTH_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 
-    let request = Request::Authenticate {
+    let request = RequestEnvelope::new(Request::Authenticate {
         username: username.to_string(),
-    };
+    });
     let request_json = match serde_json::to_string(&request) {
         Ok(j) => j,
         Err(_) => return AuthOutcome::Unavailable,
@@ -103,6 +121,20 @@ fn authenticate_ipc(username: &str) -> AuthOutcome {
     match serde_json::from_str::<Response>(&response_line) {
         Ok(Response::Success { .. }) => AuthOutcome::Matched,
         Ok(Response::Failure { .. }) => AuthOutcome::NotMatched,
+        Ok(Response::Denied { reason }) => {
+            log_syslog(&format!("pam_doorman: daemon denied request: {reason}"));
+            AuthOutcome::Refused
+        }
+        Ok(Response::RateLimited { retry_after_s }) => {
+            log_syslog(&format!(
+                "pam_doorman: daemon rate limited, retry in {retry_after_s}s"
+            ));
+            AuthOutcome::Refused
+        }
+        Ok(Response::UnsupportedProtocol { reason, .. }) => {
+            log_syslog(&format!("pam_doorman: daemon protocol mismatch: {reason}"));
+            AuthOutcome::Refused
+        }
         // Progress or anything unexpected: treat as "couldn't decide".
         Ok(_) => AuthOutcome::Unavailable,
         Err(_) => AuthOutcome::Unavailable,
@@ -159,7 +191,7 @@ pub extern "C" fn pam_sm_authenticate(
         match authenticate_with_deadline(username) {
             AuthOutcome::Matched => PAM_SUCCESS,
             AuthOutcome::NotMatched => PAM_AUTH_ERR,
-            AuthOutcome::Unavailable => PAM_AUTHINFO_UNAVAIL,
+            AuthOutcome::Refused | AuthOutcome::Unavailable => PAM_AUTHINFO_UNAVAIL,
         }
     }
 }

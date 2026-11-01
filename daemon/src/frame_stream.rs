@@ -1,8 +1,10 @@
 use anyhow::Result;
+use doorman_shared::IpcConfig;
+use doormand::ipc_policy;
 use image::DynamicImage;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -63,24 +65,27 @@ impl FrameStreamBroadcaster {
 pub async fn run_frame_server(
     socket_path: String,
     broadcaster: Arc<FrameStreamBroadcaster>,
+    ipc: IpcConfig,
 ) -> Result<()> {
-    // Remove existing socket if it exists
-    let _ = std::fs::remove_file(&socket_path);
-
-    let listener = UnixListener::bind(&socket_path)?;
+    // 0600 (or 0660 + group per [ipc] stream_socket_group): the stream carries face data.
+    let listener = ipc_policy::bind_stream_socket(&socket_path, &ipc)?;
     info!("Frame stream server listening on {}", socket_path);
-
-    // Set permissions so user can connect
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o666);
-        std::fs::set_permissions(&socket_path, perms)?;
-    }
 
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
+                // Defense in depth on top of the socket mode; fail closed.
+                match ipc_policy::peer_from_stream(&stream) {
+                    Ok(peer) if ipc_policy::stream_peer_allowed(&peer, &ipc) => {}
+                    Ok(peer) => {
+                        warn!(peer_uid = peer.uid, peer_pid = ?peer.pid, "dropped unauthorized frame stream client");
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("dropped frame stream client: {e:#}");
+                        continue;
+                    }
+                }
                 let broadcaster = broadcaster.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_frame_client(stream, broadcaster).await {

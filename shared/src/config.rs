@@ -43,6 +43,9 @@ pub struct Config {
 
     #[serde(default)]
     pub dataset: DatasetConfig,
+
+    #[serde(default)]
+    pub ipc: IpcConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +303,48 @@ impl Default for RecognitionConfig {
             hysteresis_frames: default_hysteresis_frames(),
             min_sharpness: default_min_sharpness(),
             min_face_area_frac: default_min_face_area_frac(),
+        }
+    }
+}
+
+/// Default per-uid Authenticate budget per sliding minute.
+pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
+
+/// IPC peer-credential policy (`[ipc]`). See docs/ipc-security.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpcConfig {
+    /// Extra uids allowed to Authenticate for ANY user (besides root and the
+    /// target user themself). Default empty.
+    #[serde(default)]
+    pub trusted_uids: Vec<u32>,
+
+    /// Extra uids allowed to run admin operations (Enroll, RemoveUser, ListUsers,
+    /// DetectAndRecognize, Shutdown, ...) besides root. Default empty.
+    #[serde(default)]
+    pub admin_uids: Vec<u32>,
+
+    /// Per-peer-uid Authenticate attempts allowed per sliding 60 s window.
+    /// `0` disables rate limiting.
+    #[serde(default = "default_max_auth_attempts_per_minute")]
+    pub max_auth_attempts_per_minute: u32,
+
+    /// If set, the frame/debug stream sockets are chowned to this group and made
+    /// 0660; otherwise they are 0600 (owner/root only).
+    #[serde(default)]
+    pub stream_socket_group: Option<String>,
+}
+
+fn default_max_auth_attempts_per_minute() -> u32 {
+    DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE
+}
+
+impl Default for IpcConfig {
+    fn default() -> Self {
+        Self {
+            trusted_uids: Vec::new(),
+            admin_uids: Vec::new(),
+            max_auth_attempts_per_minute: DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE,
+            stream_socket_group: None,
         }
     }
 }
@@ -659,6 +704,24 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ipc_section_defaults_when_absent_and_parses_when_present() {
+        let cfg: super::Config = toml::from_str("").unwrap();
+        assert!(cfg.ipc.trusted_uids.is_empty());
+        assert!(cfg.ipc.admin_uids.is_empty());
+        assert_eq!(cfg.ipc.max_auth_attempts_per_minute, 20);
+        assert_eq!(cfg.ipc.stream_socket_group, None);
+
+        let cfg: super::Config = toml::from_str(
+            "[ipc]\ntrusted_uids=[1000]\nadmin_uids=[1001]\nmax_auth_attempts_per_minute=5\nstream_socket_group=\"doorman\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.ipc.trusted_uids, vec![1000]);
+        assert_eq!(cfg.ipc.admin_uids, vec![1001]);
+        assert_eq!(cfg.ipc.max_auth_attempts_per_minute, 5);
+        assert_eq!(cfg.ipc.stream_socket_group.as_deref(), Some("doorman"));
+    }
+
     use super::*;
 
     #[test]
