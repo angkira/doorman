@@ -116,7 +116,10 @@ impl MLPipeline {
     }
 
     /// Full processing: detection + liveness + embedding (for recognition)
-    pub async fn process_frame(&self, image: &DynamicImage) -> Result<Option<(backend::Face, Vec<f32>)>> {
+    pub async fn process_frame(
+        &self,
+        image: &DynamicImage,
+    ) -> Result<Option<(backend::Face, Vec<f32>)>> {
         // Stage 1: Detect (on full-size image, detector will resize internally)
         let face = match self.backend.detect_face(image).await? {
             Some(f) => f,
@@ -148,7 +151,8 @@ impl MLPipeline {
                     }
                     tracing::debug!(
                         "Liveness passed (depth gate): relief={:.4} >= threshold={:.4}",
-                        relief, threshold
+                        relief,
+                        threshold
                     );
                 }
                 Ok(None) => {
@@ -163,7 +167,10 @@ impl MLPipeline {
                 }
                 Err(e) => {
                     // An inference error must not become a silent bypass.
-                    tracing::error!("Liveness depth check errored — rejecting frame (fail-safe): {}", e);
+                    tracing::error!(
+                        "Liveness depth check errored — rejecting frame (fail-safe): {}",
+                        e
+                    );
                     return Ok(None);
                 }
             }
@@ -197,12 +204,18 @@ impl MLPipeline {
                     );
                     Ok(false)
                 } else {
-                    tracing::debug!("Liveness passed (depth gate): relief={:.4} >= {:.4}", relief, t);
+                    tracing::debug!(
+                        "Liveness passed (depth gate): relief={:.4} >= {:.4}",
+                        relief,
+                        t
+                    );
                     Ok(true)
                 }
             }
             Ok(None) => {
-                tracing::error!("Liveness ENABLED but depth-PAD model not loaded — reject (fail-safe)");
+                tracing::error!(
+                    "Liveness ENABLED but depth-PAD model not loaded — reject (fail-safe)"
+                );
                 Ok(false)
             }
             Err(e) => {
@@ -242,11 +255,7 @@ impl MLPipeline {
 
     /// Run the liveness check on a detected face (for preview/debugging/tests).
     /// Returns `true` if the face is considered real (or if liveness is skipped).
-    pub async fn check_liveness(
-        &self,
-        image: &DynamicImage,
-        face: &backend::Face,
-    ) -> Result<bool> {
+    pub async fn check_liveness(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
         self.backend.check_liveness(image, face).await
     }
 
@@ -254,14 +263,14 @@ impl MLPipeline {
     /// This preloads and compiles models before processing real frames
     pub async fn warmup(&self) -> Result<()> {
         info!("Warming up models (preloading/compiling)...");
-        
+
         // Create a dummy 640x480 black image (typical camera resolution)
         let dummy_img = DynamicImage::new_rgb8(640, 480);
-        
+
         // Run detection warmup
         info!("  Warming up detector...");
         let _ = self.backend.detect_face(&dummy_img).await;
-        
+
         // Create dummy face for subsequent stages
         let dummy_face = backend::Face {
             bbox: (0.2, 0.2, 0.4, 0.5), // Normalized coords (x, y, w, h)
@@ -269,7 +278,7 @@ impl MLPipeline {
             frame_dimensions: (640, 480),
             landmarks: None,
         };
-        
+
         // Run liveness warmup
         info!("  Warming up liveness detector...");
         let _ = self.backend.check_liveness(&dummy_img, &dummy_face).await;
@@ -277,11 +286,14 @@ impl MLPipeline {
         // Run depth-PAD warmup (JIT-compiles the depth model on the GPU EP).
         info!("  Warming up depth-PAD model...");
         let _ = self.backend.depth_relief(&dummy_img, &dummy_face).await;
-        
+
         // Run embedding warmup
         info!("  Warming up face recognizer...");
-        let _ = self.backend.extract_embedding(&dummy_img, &dummy_face).await;
-        
+        let _ = self
+            .backend
+            .extract_embedding(&dummy_img, &dummy_face)
+            .await;
+
         info!("✓ Model warmup complete");
         Ok(())
     }

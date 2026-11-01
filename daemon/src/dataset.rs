@@ -155,7 +155,10 @@ pub fn gallery_spread_from_similarities(similarities: &[f32]) -> GallerySpreadSt
     if similarities.is_empty() {
         return GallerySpreadStats::default();
     }
-    let max = similarities.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let max = similarities
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
     let mean = similarities.iter().sum::<f32>() / similarities.len() as f32;
     GallerySpreadStats {
         nearest: max,
@@ -269,7 +272,10 @@ pub fn log_label_event(data_dir: &str, enabled: bool, event: &LabelEvent) {
         return;
     }
     match append_jsonl(&dataset_dir(data_dir), "labels", event) {
-        Ok(()) => debug!("dataset: logged label event for attempt {}", event.attempt_id),
+        Ok(()) => debug!(
+            "dataset: logged label event for attempt {}",
+            event.attempt_id
+        ),
         Err(e) => warn!("dataset: failed to log label event (non-fatal): {}", e),
     }
 }
@@ -375,8 +381,7 @@ fn write_capture_pack_inner(
     };
     let manifest_path = pack_dir.join("manifest.json");
     let mut manifest_file = create_private_file(&manifest_path)?;
-    serde_json::to_writer_pretty(&mut manifest_file, &manifest)
-        .map_err(std::io::Error::other)?;
+    serde_json::to_writer_pretty(&mut manifest_file, &manifest).map_err(std::io::Error::other)?;
     writeln!(manifest_file)?;
     #[cfg(unix)]
     {
@@ -641,10 +646,7 @@ mod tests {
 
     #[test]
     fn outcome_from_match_tracks_rejected_spoof_and_unknown() {
-        assert!(matches!(
-            outcome_from_match(false, None),
-            Outcome::Rejected
-        ));
+        assert!(matches!(outcome_from_match(false, None), Outcome::Rejected));
         assert!(matches!(
             outcome_from_match(true, Some(false)),
             Outcome::SuspectedSpoof
@@ -653,10 +655,7 @@ mod tests {
             outcome_from_match(true, Some(true)),
             Outcome::ProactiveUnlocked
         ));
-        assert!(matches!(
-            outcome_from_match(true, None),
-            Outcome::Unknown
-        ));
+        assert!(matches!(outcome_from_match(true, None), Outcome::Unknown));
     }
 
     #[test]

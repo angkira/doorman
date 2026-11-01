@@ -447,7 +447,11 @@ fn systemctl_state(unit: &str) -> (bool, bool) {
 // doctor
 // ---------------------------------------------------------------------------
 
-pub fn diagnose(ep_choice: EpChoice, pam_scope: PamScope, desktop_choice: DesktopChoice) -> Diagnosis {
+pub fn diagnose(
+    ep_choice: EpChoice,
+    pam_scope: PamScope,
+    desktop_choice: DesktopChoice,
+) -> Diagnosis {
     let os = read_file("/etc/os-release").unwrap_or_default();
     let (os_pretty, os_id, os_version) = parse_os_release(&os);
 
@@ -461,26 +465,19 @@ pub fn diagnose(ep_choice: EpChoice, pam_scope: PamScope, desktop_choice: Deskto
         || Path::new("/usr/lib/x86_64-linux-gnu/libexec/kscreenlocker_greet").exists();
     let has_gnome_screensaver = binary_on_path("gnome-screensaver");
     let has_swaylock = binary_on_path("swaylock");
-    let (pam_service, pam_service_note) =
-        pick_pam_service(
-            &desktop,
-            pam_scope,
-            has_kscreenlocker,
-            has_gnome_screensaver,
-            has_swaylock,
-        );
+    let (pam_service, pam_service_note) = pick_pam_service(
+        &desktop,
+        pam_scope,
+        has_kscreenlocker,
+        has_gnome_screensaver,
+        has_swaylock,
+    );
 
     let has_kfd = Path::new("/sys/class/kfd").exists() || binary_on_path("rocminfo");
     let rocm_so = rocm_so_path();
     let has_nvidia = binary_on_path("nvidia-smi");
     let is_macos = cfg!(target_os = "macos");
-    let (ep, ep_note) = pick_ep(
-        ep_choice,
-        has_kfd,
-        rocm_so.is_some(),
-        has_nvidia,
-        is_macos,
-    );
+    let (ep, ep_note) = pick_ep(ep_choice, has_kfd, rocm_so.is_some(), has_nvidia, is_macos);
 
     let (service_installed, service_active) = systemctl_state("doormand.service");
     let doormand_installed =
@@ -516,8 +513,25 @@ pub fn print_diagnosis(d: &Diagnosis) {
     let _ = writeln!(s, "doorman doctor — system diagnosis (read-only)\n");
 
     let _ = writeln!(s, " Platform");
-    row(&mut s, "os", &format!("{} ({} {})", nz(&d.os_pretty), nz(&d.os_id), nz(&d.os_version)));
-    row(&mut s, "init", if d.has_systemd { "systemd" } else { "NOT systemd (unsupported)" });
+    row(
+        &mut s,
+        "os",
+        &format!(
+            "{} ({} {})",
+            nz(&d.os_pretty),
+            nz(&d.os_id),
+            nz(&d.os_version)
+        ),
+    );
+    row(
+        &mut s,
+        "init",
+        if d.has_systemd {
+            "systemd"
+        } else {
+            "NOT systemd (unsupported)"
+        },
+    );
     row(&mut s, "desktop", &nz(&d.desktop));
 
     let _ = writeln!(s, "\n Auth / PAM target");
@@ -529,10 +543,22 @@ pub fn print_diagnosis(d: &Diagnosis) {
             None => format!("undetermined  ({})", d.pam_service_note),
         },
     );
-    row(&mut s, "pamtester", if d.has_pamtester { "available" } else { "MISSING (PAM install will refuse without it)" });
+    row(
+        &mut s,
+        "pamtester",
+        if d.has_pamtester {
+            "available"
+        } else {
+            "MISSING (PAM install will refuse without it)"
+        },
+    );
 
     let _ = writeln!(s, "\n Hardware / backend");
-    row(&mut s, "execution prov.", &format!("{}  ({})", d.ep.label(), d.ep_note));
+    row(
+        &mut s,
+        "execution prov.",
+        &format!("{}  ({})", d.ep.label(), d.ep_note),
+    );
     row(&mut s, "cargo feature", d.ep.cargo_feature());
     row(
         &mut s,
@@ -548,7 +574,11 @@ pub fn print_diagnosis(d: &Diagnosis) {
         &if d.cameras.is_empty() {
             "none (/dev/video* absent)".to_string()
         } else {
-            d.cameras.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            d.cameras
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         },
     );
 
@@ -556,15 +586,27 @@ pub fn print_diagnosis(d: &Diagnosis) {
     row(
         &mut s,
         "doormand binary",
-        if d.doormand_installed { "installed" } else { "not installed" },
+        if d.doormand_installed {
+            "installed"
+        } else {
+            "not installed"
+        },
     );
     row(
         &mut s,
         "service",
         &format!(
             "{} / {}",
-            if d.service_installed { "installed" } else { "not installed" },
-            if d.service_active { "active" } else { "inactive" }
+            if d.service_installed {
+                "installed"
+            } else {
+                "not installed"
+            },
+            if d.service_active {
+                "active"
+            } else {
+                "inactive"
+            }
         ),
     );
     row(
@@ -812,7 +854,9 @@ fn render_depthd_unit() -> String {
     let mut env = String::new();
     env.push_str("Environment=RUST_LOG=info\n");
     env.push_str("Environment=DOORMAN_DEPTH_EP=rocm\n");
-    env.push_str(&format!("Environment=DOORMAN_DEPTH_SOCKET={SYS_DEPTH_SOCKET}\n"));
+    env.push_str(&format!(
+        "Environment=DOORMAN_DEPTH_SOCKET={SYS_DEPTH_SOCKET}\n"
+    ));
     // Device selection is CONFIG-DRIVEN (same as the daemon unit): the sidecar
     // exports ROCR_VISIBLE_DEVICES from `ml.gpu_uuid` in doorman.toml. No hardcoded
     // index here — an index could bind an off-limits GPU.
@@ -960,15 +1004,21 @@ fn render_config(src: &str, ep: Ep, enable_proactive: bool) -> String {
                     out.push_str("# Bind ROCm to ONE GPU by its STABLE UUID (see `rocminfo` / `rocm-smi --showuniqueid`).\n");
                     out.push_str("# Empty = ROCm stays OFF and the daemon runs on CPU (so no card is ever auto-picked\n");
                     out.push_str("# by a fragile index). Fill in your intended GPU's UUID to enable ROCm on exactly it.\n");
-                    out.push_str("gpu_uuid = \"\"  # e.g. \"GPU-xxxxxxxxxxxxxxxx\" — set to enable ROCm\n");
+                    out.push_str(
+                        "gpu_uuid = \"\"  # e.g. \"GPU-xxxxxxxxxxxxxxxx\" — set to enable ROCm\n",
+                    );
                 }
                 if is_rocm && !has_hsa {
                     out.push_str("hsa_gfx_version = \"11.0.3\"  # HSA_OVERRIDE_GFX_VERSION (gfx1103 iGPU); adjust per GPU\n");
                 }
                 if is_ncnn && !has_vulkan {
-                    out.push_str("# ncnn/Vulkan device for the iGPU depth backend: a name substring from\n");
+                    out.push_str(
+                        "# ncnn/Vulkan device for the iGPU depth backend: a name substring from\n",
+                    );
                     out.push_str("# `vulkaninfo` (e.g. \"RADV PHOENIX\"). Empty = first INTEGRATED GPU (the code\n");
-                    out.push_str("# refuses the discrete dGPU). Only used with backend = \"ncnn\".\n");
+                    out.push_str(
+                        "# refuses the discrete dGPU). Only used with backend = \"ncnn\".\n",
+                    );
                     out.push_str("vulkan_device = \"\"  # e.g. \"RADV PHOENIX\"\n");
                 }
             } else {
@@ -1175,8 +1225,18 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         plan.push(Action::user(
             "Build static libncnn (Vulkan) for the iGPU depth backend (scripts/build_ncnn.sh)",
             &[
-                Box::leak(root.join("scripts/build_ncnn.sh").display().to_string().into_boxed_str()),
-                Box::leak(root.join(".ncnn-prefix").display().to_string().into_boxed_str()),
+                Box::leak(
+                    root.join("scripts/build_ncnn.sh")
+                        .display()
+                        .to_string()
+                        .into_boxed_str(),
+                ),
+                Box::leak(
+                    root.join(".ncnn-prefix")
+                        .display()
+                        .to_string()
+                        .into_boxed_str(),
+                ),
             ],
         ));
     }
@@ -1204,9 +1264,15 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
             argv.push("doorman-depthd");
         }
         let desc = if build_depthd {
-            format!("Build doormand+doorman+doorman-depthd for EP '{}' (feature {feature})", d.ep.label())
+            format!(
+                "Build doormand+doorman+doorman-depthd for EP '{}' (feature {feature})",
+                d.ep.label()
+            )
         } else {
-            format!("Build doormand+doorman for EP '{}' (feature {feature})", d.ep.label())
+            format!(
+                "Build doormand+doorman for EP '{}' (feature {feature})",
+                d.ep.label()
+            )
         };
         plan.push(Action::user(desc, &argv));
     }
@@ -1228,7 +1294,9 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     ));
     plan.push(Action::priv_(
         format!("Create state dir {STATE_DIR} owned by doorman"),
-        &["install", "-d", "-m", "0750", "-o", "doorman", "-g", "doorman", STATE_DIR, MODELS_DIR],
+        &[
+            "install", "-d", "-m", "0750", "-o", "doorman", "-g", "doorman", STATE_DIR, MODELS_DIR,
+        ],
     ));
     // MIOpen runtime-JIT cache + XDG cache home, owned by doorman and writable
     // under ProtectSystem=strict (both live under the StateDirectory). Without
@@ -1241,39 +1309,102 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
 
     plan.push(Action::priv_(
         format!("Install doormand -> {SYS_BIN}"),
-        &["install", "-m", "0755",
-          Box::leak(target.join("doormand").display().to_string().into_boxed_str()), SYS_BIN],
+        &[
+            "install",
+            "-m",
+            "0755",
+            Box::leak(
+                target
+                    .join("doormand")
+                    .display()
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+            SYS_BIN,
+        ],
     ));
     plan.push(Action::priv_(
         format!("Install doorman CLI -> {SYS_CLI}"),
-        &["install", "-m", "0755",
-          Box::leak(target.join("doorman").display().to_string().into_boxed_str()), SYS_CLI],
+        &[
+            "install",
+            "-m",
+            "0755",
+            Box::leak(
+                target
+                    .join("doorman")
+                    .display()
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+            SYS_CLI,
+        ],
     ));
     plan.push(Action::priv_(
         format!("Install doorman-preview GUI -> {SYS_PREVIEW} (so `doorman preview` works)"),
-        &["install", "-m", "0755",
-          Box::leak(target.join("doorman-preview").display().to_string().into_boxed_str()), SYS_PREVIEW],
+        &[
+            "install",
+            "-m",
+            "0755",
+            Box::leak(
+                target
+                    .join("doorman-preview")
+                    .display()
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+            SYS_PREVIEW,
+        ],
     ));
     for script in ["doorman-sway-lock", "doorman-sway-watch"] {
         plan.push(Action::priv_(
             format!("Install Sway adapter {script} -> {SYS_SWAY_ADAPTER_DIR}/{script}"),
-            &["install", "-m", "0755",
-              Box::leak(root.join("packaging/adapters/sway").join(script).display().to_string().into_boxed_str()),
-              Box::leak(format!("{SYS_SWAY_ADAPTER_DIR}/{script}").into_boxed_str())],
+            &[
+                "install",
+                "-m",
+                "0755",
+                Box::leak(
+                    root.join("packaging/adapters/sway")
+                        .join(script)
+                        .display()
+                        .to_string()
+                        .into_boxed_str(),
+                ),
+                Box::leak(format!("{SYS_SWAY_ADAPTER_DIR}/{script}").into_boxed_str()),
+            ],
         ));
     }
     plan.push(Action::priv_(
         format!("Install Sway config example -> {SYS_SWAY_ADAPTER_DIR}/sway.conf.example"),
-        &["install", "-m", "0644",
-          Box::leak(root.join("packaging/adapters/sway/sway.conf.example").display().to_string().into_boxed_str()),
-          Box::leak(format!("{SYS_SWAY_ADAPTER_DIR}/sway.conf.example").into_boxed_str())],
+        &[
+            "install",
+            "-m",
+            "0644",
+            Box::leak(
+                root.join("packaging/adapters/sway/sway.conf.example")
+                    .display()
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+            Box::leak(format!("{SYS_SWAY_ADAPTER_DIR}/sway.conf.example").into_boxed_str()),
+        ],
     ));
     // ROCm: install the depth-liveness sidecar binary (runs depth on the iGPU).
     if build_depthd {
         plan.push(Action::priv_(
             format!("Install doorman-depthd sidecar -> {SYS_DEPTHD_BIN}"),
-            &["install", "-m", "0755",
-              Box::leak(target.join("doorman-depthd").display().to_string().into_boxed_str()), SYS_DEPTHD_BIN],
+            &[
+                "install",
+                "-m",
+                "0755",
+                Box::leak(
+                    target
+                        .join("doorman-depthd")
+                        .display()
+                        .to_string()
+                        .into_boxed_str(),
+                ),
+                SYS_DEPTHD_BIN,
+            ],
         ));
     }
 
@@ -1287,8 +1418,12 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     if Path::new(ETC_CONFIG).exists() {
         plan.push(Action::priv_(
             format!("Back up existing {ETC_CONFIG} -> {ETC_CONFIG}.doorman-bak"),
-            &["cp", "--update=none", ETC_CONFIG,
-              Box::leak(format!("{ETC_CONFIG}.doorman-bak").into_boxed_str())],
+            &[
+                "cp",
+                "--update=none",
+                ETC_CONFIG,
+                Box::leak(format!("{ETC_CONFIG}.doorman-bak").into_boxed_str()),
+            ],
         ));
     }
     // Render the installed config from the repo source with the EP-appropriate
@@ -1304,7 +1439,11 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     };
     // ncnn runs the inner ORT backend on CPU (only depth goes to the iGPU), so its
     // config device is "cpu", not the EP label.
-    let device_label = if d.ep == Ep::Ncnn { "cpu" } else { d.ep.label() };
+    let device_label = if d.ep == Ep::Ncnn {
+        "cpu"
+    } else {
+        d.ep.label()
+    };
     let cfg_summary = if opts.auto_unlock {
         format!("backend={backend_label}, device={device_label}, proactive_unlock=true")
     } else {
@@ -1359,7 +1498,10 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     // Prefer the XDG set when present (it has yunet/edgeface/minifasnet + depth);
     // otherwise fall back to the repo set and fetch the missing models.
     let xdg_models = invoking_user_home().map(|h| h.join(".local/share/doorman/models"));
-    let xdg_has_models = xdg_models.as_ref().map(|p| dir_nonempty(p)).unwrap_or(false);
+    let xdg_has_models = xdg_models
+        .as_ref()
+        .map(|p| dir_nonempty(p))
+        .unwrap_or(false);
     if let (true, Some(src)) = (xdg_has_models, &xdg_models) {
         plan.push(Action::priv_(
             format!("Copy ONNX models from {} -> {MODELS_DIR} (includes depth_anything_v2_small_fp32.onnx)", src.display()),
@@ -1378,9 +1520,16 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
             repo_root().join("data/models/depth_anything_v2_small_fp32.onnx").exists()
         }));
         plan.push(Action::priv_(
-            format!("Copy ONNX models from {} -> {MODELS_DIR}", models_src.display()),
-            &["cp", "-r",
-              Box::leak(format!("{}/.", models_src.display()).into_boxed_str()), MODELS_DIR],
+            format!(
+                "Copy ONNX models from {} -> {MODELS_DIR}",
+                models_src.display()
+            ),
+            &[
+                "cp",
+                "-r",
+                Box::leak(format!("{}/.", models_src.display()).into_boxed_str()),
+                MODELS_DIR,
+            ],
         ));
     }
     plan.push(Action::priv_(
@@ -1411,7 +1560,13 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
             plan.push(Action::priv_(
                 format!("Install {f} -> {MODELS_DIR}"),
                 &[
-                    "install", "-m", "0644", "-o", "doorman", "-g", "doorman",
+                    "install",
+                    "-m",
+                    "0644",
+                    "-o",
+                    "doorman",
+                    "-g",
+                    "doorman",
                     Box::leak(out.join(f).display().to_string().into_boxed_str()),
                     MODELS_DIR,
                 ],
@@ -1439,14 +1594,20 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
                     // Copy the resolved real file (follow the symlink) to a stable name.
                     plan.push(Action::priv_(
                         format!("Copy ROCm ONNX Runtime .so -> {SYS_LIBDIR}/libonnxruntime.so"),
-                        &["cp", "-L",
-                          Box::leak(so.display().to_string().into_boxed_str()),
-                          Box::leak(dest.display().to_string().into_boxed_str())],
+                        &[
+                            "cp",
+                            "-L",
+                            Box::leak(so.display().to_string().into_boxed_str()),
+                            Box::leak(dest.display().to_string().into_boxed_str()),
+                        ],
                     ));
                     plan.push(Action::priv_(
                         format!("Set {SYS_LIBDIR}/libonnxruntime.so mode 0644"),
-                        &["chmod", "0644",
-                          Box::leak(dest.display().to_string().into_boxed_str())],
+                        &[
+                            "chmod",
+                            "0644",
+                            Box::leak(dest.display().to_string().into_boxed_str()),
+                        ],
                     ));
                 }
 
@@ -1459,8 +1620,10 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
                 // SelectProvidersForDevices. Copy all three from the SAME source dir
                 // (the dir holding the resolved base .so) so the version set is coherent.
                 let src_dir = so.parent().map(Path::to_path_buf);
-                for companion in ["libonnxruntime_providers_shared.so",
-                                  "libonnxruntime_providers_rocm.so"] {
+                for companion in [
+                    "libonnxruntime_providers_shared.so",
+                    "libonnxruntime_providers_rocm.so",
+                ] {
                     let src = src_dir.as_ref().map(|d| d.join(companion));
                     let cdest = PathBuf::from(format!("{SYS_LIBDIR}/{companion}"));
                     match src {
@@ -1473,8 +1636,11 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
                             ));
                             plan.push(Action::priv_(
                                 format!("Set {SYS_LIBDIR}/{companion} mode 0644"),
-                                &["chmod", "0644",
-                                  Box::leak(cdest.display().to_string().into_boxed_str())],
+                                &[
+                                    "chmod",
+                                    "0644",
+                                    Box::leak(cdest.display().to_string().into_boxed_str()),
+                                ],
                             ));
                         }
                         Some(s) if s.exists() => {
@@ -1511,7 +1677,10 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         // crashes when $HOME is unset). If the user has no warm cache, skip and let
         // the daemon JIT on first start (slower, but now safe with HOME/XDG set).
         let warm_cache = invoking_user_home().map(|h| h.join(".cache/miopen"));
-        let warm_present = warm_cache.as_ref().map(|p| dir_nonempty(p)).unwrap_or(false);
+        let warm_present = warm_cache
+            .as_ref()
+            .map(|p| dir_nonempty(p))
+            .unwrap_or(false);
         match (warm_present, &warm_cache) {
             (true, Some(src)) => {
                 plan.push(Action::priv_(
@@ -1537,18 +1706,27 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     // Carry the invoking user's enrollment into the system daemon's store so they
     // are already enrolled (the system daemon reads /var/lib/doorman/embeddings.bin).
     // Without this the user must run `sudo doorman enroll` against the system socket.
-    let user_embeddings = invoking_user_home().map(|h| h.join(".local/share/doorman/embeddings.bin"));
+    let user_embeddings =
+        invoking_user_home().map(|h| h.join(".local/share/doorman/embeddings.bin"));
     if let Some(src) = user_embeddings.as_ref().filter(|p| p.exists()) {
         plan.push(Action::priv_(
-            format!("Carry enrollment: copy {} -> {STATE_DIR}/embeddings.bin", src.display()),
-            &["cp",
-              Box::leak(src.display().to_string().into_boxed_str()),
-              Box::leak(format!("{STATE_DIR}/embeddings.bin").into_boxed_str())],
+            format!(
+                "Carry enrollment: copy {} -> {STATE_DIR}/embeddings.bin",
+                src.display()
+            ),
+            &[
+                "cp",
+                Box::leak(src.display().to_string().into_boxed_str()),
+                Box::leak(format!("{STATE_DIR}/embeddings.bin").into_boxed_str()),
+            ],
         ));
         plan.push(Action::priv_(
             "chown carried embeddings to doorman:doorman".to_string(),
-            &["chown", "doorman:doorman",
-              Box::leak(format!("{STATE_DIR}/embeddings.bin").into_boxed_str())],
+            &[
+                "chown",
+                "doorman:doorman",
+                Box::leak(format!("{STATE_DIR}/embeddings.bin").into_boxed_str()),
+            ],
         ));
     }
 
@@ -1556,17 +1734,26 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     // the daemon so its socket is up when the daemon's Sidecar source connects).
     if build_depthd {
         plan.push(
-            Action::priv_(format!("Write depth-sidecar unit -> {DEPTHD_UNIT_PATH}"), &["tee", DEPTHD_UNIT_PATH])
-                .with_stdin(render_depthd_unit()),
+            Action::priv_(
+                format!("Write depth-sidecar unit -> {DEPTHD_UNIT_PATH}"),
+                &["tee", DEPTHD_UNIT_PATH],
+            )
+            .with_stdin(render_depthd_unit()),
         );
     }
 
     // systemd unit (generated text via tee).
     plan.push(
-        Action::priv_(format!("Write systemd unit -> {UNIT_PATH}"), &["tee", UNIT_PATH])
-            .with_stdin(render_unit(d.ep)),
+        Action::priv_(
+            format!("Write systemd unit -> {UNIT_PATH}"),
+            &["tee", UNIT_PATH],
+        )
+        .with_stdin(render_unit(d.ep)),
     );
-    plan.push(Action::priv_("systemctl daemon-reload", &["systemctl", "daemon-reload"]));
+    plan.push(Action::priv_(
+        "systemctl daemon-reload",
+        &["systemctl", "daemon-reload"],
+    ));
     // ROCm: enable (boot) + RESTART the depth sidecar BEFORE the daemon so its
     // socket is up. RESTART (not start/--now) is critical on a RE-INSTALL: an
     // already-running unit ignores the new binary/config under `start`/`enable
@@ -1613,9 +1800,19 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         ));
         plan.push(Action::priv_(
             "Install libpam_doorman.so -> /lib/x86_64-linux-gnu/security/",
-            &["install", "-m", "0755",
-              Box::leak(target.join("libpam_doorman.so").display().to_string().into_boxed_str()),
-              "/lib/x86_64-linux-gnu/security/libpam_doorman.so"],
+            &[
+                "install",
+                "-m",
+                "0755",
+                Box::leak(
+                    target
+                        .join("libpam_doorman.so")
+                        .display()
+                        .to_string()
+                        .into_boxed_str(),
+                ),
+                "/lib/x86_64-linux-gnu/security/libpam_doorman.so",
+            ],
         ));
         // Backup the existing pam file — ONLY if /etc/pam.d/<svc> already exists.
         // On Ubuntu the vendor default lives at /usr/lib/pam.d/<svc> and there is no
@@ -1626,9 +1823,12 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         if Path::new(&pamfile).exists() {
             plan.push(Action::priv_(
                 format!("Back up {pamfile} -> {backup} (never overwrites an existing backup)"),
-                &["cp", "--update=none",
-                  Box::leak(pamfile.clone().into_boxed_str()),
-                  Box::leak(backup.clone().into_boxed_str())],
+                &[
+                    "cp",
+                    "--update=none",
+                    Box::leak(pamfile.clone().into_boxed_str()),
+                    Box::leak(backup.clone().into_boxed_str()),
+                ],
             ));
         }
         // Write the override.
@@ -1762,7 +1962,10 @@ pub fn run_install(opts: &InstallOpts) -> Result<(), String> {
              Open a separate ROOT shell now and keep it open until you have verified\n      \
              login still works with your PASSWORD. doorman keeps the password path;\n      \
              this only ADDS face as `sufficient`. pamtester validates before commit.\n",
-            match opts.pam_scope { PamScope::Login => "login", _ => "sudo" }
+            match opts.pam_scope {
+                PamScope::Login => "login",
+                _ => "sudo",
+            }
         );
     }
 
@@ -1802,8 +2005,15 @@ pub fn run_install(opts: &InstallOpts) -> Result<(), String> {
 
     let plan = build_install_plan(&d, opts);
 
-    println!("\nPlanned actions ({} steps){}:\n", plan.len(),
-        if opts.dry_run { " [DRY RUN — nothing will be executed]" } else { "" });
+    println!(
+        "\nPlanned actions ({} steps){}:\n",
+        plan.len(),
+        if opts.dry_run {
+            " [DRY RUN — nothing will be executed]"
+        } else {
+            ""
+        }
+    );
     for (i, a) in plan.iter().enumerate() {
         let tag = if a.privileged { "sudo " } else { "user " };
         let skip = if a.skip_if.map(|f| f()).unwrap_or(false) {
@@ -1880,9 +2090,7 @@ fn execute_plan(plan: &[Action], d: &Diagnosis, _opts: &InstallOpts) -> Result<(
                     );
                 }
                 PamValidation::TimedOut => {
-                    eprintln!(
-                        "pamtester validation TIMED OUT (10 s) — rolling back PAM override."
-                    );
+                    eprintln!("pamtester validation TIMED OUT (10 s) — rolling back PAM override.");
                     if let Some(svc) = &pam_service {
                         rollback_pam(svc);
                     }
@@ -1931,15 +2139,13 @@ fn run_action(a: &Action) -> Result<bool, String> {
                 .ok()
                 .and_then(|o| {
                     if o.status.success() {
-                        String::from_utf8(o.stdout)
-                            .ok()
-                            .and_then(|s| {
-                                s.trim_end()
-                                    .split(':')
-                                    .nth(5)
-                                    .filter(|h| !h.is_empty())
-                                    .map(|h| h.to_string())
-                            })
+                        String::from_utf8(o.stdout).ok().and_then(|s| {
+                            s.trim_end()
+                                .split(':')
+                                .nth(5)
+                                .filter(|h| !h.is_empty())
+                                .map(|h| h.to_string())
+                        })
                     } else {
                         None
                     }
@@ -1960,10 +2166,10 @@ fn run_action(a: &Action) -> Result<bool, String> {
             // CARGO_HOME / RUSTUP_HOME default to ~/.cargo / ~/.rustup. Override
             // only when the env vars are absent or still pointing at root's home,
             // so an explicit override in the caller's environment is respected.
-            let cargo_home = std::env::var("CARGO_HOME")
-                .unwrap_or_else(|_| format!("{user_home}/.cargo"));
-            let rustup_home = std::env::var("RUSTUP_HOME")
-                .unwrap_or_else(|_| format!("{user_home}/.rustup"));
+            let cargo_home =
+                std::env::var("CARGO_HOME").unwrap_or_else(|_| format!("{user_home}/.cargo"));
+            let rustup_home =
+                std::env::var("RUSTUP_HOME").unwrap_or_else(|_| format!("{user_home}/.rustup"));
 
             let mut c = Command::new("sudo");
             c.arg("-u")
@@ -2157,9 +2363,7 @@ fn validate_pam_stack(a: &Action) -> PamValidation {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return PamValidation::StackBroken(format!(
-                "could not spawn pamtester: {e}"
-            ));
+            return PamValidation::StackBroken(format!("could not spawn pamtester: {e}"));
         }
     };
 
@@ -2212,11 +2416,7 @@ fn validate_pam_stack(a: &Action) -> PamValidation {
         } else {
             format!(
                 "\n  output: {}",
-                combined
-                    .trim()
-                    .lines()
-                    .collect::<Vec<_>>()
-                    .join(" | ")
+                combined.trim().lines().collect::<Vec<_>>().join(" | ")
             )
         }
     );
@@ -2228,7 +2428,9 @@ fn rollback_pam(service: &str) {
     let pamfile = format!("/etc/pam.d/{service}");
     let backup = format!("{pamfile}.doorman-bak");
     if Path::new(&backup).exists() {
-        let _ = Command::new("sudo").args(["mv", "-f", &backup, &pamfile]).status();
+        let _ = Command::new("sudo")
+            .args(["mv", "-f", &backup, &pamfile])
+            .status();
     } else {
         // No backup means the service file did not previously exist — remove ours.
         let _ = Command::new("sudo").args(["rm", "-f", &pamfile]).status();
@@ -2254,7 +2456,9 @@ fn print_next_steps(d: &Diagnosis, opts: &InstallOpts) {
         .map(|h| h.join(".local/share/doorman/embeddings.bin").exists())
         .unwrap_or(false);
     if carried {
-        println!("  1. Your existing enrollment was COPIED to the system daemon — you should already");
+        println!(
+            "  1. Your existing enrollment was COPIED to the system daemon — you should already"
+        );
         println!("     be enrolled. Re-enroll only if needed:");
         println!("        sudo {SYS_CLI} --socket {SYS_SOCKET} enroll $USER");
     } else {
@@ -2276,11 +2480,19 @@ fn print_next_steps(d: &Diagnosis, opts: &InstallOpts) {
         }
     }
     if opts.auto_unlock {
-        println!("\n  Proactive auto-unlock is ENABLED (--auto-unlock): proactive_unlock=true and the");
-        println!("  polkit rule granting `doorman` logind lock-sessions are installed. After enrolling,");
-        println!("  LOCK YOUR SCREEN and present your face — a recognized face + liveness PASS unlocks");
+        println!(
+            "\n  Proactive auto-unlock is ENABLED (--auto-unlock): proactive_unlock=true and the"
+        );
+        println!(
+            "  polkit rule granting `doorman` logind lock-sessions are installed. After enrolling,"
+        );
+        println!(
+            "  LOCK YOUR SCREEN and present your face — a recognized face + liveness PASS unlocks"
+        );
         println!("  the session with NO keypress. Your password remains a fallback. Disable by re-running");
-        println!("  install without --auto-unlock (then `doorman uninstall` removes the polkit rule).");
+        println!(
+            "  install without --auto-unlock (then `doorman uninstall` removes the polkit rule)."
+        );
     }
     if d.desktop.to_ascii_lowercase().contains("sway") {
         println!("\n  Sway adapter installed:");
@@ -2295,12 +2507,17 @@ fn print_next_steps(d: &Diagnosis, opts: &InstallOpts) {
 
     // CLI shadowing: warn if `doorman` on PATH resolves to something other than the
     // freshly-installed /usr/bin/doorman (e.g. a stale ~/.local/bin/doorman).
-    if let Ok(out) = Command::new("sh").args(["-c", "command -v doorman"]).output() {
+    if let Ok(out) = Command::new("sh")
+        .args(["-c", "command -v doorman"])
+        .output()
+    {
         if out.status.success() {
             let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !resolved.is_empty() && resolved != SYS_CLI {
                 println!("\n  !! WARNING: `doorman` on your PATH resolves to '{resolved}', not '{SYS_CLI}'.");
-                println!("     Use the full path '{SYS_CLI}' or remove the stale binary so commands");
+                println!(
+                    "     Use the full path '{SYS_CLI}' or remove the stale binary so commands"
+                );
                 println!("     target the installed CLI (e.g. `rm {resolved}`).");
             }
         }
@@ -2322,9 +2539,12 @@ pub fn run_uninstall(opts: &UninstallOpts) -> Result<(), String> {
         if Path::new(&backup).exists() {
             plan.push(Action::priv_(
                 format!("Restore original {pamfile} from backup"),
-                &["mv", "-f",
-                  Box::leak(backup.into_boxed_str()),
-                  Box::leak(pamfile.into_boxed_str())],
+                &[
+                    "mv",
+                    "-f",
+                    Box::leak(backup.into_boxed_str()),
+                    Box::leak(pamfile.into_boxed_str()),
+                ],
             ));
         } else {
             plan.push(Action::priv_(
@@ -2334,27 +2554,49 @@ pub fn run_uninstall(opts: &UninstallOpts) -> Result<(), String> {
         }
     }
 
-    plan.push(Action::priv_(
-        "Disable + stop doormand.service",
-        &["systemctl", "disable", "--now", "doormand.service"],
-    ).skip_when(|| !systemctl_state("doormand.service").0));
+    plan.push(
+        Action::priv_(
+            "Disable + stop doormand.service",
+            &["systemctl", "disable", "--now", "doormand.service"],
+        )
+        .skip_when(|| !systemctl_state("doormand.service").0),
+    );
     // Depth-liveness sidecar (ROCm installs only — no-op/skip if not installed).
+    plan.push(
+        Action::priv_(
+            "Disable + stop doorman-depthd.service (depth sidecar)",
+            &["systemctl", "disable", "--now", "doorman-depthd.service"],
+        )
+        .skip_when(|| !systemctl_state("doorman-depthd.service").0),
+    );
     plan.push(Action::priv_(
-        "Disable + stop doorman-depthd.service (depth sidecar)",
-        &["systemctl", "disable", "--now", "doorman-depthd.service"],
-    ).skip_when(|| !systemctl_state("doorman-depthd.service").0));
-    plan.push(Action::priv_(format!("Remove unit {UNIT_PATH}"), &["rm", "-f", UNIT_PATH]));
-    plan.push(Action::priv_(format!("Remove depth-sidecar unit {DEPTHD_UNIT_PATH}"), &["rm", "-f", DEPTHD_UNIT_PATH]));
+        format!("Remove unit {UNIT_PATH}"),
+        &["rm", "-f", UNIT_PATH],
+    ));
+    plan.push(Action::priv_(
+        format!("Remove depth-sidecar unit {DEPTHD_UNIT_PATH}"),
+        &["rm", "-f", DEPTHD_UNIT_PATH],
+    ));
     // Remove the --auto-unlock polkit rule (idempotent: rm -f no-ops if absent).
     plan.push(Action::priv_(
         format!("Remove polkit unlock rule {POLKIT_RULE_PATH} (if present)"),
         &["rm", "-f", POLKIT_RULE_PATH],
     ));
-    plan.push(Action::priv_("systemctl daemon-reload", &["systemctl", "daemon-reload"]));
+    plan.push(Action::priv_(
+        "systemctl daemon-reload",
+        &["systemctl", "daemon-reload"],
+    ));
     plan.push(Action::priv_(
         format!("Remove {SYS_BIN}, {SYS_DEPTHD_BIN}, {SYS_CLI}, {SYS_LIBDIR}, PAM module"),
-        &["rm", "-rf", SYS_BIN, SYS_DEPTHD_BIN, SYS_CLI, SYS_LIBDIR,
-          "/lib/x86_64-linux-gnu/security/libpam_doorman.so"],
+        &[
+            "rm",
+            "-rf",
+            SYS_BIN,
+            SYS_DEPTHD_BIN,
+            SYS_CLI,
+            SYS_LIBDIR,
+            "/lib/x86_64-linux-gnu/security/libpam_doorman.so",
+        ],
     ));
 
     if opts.purge {
@@ -2362,14 +2604,17 @@ pub fn run_uninstall(opts: &UninstallOpts) -> Result<(), String> {
             format!("PURGE state + config ({STATE_DIR}, {ETC_DIR})"),
             &["rm", "-rf", STATE_DIR, ETC_DIR],
         ));
-        plan.push(Action::priv_(
-            "PURGE system user 'doorman'",
-            &["userdel", "doorman"],
-        ).skip_when(|| !user_exists("doorman")));
+        plan.push(
+            Action::priv_("PURGE system user 'doorman'", &["userdel", "doorman"])
+                .skip_when(|| !user_exists("doorman")),
+        );
     }
 
-    println!("Planned uninstall actions ({} steps){}:\n", plan.len(),
-        if opts.dry_run { " [DRY RUN]" } else { "" });
+    println!(
+        "Planned uninstall actions ({} steps){}:\n",
+        plan.len(),
+        if opts.dry_run { " [DRY RUN]" } else { "" }
+    );
     for (i, a) in plan.iter().enumerate() {
         println!("  {:>2}. {}", i + 1, a.desc);
         println!("        $ {}", a.shell_repr());
@@ -2431,7 +2676,8 @@ mod tests {
 
     #[test]
     fn pam_kde_via_plasma_token() {
-        let (svc, _) = pick_pam_service("ubuntu:plasma", PamScope::ScreenUnlock, true, false, false);
+        let (svc, _) =
+            pick_pam_service("ubuntu:plasma", PamScope::ScreenUnlock, true, false, false);
         assert_eq!(svc.as_deref(), Some("kde"));
     }
 
@@ -2586,13 +2832,16 @@ mod tests {
         let home = std::env::temp_dir().join(format!("doorman_home_test_{}", std::process::id()));
         let libdir = home.join(".local/lib/onnxruntime-rocm-local/lib");
         std::fs::create_dir_all(&libdir).unwrap();
-        for f in ["libonnxruntime.so",
-                  "libonnxruntime_providers_shared.so",
-                  "libonnxruntime_providers_rocm.so"] {
+        for f in [
+            "libonnxruntime.so",
+            "libonnxruntime_providers_shared.so",
+            "libonnxruntime_providers_rocm.so",
+        ] {
             std::fs::write(libdir.join(f), b"x").unwrap();
         }
 
-        let resolved = resolve_rocm_so_src(&home).expect("dev .so must resolve under the given home");
+        let resolved =
+            resolve_rocm_so_src(&home).expect("dev .so must resolve under the given home");
         assert_eq!(resolved, libdir.join("libonnxruntime.so"));
         // The companions live in the SAME dir as the resolved base .so, so the
         // companion-copy step finds them (the missing-companion SEGV is fixed).
@@ -2612,7 +2861,10 @@ mod tests {
         let resolved = resolve_rocm_so_src(&home);
         // Must never return a path under our fake (empty) home.
         if let Some(p) = &resolved {
-            assert!(!p.starts_with(&home), "must not resolve under a home with no dev .so");
+            assert!(
+                !p.starts_with(&home),
+                "must not resolve under a home with no dev .so"
+            );
         }
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -2629,17 +2881,23 @@ mod tests {
         let restarts: Vec<&Vec<String>> = plan
             .iter()
             .map(|a| &a.argv)
-            .filter(|argv| argv.first().map(|s| s == "systemctl").unwrap_or(false)
-                && argv.get(1).map(|s| s == "restart").unwrap_or(false))
+            .filter(|argv| {
+                argv.first().map(|s| s == "systemctl").unwrap_or(false)
+                    && argv.get(1).map(|s| s == "restart").unwrap_or(false)
+            })
             .collect();
         let restart_targets: Vec<&str> = restarts
             .iter()
             .filter_map(|argv| argv.get(2).map(String::as_str))
             .collect();
-        assert!(restart_targets.contains(&"doormand.service"),
-            "doormand.service must be applied via `systemctl restart`");
-        assert!(restart_targets.contains(&"doorman-depthd.service"),
-            "the ROCm depth sidecar must be applied via `systemctl restart`");
+        assert!(
+            restart_targets.contains(&"doormand.service"),
+            "doormand.service must be applied via `systemctl restart`"
+        );
+        assert!(
+            restart_targets.contains(&"doorman-depthd.service"),
+            "the ROCm depth sidecar must be applied via `systemctl restart`"
+        );
 
         // And NOTHING must use the stale `enable --now` / `start` apply for these.
         assert!(!plan.iter().any(|a| {
@@ -2649,12 +2907,18 @@ mod tests {
         }), "no systemctl `start`/`--now` apply may remain (it leaves a stale daemon on re-install)");
 
         // `enable` (boot persistence) is still present and is fine to keep.
-        assert!(plan.iter().any(|a| {
-            let argv = &a.argv;
-            argv.first().map(|s| s == "systemctl").unwrap_or(false)
-                && argv.get(1).map(|s| s == "enable").unwrap_or(false)
-                && argv.get(2).map(|s| s == "doormand.service").unwrap_or(false)
-        }), "doormand.service should still be `enable`d for boot");
+        assert!(
+            plan.iter().any(|a| {
+                let argv = &a.argv;
+                argv.first().map(|s| s == "systemctl").unwrap_or(false)
+                    && argv.get(1).map(|s| s == "enable").unwrap_or(false)
+                    && argv
+                        .get(2)
+                        .map(|s| s == "doormand.service")
+                        .unwrap_or(false)
+            }),
+            "doormand.service should still be `enable`d for boot"
+        );
     }
 
     // --- BUG-3: crash cap (StartLimit + LimitCORE=0) on the units ---
@@ -2676,8 +2940,14 @@ mod tests {
     fn daemon_unit_has_crash_cap() {
         for ep in [Ep::Rocm, Ep::Cpu] {
             let u = render_unit(ep);
-            assert!(u.contains("StartLimitIntervalSec=60"), "{ep:?} missing StartLimitIntervalSec");
-            assert!(u.contains("StartLimitBurst=5"), "{ep:?} missing StartLimitBurst");
+            assert!(
+                u.contains("StartLimitIntervalSec=60"),
+                "{ep:?} missing StartLimitIntervalSec"
+            );
+            assert!(
+                u.contains("StartLimitBurst=5"),
+                "{ep:?} missing StartLimitBurst"
+            );
             assert!(u.contains("LimitCORE=0"), "{ep:?} missing LimitCORE=0");
         }
     }
@@ -2692,7 +2962,10 @@ mod tests {
         assert!(r.contains("action.id == \"org.freedesktop.login1.lock-sessions\""));
         assert!(r.contains("subject.user == \"doorman\""));
         // No other action or user is granted.
-        assert!(!r.contains("unlock-session\""), "must target lock-sessions, not a different id");
+        assert!(
+            !r.contains("unlock-session\""),
+            "must target lock-sessions, not a different id"
+        );
         assert!(!r.contains("\"root\""));
         // Balanced braces (well-formed JS block structure).
         assert_eq!(r.matches('{').count(), r.matches('}').count());
@@ -2701,7 +2974,10 @@ mod tests {
 
     #[test]
     fn polkit_rule_path_is_the_documented_location() {
-        assert_eq!(POLKIT_RULE_PATH, "/etc/polkit-1/rules.d/49-doorman-unlock.rules");
+        assert_eq!(
+            POLKIT_RULE_PATH,
+            "/etc/polkit-1/rules.d/49-doorman-unlock.rules"
+        );
     }
 
     #[test]
@@ -2728,7 +3004,8 @@ mod tests {
     fn render_config_rocm_sets_ort_and_rocm() {
         // A ROCm install MUST flip backend->ort and device->rocm, else the daemon
         // stays on the CPU tract path regardless of the unit's --device flag.
-        let src = "[ml]\nmodels_dir = \"/x\"\nbackend = \"tract\"\ndevice = \"cpu\"\ncpu_threads = 0\n";
+        let src =
+            "[ml]\nmodels_dir = \"/x\"\nbackend = \"tract\"\ndevice = \"cpu\"\ncpu_threads = 0\n";
         let out = render_config(src, Ep::Rocm, false);
         assert!(out.contains("backend = \"ort\""), "got:\n{out}");
         assert!(out.contains("device = \"rocm\""), "got:\n{out}");
@@ -2738,8 +3015,18 @@ mod tests {
         assert!(out.contains("models_dir = \"/x\""));
         assert!(out.contains("cpu_threads = 0"));
         // Exactly one backend and one device line (no duplication).
-        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("backend")).count(), 1);
-        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("device")).count(), 1);
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.trim_start().starts_with("backend"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.trim_start().starts_with("device"))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2749,12 +3036,21 @@ mod tests {
         // a specific GPU by UUID — never a hardcoded index), plus an hsa override.
         let src = "[ml]\nbackend = \"tract\"\ndevice = \"cpu\"\ncpu_threads = 0\n";
         let out = render_config(src, Ep::Rocm, false);
-        assert!(out.contains("gpu_uuid = \"\""), "rocm config must seed an empty gpu_uuid:\n{out}");
-        assert!(out.contains("hsa_gfx_version = \"11.0.3\""), "rocm config must seed hsa_gfx_version:\n{out}");
+        assert!(
+            out.contains("gpu_uuid = \"\""),
+            "rocm config must seed an empty gpu_uuid:\n{out}"
+        );
+        assert!(
+            out.contains("hsa_gfx_version = \"11.0.3\""),
+            "rocm config must seed hsa_gfx_version:\n{out}"
+        );
         // The knobs land inside [ml] (right after device), not in another section.
         let ml_idx = out.find("device = \"rocm\"").unwrap();
         let uuid_idx = out.find("gpu_uuid").unwrap();
-        assert!(uuid_idx > ml_idx, "gpu_uuid must follow the device line in [ml]");
+        assert!(
+            uuid_idx > ml_idx,
+            "gpu_uuid must follow the device line in [ml]"
+        );
         // CPU install must NOT carry these GPU knobs.
         let cpu = render_config(src, Ep::Cpu, false);
         assert!(!cpu.contains("gpu_uuid"));
@@ -2794,24 +3090,50 @@ mod tests {
         let out = render_config(src, Ep::Ncnn, false);
         assert!(out.contains("backend = \"ncnn\""), "got:\n{out}");
         assert!(out.contains("device = \"cpu\""), "got:\n{out}");
-        assert!(out.contains("vulkan_device = \"\""), "ncnn must seed vulkan_device:\n{out}");
+        assert!(
+            out.contains("vulkan_device = \"\""),
+            "ncnn must seed vulkan_device:\n{out}"
+        );
         // ncnn must NOT carry the ROCm-only knobs.
         assert!(!out.contains("gpu_uuid"));
         assert!(!out.contains("hsa_gfx_version"));
-        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("backend")).count(), 1);
-        assert_eq!(out.lines().filter(|l| l.trim_start().starts_with("device")).count(), 1);
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.trim_start().starts_with("backend"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.trim_start().starts_with("device"))
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn plan_ncnn_builds_libncnn_converts_depth_and_no_depthd() {
         let plan = build_install_plan(&test_diag(Ep::Ncnn), &opts(false));
-        let joined = plan.iter().map(|a| a.desc.as_str()).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("static libncnn"), "ncnn plan must build libncnn:\n{joined}");
+        let joined = plan
+            .iter()
+            .map(|a| a.desc.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            plan.iter().any(|a| a.argv.iter().any(|s| s.contains("backend-ort,backend-ncnn"))),
+            joined.contains("static libncnn"),
+            "ncnn plan must build libncnn:\n{joined}"
+        );
+        assert!(
+            plan.iter().any(|a| a
+                .argv
+                .iter()
+                .any(|s| s.contains("backend-ort,backend-ncnn"))),
             "ncnn build must use the backend-ort,backend-ncnn feature set"
         );
-        assert!(joined.contains("Convert Depth-Anything ONNX"), "ncnn plan must convert depth:\n{joined}");
+        assert!(
+            joined.contains("Convert Depth-Anything ONNX"),
+            "ncnn plan must convert depth:\n{joined}"
+        );
         assert!(
             joined.contains("depth.ncnn.param") && joined.contains("depth.ncnn.bin"),
             "ncnn plan must install depth.ncnn.{{param,bin}}:\n{joined}"
@@ -2866,17 +3188,27 @@ mod tests {
             "expected a polkit-rule write action with --auto-unlock"
         );
         // The polkit write must tee to the documented path.
-        assert!(with.iter().any(|a| a.argv.iter().any(|s| s == POLKIT_RULE_PATH)));
+        assert!(with
+            .iter()
+            .any(|a| a.argv.iter().any(|s| s == POLKIT_RULE_PATH)));
         // And the config description must advertise proactive_unlock=true.
-        assert!(with.iter().any(|a| a.desc.contains("proactive_unlock=true")));
+        assert!(with
+            .iter()
+            .any(|a| a.desc.contains("proactive_unlock=true")));
 
         let without = build_install_plan(&d, &opts(false));
         assert!(
-            !without.iter().any(|a| a.desc.contains("polkit unlock rule")),
+            !without
+                .iter()
+                .any(|a| a.desc.contains("polkit unlock rule")),
             "no polkit rule must be written without --auto-unlock"
         );
-        assert!(!without.iter().any(|a| a.argv.iter().any(|s| s == POLKIT_RULE_PATH)));
-        assert!(!without.iter().any(|a| a.desc.contains("proactive_unlock=true")));
+        assert!(!without
+            .iter()
+            .any(|a| a.argv.iter().any(|s| s == POLKIT_RULE_PATH)));
+        assert!(!without
+            .iter()
+            .any(|a| a.desc.contains("proactive_unlock=true")));
     }
 
     #[test]
@@ -2886,9 +3218,11 @@ mod tests {
         // (missing companions are the root cause of the installed-daemon SEGV).
         let dir = std::env::temp_dir().join(format!("doorman_so_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        for f in ["libonnxruntime.so",
-                  "libonnxruntime_providers_shared.so",
-                  "libonnxruntime_providers_rocm.so"] {
+        for f in [
+            "libonnxruntime.so",
+            "libonnxruntime_providers_shared.so",
+            "libonnxruntime_providers_rocm.so",
+        ] {
             std::fs::write(dir.join(f), b"x").unwrap();
         }
         let mut d = test_diag(Ep::Rocm);
@@ -2896,15 +3230,25 @@ mod tests {
 
         let plan = build_install_plan(&d, &opts(false));
         let has = |needle: &str| plan.iter().any(|a| a.desc.contains(needle));
-        assert!(has("Copy ROCm ONNX Runtime .so -> /usr/lib/doorman/libonnxruntime.so"),
-            "base .so copy missing");
-        assert!(has("Copy ROCm EP companion libonnxruntime_providers_shared.so"),
-            "providers_shared companion copy missing");
-        assert!(has("Copy ROCm EP companion libonnxruntime_providers_rocm.so"),
-            "providers_rocm companion copy missing (this is the SEGV root cause)");
+        assert!(
+            has("Copy ROCm ONNX Runtime .so -> /usr/lib/doorman/libonnxruntime.so"),
+            "base .so copy missing"
+        );
+        assert!(
+            has("Copy ROCm EP companion libonnxruntime_providers_shared.so"),
+            "providers_shared companion copy missing"
+        );
+        assert!(
+            has("Copy ROCm EP companion libonnxruntime_providers_rocm.so"),
+            "providers_rocm companion copy missing (this is the SEGV root cause)"
+        );
         // No spurious missing-companion warning when all three are present.
-        assert!(!plan.iter().any(|a| a.desc.contains("WARNING: ROCm EP companion")),
-            "must not warn when companions exist");
+        assert!(
+            !plan
+                .iter()
+                .any(|a| a.desc.contains("WARNING: ROCm EP companion")),
+            "must not warn when companions exist"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2920,9 +3264,12 @@ mod tests {
         d.rocm_so = Some(dir.join("libonnxruntime.so"));
 
         let plan = build_install_plan(&d, &opts(false));
-        assert!(plan.iter().any(|a| a.desc.contains("WARNING: ROCm EP companion")
-                                     && a.desc.contains("WILL SEGV")),
-            "missing companions must produce a SEGV warning, not a silent skip");
+        assert!(
+            plan.iter()
+                .any(|a| a.desc.contains("WARNING: ROCm EP companion")
+                    && a.desc.contains("WILL SEGV")),
+            "missing companions must produce a SEGV warning, not a silent skip"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2933,21 +3280,28 @@ mod tests {
         // render_config bakes in (so dry-run shows the user what gets written).
         let d = test_diag(Ep::Rocm);
         let plan = build_install_plan(&d, &opts(false));
-        assert!(plan.iter().any(|a| a.desc.contains("Install config")
-                                     && a.desc.contains("backend=ort")
-                                     && a.desc.contains("device=rocm")),
-            "rocm config action must advertise backend=ort, device=rocm");
+        assert!(
+            plan.iter().any(|a| a.desc.contains("Install config")
+                && a.desc.contains("backend=ort")
+                && a.desc.contains("device=rocm")),
+            "rocm config action must advertise backend=ort, device=rocm"
+        );
     }
 
     #[test]
     fn plan_cpu_config_keeps_tract_cpu_in_description() {
         let d = test_diag(Ep::Cpu);
-        let cpu_opts = InstallOpts { ep: EpChoice::Cpu, ..opts(false) };
+        let cpu_opts = InstallOpts {
+            ep: EpChoice::Cpu,
+            ..opts(false)
+        };
         let plan = build_install_plan(&d, &cpu_opts);
-        assert!(plan.iter().any(|a| a.desc.contains("Install config")
-                                     && a.desc.contains("backend=tract")
-                                     && a.desc.contains("device=cpu")),
-            "cpu config action must advertise backend=tract, device=cpu");
+        assert!(
+            plan.iter().any(|a| a.desc.contains("Install config")
+                && a.desc.contains("backend=tract")
+                && a.desc.contains("device=cpu")),
+            "cpu config action must advertise backend=tract, device=cpu"
+        );
     }
 
     #[test]
@@ -3019,7 +3373,10 @@ auth    requisite       pam_nologin.so
         let b = std::env::temp_dir().join("doorman_test_same_file_b.tmp");
         std::fs::write(&a, b"a").expect("write a");
         std::fs::write(&b, b"b").expect("write b");
-        assert!(!same_file(&a, &b), "two distinct files must not be the same");
+        assert!(
+            !same_file(&a, &b),
+            "two distinct files must not be the same"
+        );
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
     }
@@ -3049,7 +3406,10 @@ auth    requisite       pam_nologin.so
         std::fs::write(&src, b"ort").expect("write src");
         let _ = std::fs::remove_file(&dst);
         std::fs::hard_link(&src, &dst).expect("hard_link");
-        assert!(same_file(&src, &dst), "hard-linked files must be detected as same");
+        assert!(
+            same_file(&src, &dst),
+            "hard-linked files must be detected as same"
+        );
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&dst);
     }
@@ -3073,7 +3433,10 @@ auth    requisite       pam_nologin.so
         std::fs::hard_link(&src, &dst).expect("hard_link src->dst");
 
         // same_file must detect the hard link.
-        assert!(same_file(&src, &dst), "pre-condition: hard-linked files are same");
+        assert!(
+            same_file(&src, &dst),
+            "pre-condition: hard-linked files are same"
+        );
 
         // The branch logic in build_install_plan:
         //   if same_file(so, &dest) { emit skip note } else { emit cp action }
@@ -3128,8 +3491,14 @@ auth    requisite       pam_nologin.so
         let has_skip = plan.iter().any(|a| a.desc.contains("already in place"));
 
         // tmp != /usr/lib/doorman/libonnxruntime.so, so same_file is false -> cp.
-        assert!(has_cp, "fresh-install: different src path must emit cp action");
-        assert!(!has_skip, "fresh-install: different src path must NOT emit skip note");
+        assert!(
+            has_cp,
+            "fresh-install: different src path must emit cp action"
+        );
+        assert!(
+            !has_skip,
+            "fresh-install: different src path must NOT emit skip note"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }
@@ -3147,10 +3516,7 @@ auth    requisite       pam_nologin.so
     #[test]
     fn pamtester_exit0_is_intact() {
         // pamtester exit 0 = explicit authentication success.
-        assert_eq!(
-            classify_pamtester(0, ""),
-            PamValidation::StackIntact,
-        );
+        assert_eq!(classify_pamtester(0, ""), PamValidation::StackIntact,);
     }
 
     #[test]
@@ -3169,10 +3535,7 @@ auth    requisite       pam_nologin.so
     fn pamtester_auth_failed_variant_is_intact() {
         // Some pamtester versions print "Authentication failed" instead.
         let output = "pamtester: authenticating as angkira\npamtester: Authentication failed";
-        assert_eq!(
-            classify_pamtester(6, output),
-            PamValidation::StackIntact,
-        );
+        assert_eq!(classify_pamtester(6, output), PamValidation::StackIntact,);
     }
 
     #[test]
@@ -3209,10 +3572,7 @@ auth    requisite       pam_nologin.so
     #[test]
     fn pamtester_timeout_exit124_is_timedout() {
         // Watchdog killed the process (mirrors the `timeout(1)` sentinel exit code).
-        assert_eq!(
-            classify_pamtester(124, ""),
-            PamValidation::TimedOut,
-        );
+        assert_eq!(classify_pamtester(124, ""), PamValidation::TimedOut,);
     }
 
     #[test]

@@ -194,7 +194,11 @@ fn which_ffmpeg() -> Option<String> {
     }
 
     // 2. Common fixed locations.
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
         if std::path::Path::new(candidate).exists() {
             return Some(candidate.to_string());
         }

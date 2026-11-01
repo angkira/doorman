@@ -47,8 +47,7 @@ impl CameraBackend for V4L2Camera {
         // unaffected: decode_image::<RgbFormat>() converts from the buffer's real
         // FrameFormat (YUYV) regardless of what we requested here.
         let resolution = Resolution::new(config.camera.width, config.camera.height);
-        let camera_format =
-            CameraFormat::new(resolution, FrameFormat::YUYV, config.camera.fps);
+        let camera_format = CameraFormat::new(resolution, FrameFormat::YUYV, config.camera.fps);
         let requested =
             RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(camera_format));
 

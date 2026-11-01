@@ -69,9 +69,19 @@ pub fn spawn_camera_producer(
         // camera is opened lazily when capture is active and released when gated off.
         let is_video = matches!(source, CameraSource::VideoFile { .. });
         let mut camera: Option<Camera> = match &source {
-            CameraSource::VideoFile { path, width, height, fps, loop_playback } => {
-                Some(Camera::from_video_file(path.clone(), *width, *height, *fps, *loop_playback))
-            }
+            CameraSource::VideoFile {
+                path,
+                width,
+                height,
+                fps,
+                loop_playback,
+            } => Some(Camera::from_video_file(
+                path.clone(),
+                *width,
+                *height,
+                *fps,
+                *loop_playback,
+            )),
             CameraSource::Config => None,
         };
 
@@ -105,7 +115,10 @@ pub fn spawn_camera_producer(
                         last_capture = std::time::Instant::now();
                     }
                     Err(e) => {
-                        warn!("Camera not available ({}); will re-probe in {}s", e, REPROBE_SECS);
+                        warn!(
+                            "Camera not available ({}); will re-probe in {}s",
+                            e, REPROBE_SECS
+                        );
                         std::thread::sleep(std::time::Duration::from_secs(REPROBE_SECS));
                         continue;
                     }

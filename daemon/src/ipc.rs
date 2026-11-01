@@ -1,10 +1,10 @@
-use crate::DaemonState;
 use crate::dataset::{self, AttemptConditions, GtSource, LabelEvent, Outcome};
+use crate::DaemonState;
 use anyhow::{Context, Result};
 use chrono::Timelike;
 use doorman_shared::{
-    DaemonInfo, ENROLL_DURATION_SECS, EnrollmentPhase, Request, Response, ResponseData,
-    SIMILARITY_THRESHOLD, StreamMessage,
+    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage,
+    ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
 };
 use image::GenericImageView;
 use std::fs;

@@ -5,7 +5,7 @@ use crate::dataset::{self, AttemptConditions, GallerySpreadStats, GtSource, Outc
 use crate::debug_stream::DebugStreamBroadcaster;
 use crate::ml::MLPipeline;
 use crate::storage::Storage;
-use doorman_shared::{StreamMessage, Config, DetectionInfo};
+use doorman_shared::{Config, DetectionInfo, StreamMessage};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
@@ -150,11 +150,14 @@ pub async fn run_recognition_pipeline(
         for user_info in storage_guard.list_users() {
             if let Some(stored_embeddings) = storage_guard.get_embeddings(&user_info.username) {
                 // Compare with all stored embeddings and take best match
-                let max_similarity = stored_embeddings.iter().map(|stored_emb| {
-                    let similarity = cosine_similarity(&aggregated, stored_emb);
-                    gallery_similarities.push(similarity);
-                    similarity
-                }).fold(0.0f32, f32::max);
+                let max_similarity = stored_embeddings
+                    .iter()
+                    .map(|stored_emb| {
+                        let similarity = cosine_similarity(&aggregated, stored_emb);
+                        gallery_similarities.push(similarity);
+                        similarity
+                    })
+                    .fold(0.0f32, f32::max);
 
                 if max_similarity > best_similarity {
                     best_similarity = max_similarity;
@@ -168,7 +171,10 @@ pub async fn run_recognition_pipeline(
 
         debug!(
             "Aggregated recognition: window={} cosine={:.4} threshold={:.2} (frame {})",
-            window.len(), best_similarity, config.authentication.similarity_threshold, result.sequence
+            window.len(),
+            best_similarity,
+            config.authentication.similarity_threshold,
+            result.sequence
         );
 
         let gallery_spread = dataset::gallery_spread_from_similarities(&gallery_similarities);
@@ -222,7 +228,9 @@ pub async fn run_recognition_pipeline(
             // Only then do we call `Session.Unlock()`. Liveness missing/errored =>
             // NO unlock (fail-safe reject), identical semantics to the PAM path.
             if proactive_enabled {
-                let ctx = unlock_ctx.as_ref().expect("proactive_enabled implies unlock_ctx");
+                let ctx = unlock_ctx
+                    .as_ref()
+                    .expect("proactive_enabled implies unlock_ctx");
                 let armed = *ctx.armed_rx.borrow();
                 let cur_gen = *ctx.lock_gen_rx.borrow();
                 let already_spent = spent_for_gen == Some(cur_gen);
@@ -257,7 +265,9 @@ pub async fn run_recognition_pipeline(
                                         username, similarity, config.authentication.similarity_threshold, cur_gen
                                     );
                                     match ctx.unlocker.unlock().await {
-                                        Ok(()) => info!("Proactive unlock: Session.Unlock() succeeded"),
+                                        Ok(()) => {
+                                            info!("Proactive unlock: Session.Unlock() succeeded")
+                                        }
                                         Err(e) => warn!(
                                             "Proactive unlock: Session.Unlock() failed ({e}). \
                                              If 'not authorized', the polkit rule granting \
@@ -345,7 +355,10 @@ pub async fn run_recognition_pipeline(
                         }
                     }
                 } else if already_spent {
-                    debug!("Proactive unlock: lock generation {} already spent — skipping (one-shot)", cur_gen);
+                    debug!(
+                        "Proactive unlock: lock generation {} already spent — skipping (one-shot)",
+                        cur_gen
+                    );
                 }
             }
             if !dataset_logged {
@@ -381,7 +394,11 @@ pub async fn run_recognition_pipeline(
                     bbox: Some(bbox_px),
                     frame_size: Some((result.frame_width, result.frame_height)),
                     confidence: Some(face.confidence),
-                    recognized_user: if displayed_recognized { Some(username) } else { None },
+                    recognized_user: if displayed_recognized {
+                        Some(username)
+                    } else {
+                        None
+                    },
                     similarity: Some(similarity),
                     frame_jpeg_base64: None,
                 },
@@ -567,7 +584,10 @@ mod proactive_unlock_tests {
     fn unlocks_only_when_enabled_armed_and_fresh() {
         // recognized + live is implied (caller only reaches this after a match
         // and runs liveness AFTER this gate). Here we assert the pre-liveness gate.
-        assert!(should_attempt_unlock(true, true, false), "enabled + armed + fresh -> attempt");
+        assert!(
+            should_attempt_unlock(true, true, false),
+            "enabled + armed + fresh -> attempt"
+        );
     }
 
     #[test]
@@ -589,5 +609,4 @@ mod proactive_unlock_tests {
         // signal bumps it -> no repeat-unlock spam.
         assert!(!should_attempt_unlock(true, true, true));
     }
-
 }

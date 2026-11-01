@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use doorman_shared::{DATA_DIR};
+use doorman_shared::DATA_DIR;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -25,8 +25,7 @@ impl Storage {
         let data_dir: PathBuf = data_dir.into();
 
         // Ensure data directory exists
-        fs::create_dir_all(&data_dir)
-            .context("Failed to create data directory")?;
+        fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
 
         // Set proper permissions (0700 for user, or current perms)
         #[cfg(unix)]
@@ -42,7 +41,7 @@ impl Storage {
         }
 
         let file_path = data_dir.join("embeddings.bin");
-        
+
         // Load existing embeddings if file exists
         let embeddings = if file_path.exists() {
             debug!("Loading existing embeddings from {:?}", file_path);
@@ -67,9 +66,9 @@ impl Storage {
 
     fn load_embeddings(path: &PathBuf) -> Result<HashMap<String, UserEmbedding>> {
         let data = fs::read(path).context("Failed to read embeddings file")?;
-        
-        let embeddings: Vec<UserEmbedding> = bincode::deserialize(&data)
-            .context("Failed to deserialize embeddings")?;
+
+        let embeddings: Vec<UserEmbedding> =
+            bincode::deserialize(&data).context("Failed to deserialize embeddings")?;
 
         let map = embeddings
             .into_iter()
@@ -81,11 +80,9 @@ impl Storage {
 
     fn save_embeddings(&self) -> Result<()> {
         let embeddings_vec: Vec<UserEmbedding> = self.embeddings.values().cloned().collect();
-        let data = bincode::serialize(&embeddings_vec)
-            .context("Failed to serialize embeddings")?;
+        let data = bincode::serialize(&embeddings_vec).context("Failed to serialize embeddings")?;
 
-        fs::write(&self.file_path, data)
-            .context("Failed to write embeddings file")?;
+        fs::write(&self.file_path, data).context("Failed to write embeddings file")?;
 
         // Set restrictive permissions (0600 - only root read/write)
         #[cfg(unix)]
@@ -101,9 +98,13 @@ impl Storage {
     }
 
     /// Store a user's embeddings (multiple variations)
-    pub async fn store_embeddings(&mut self, username: String, embeddings: Vec<Vec<f32>>) -> Result<()> {
+    pub async fn store_embeddings(
+        &mut self,
+        username: String,
+        embeddings: Vec<Vec<f32>>,
+    ) -> Result<()> {
         let enrolled_at = chrono::Local::now().to_rfc3339();
-        
+
         let user_embedding = UserEmbedding {
             username: username.clone(),
             embeddings,
@@ -114,7 +115,10 @@ impl Storage {
         self.embeddings.insert(username.clone(), user_embedding);
         self.save_embeddings()?;
 
-        info!("Stored {} embeddings for user: {}", num_embeddings, username);
+        info!(
+            "Stored {} embeddings for user: {}",
+            num_embeddings, username
+        );
         Ok(())
     }
 
@@ -153,4 +157,3 @@ impl Storage {
         self.embeddings.len()
     }
 }
-

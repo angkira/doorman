@@ -272,7 +272,12 @@ fn main() {
             data_dir,
             models_dir,
             min_confirmed,
-        } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
+        } => cmd_train(
+            data_dir.as_deref(),
+            models_dir.as_deref(),
+            *min_confirmed,
+            cli.json,
+        ),
         Command::DatasetReport { data_dir } => cmd_dataset_report(data_dir.as_deref(), cli.json),
         Command::Promote {
             candidate_dir,
@@ -304,7 +309,18 @@ fn main() {
             no_pam,
             desktop,
             auto_unlock,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, desktop, *auto_unlock),
+        } => cmd_install(
+            *dry_run,
+            *yes,
+            *cpu,
+            *rocm,
+            *ncnn,
+            *login,
+            *sudo,
+            *no_pam,
+            desktop,
+            *auto_unlock,
+        ),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
         Command::Preview { args } => cmd_preview(args),
     };
@@ -382,7 +398,10 @@ fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliErro
         println!("  false negative attempts: {}", report.false_negative);
         println!("  rejected attempts: {}", report.rejected);
         println!("  suspected spoof attempts: {}", report.suspected_spoof);
-        println!("  proactive unlocked attempts: {}", report.proactive_unlocked);
+        println!(
+            "  proactive unlocked attempts: {}",
+            report.proactive_unlocked
+        );
         println!("  unknown attempts: {}", report.unknown);
         println!("  matched attempts: {}", report.matched_attempts);
         println!("  unlabeled attempts: {}", report.unlabeled_attempts);
@@ -572,8 +591,12 @@ fn send_request(
         ));
     }
 
-    serde_json::from_str(line.trim())
-        .map_err(|e| CliError::new(format!("failed to parse daemon response: {e} (raw: {})", line.trim())))
+    serde_json::from_str(line.trim()).map_err(|e| {
+        CliError::new(format!(
+            "failed to parse daemon response: {e} (raw: {})",
+            line.trim()
+        ))
+    })
 }
 
 fn print_raw(response: &Response) -> Result<(), CliError> {
@@ -612,7 +635,11 @@ fn print_status(info: &DaemonInfo) {
     println!("  uptime         : {uptime}");
     println!(
         "  camera         : {}",
-        if info.camera_available { "available" } else { "unavailable" }
+        if info.camera_available {
+            "available"
+        } else {
+            "unavailable"
+        }
     );
     println!(
         "  models loaded  : {}",
@@ -699,12 +726,7 @@ fn print_user_table(users: &[UserInfo]) {
 // remove
 // ---------------------------------------------------------------------------
 
-fn cmd_remove(
-    sockets: &Sockets,
-    username: &str,
-    yes: bool,
-    json: bool,
-) -> Result<(), CliError> {
+fn cmd_remove(sockets: &Sockets, username: &str, yes: bool, json: bool) -> Result<(), CliError> {
     if !yes && !json {
         print!("Remove enrollment for '{username}'? [y/N] ");
         std::io::stdout()
@@ -733,7 +755,10 @@ fn cmd_remove(
     }
     match response {
         Response::Success { message, .. } => {
-            println!("{}", message.unwrap_or_else(|| format!("Removed user: {username}")));
+            println!(
+                "{}",
+                message.unwrap_or_else(|| format!("Removed user: {username}"))
+            );
             Ok(())
         }
         Response::Failure { reason } => Err(CliError::new(reason)),
@@ -821,18 +846,17 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
     }
     match response {
         Response::Success { message, .. } => {
-            println!(
-                "\n✓ Enrolled '{username}'. {}",
-                message.unwrap_or_default()
-            );
+            println!("\n✓ Enrolled '{username}'. {}", message.unwrap_or_default());
             Ok(())
         }
-        Response::Failure { reason } => Err(CliError::new(format!(
-            "enrollment failed: {reason}"
-        ))),
+        Response::Failure { reason } => Err(CliError::new(format!("enrollment failed: {reason}"))),
         // The daemon never streams Progress on the command socket, but handle it
         // defensively so an unexpected frame doesn't crash the CLI.
-        Response::Progress { message, current, total } => Err(CliError::new(format!(
+        Response::Progress {
+            message,
+            current,
+            total,
+        } => Err(CliError::new(format!(
             "unexpected progress on command socket: {message} ({current}/{total})"
         ))),
     }

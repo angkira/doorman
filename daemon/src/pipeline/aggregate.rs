@@ -95,13 +95,19 @@ mod tests {
         let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
         let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+        if na == 0.0 || nb == 0.0 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 
     fn normalize(mut v: Vec<f32>) -> Vec<f32> {
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if n > 0.0 {
-            for x in v.iter_mut() { *x /= n; }
+            for x in v.iter_mut() {
+                *x /= n;
+            }
         }
         v
     }
@@ -116,7 +122,10 @@ mod tests {
         let v = normalize(vec![1.0, 2.0, 3.0, 4.0]);
         let agg = aggregate_embeddings(std::slice::from_ref(&v)).unwrap();
         let norm: f32 = agg.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "result must be unit-norm, got {norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "result must be unit-norm, got {norm}"
+        );
         for (a, b) in agg.iter().zip(v.iter()) {
             assert!((a - b).abs() < 1e-5);
         }
@@ -129,7 +138,10 @@ mod tests {
         let b = normalize(vec![0.95, 0.05, 0.12, 0.04]);
         let agg = aggregate_embeddings(&[a, b]).unwrap();
         let norm: f32 = agg.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "aggregated vector must be unit-norm, got {norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "aggregated vector must be unit-norm, got {norm}"
+        );
     }
 
     #[test]

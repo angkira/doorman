@@ -95,8 +95,10 @@ fn main() -> Result<()> {
                 .to_string();
         }
         if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-            config.daemon.data_dir =
-                PathBuf::from(data).join("doorman").to_string_lossy().to_string();
+            config.daemon.data_dir = PathBuf::from(data)
+                .join("doorman")
+                .to_string_lossy()
+                .to_string();
         } else if let Some(home) = std::env::var_os("HOME") {
             config.daemon.data_dir = PathBuf::from(home)
                 .join(".local/share/doorman")
@@ -118,15 +120,14 @@ fn main() -> Result<()> {
     let default_sock = {
         let cmd = std::path::Path::new(&config.daemon.socket_path);
         match cmd.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => dir
-                .join("doorman-depth.sock")
-                .to_string_lossy()
-                .to_string(),
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                dir.join("doorman-depth.sock").to_string_lossy().to_string()
+            }
             _ => depth_ipc::DEFAULT_DEPTH_SOCKET.to_string(),
         }
     };
-    let socket_path = arg_value("--socket")
-        .unwrap_or_else(|| depth_ipc::resolve_socket_path(&default_sock));
+    let socket_path =
+        arg_value("--socket").unwrap_or_else(|| depth_ipc::resolve_socket_path(&default_sock));
 
     // Depth EP: --depth-ep flag > DOORMAN_DEPTH_EP env > "cpu" default.
     let depth_ep = arg_value("--depth-ep")
@@ -194,10 +195,7 @@ fn run(config: &Config, socket_path: &str, depth_ep: &str) -> Result<()> {
 }
 
 #[cfg(feature = "_ort")]
-fn handle_conn(
-    mut stream: UnixStream,
-    depth: Option<&DepthSession>,
-) -> Result<()> {
+fn handle_conn(mut stream: UnixStream, depth: Option<&DepthSession>) -> Result<()> {
     use doormand::ml::Face;
 
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
@@ -255,7 +253,5 @@ fn handle_conn(
 
 #[cfg(not(feature = "_ort"))]
 fn run(_config: &Config, _socket_path: &str, _depth_ep: &str) -> Result<()> {
-    anyhow::bail!(
-        "doorman-depthd built without an ORT backend. Build with --features backend-ort"
-    )
+    anyhow::bail!("doorman-depthd built without an ORT backend. Build with --features backend-ort")
 }
