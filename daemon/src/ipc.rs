@@ -6,10 +6,9 @@ use doorman_shared::{
     DaemonInfo, ENROLL_DURATION_SECS, EnrollmentPhase, Request, Response, ResponseData,
     SIMILARITY_THRESHOLD, StreamMessage,
 };
-use doormand::ipc_policy::{self, Gated, Gatekeeper};
+use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
 use image::GenericImageView;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// Select diverse embeddings from a larger set using maximal distance approach
@@ -65,56 +64,31 @@ pub async fn run_server(state: DaemonState) -> Result<()> {
     // World-connectable: PAM (root) and the CLI/lock watcher (user) differ in uid.
     // Authorization is entirely SO_PEERCRED policy, see ipc_policy / docs/ipc-security.md.
     let listener = ipc_policy::bind_socket(socket_path, ipc_policy::COMMAND_SOCKET_MODE, None)?;
-    let gate = Gatekeeper::new(state.config.ipc.clone());
+    let gate = Arc::new(Gatekeeper::new(state.config.ipc.clone()));
 
     info!("IPC server listening on {}", socket_path);
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                if let Err(e) = handle_connection(stream, state.clone(), &gate).await {
-                    error!("Connection error: {}", e);
-                }
-            }
-            Err(e) => {
-                error!("Accept error: {}", e);
-            }
-        }
-    }
+    // Connections are served concurrently (one task each); the camera producer
+    // is the single frame source and `DaemonState` is cheap to clone.
+    let handler = Arc::new(move |peer: PeerCred, request: Request| {
+        let state = state.clone();
+        async move { dispatch(&state, peer, request).await }
+    });
+    ipc_policy::serve(listener, gate, handler).await;
+    Ok(())
 }
 
-async fn handle_connection(
-    stream: UnixStream,
-    state: DaemonState,
-    gate: &Gatekeeper,
-) -> Result<()> {
-    // Fail closed: without peer credentials no request can be authorized.
-    let peer = match ipc_policy::peer_from_stream(&stream) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!("Rejecting connection: {e:#}");
-            return Ok(());
-        }
-    };
-    let mut reader = BufReader::new(stream);
-
-    let request = match ipc_policy::read_gated_request(&mut reader, &peer, gate).await? {
-        Gated::Allowed(request) => request,
-        Gated::Rejected(response) => {
-            return write_response(reader.into_inner(), &response).await;
-        }
-    };
-
+async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Response {
     debug!("Received request: {}", ipc_policy::request_name(&request));
     let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
-        Request::Authenticate { username } => handle_authenticate(&state, &username).await,
-        Request::Enroll { username } => handle_enroll(&state, &username, &mut reader).await,
-        Request::ListUsers => handle_list_users(&state).await,
-        Request::RemoveUser { username } => handle_remove_user(&state, &username).await,
-        Request::Status => handle_status(&state).await,
-        Request::DetectAndRecognize => handle_detect_and_recognize(&state).await,
+        Request::Authenticate { username } => handle_authenticate(state, &username).await,
+        Request::Enroll { username } => handle_enroll(state, &username).await,
+        Request::ListUsers => handle_list_users(state).await,
+        Request::RemoveUser { username } => handle_remove_user(state, &username).await,
+        Request::Status => handle_status(state).await,
+        Request::DetectAndRecognize => handle_detect_and_recognize(state).await,
         Request::GetLatestDetection => {
             // Not implemented yet - would return cached detection result
             Response::Failure {
@@ -143,16 +117,7 @@ async fn handle_connection(
         );
     }
 
-    write_response(reader.into_inner(), &response).await
-}
-
-async fn write_response(mut stream: UnixStream, response: &Response) -> Result<()> {
-    let response_json = serde_json::to_string(response)?;
-    stream.write_all(response_json.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-
-    Ok(())
+    response
 }
 
 /// Wait until the single-owner camera producer thread has published at least
@@ -789,11 +754,7 @@ mod tests {
     }
 }
 
-async fn handle_enroll(
-    state: &DaemonState,
-    username: &str,
-    _reader: &mut BufReader<UnixStream>,
-) -> Response {
+async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
     info!("Enrollment request for user: {}", username);
 
     // Turn the camera ON on-demand (works even when the screen is unlocked and the

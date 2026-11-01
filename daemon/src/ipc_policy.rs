@@ -10,13 +10,15 @@
 use anyhow::{bail, Context, Result};
 use doorman_shared::{IpcConfig, Request, RequestEnvelope, Response, PROTOCOL_VERSION};
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{info, warn};
+use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
 
 /// Mode of the command socket: world-connectable, security is SO_PEERCRED policy.
 pub const COMMAND_SOCKET_MODE: u32 = 0o666;
@@ -26,6 +28,12 @@ pub const STREAM_SOCKET_MODE: u32 = 0o600;
 pub const STREAM_SOCKET_GROUP_MODE: u32 = 0o660;
 /// Sliding window for the per-uid Authenticate rate limit.
 pub const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+/// Upper bound on simultaneously open command connections; further ones are
+/// dropped. Connections are served concurrently, so this bounds task/fd use.
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+/// How long a connected peer may take to send its request line.
+pub const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reason for any refusal to authenticate as a user. Deliberately identical for
 /// "other uid" and "unknown username" so user existence is not leaked.
@@ -263,6 +271,74 @@ pub async fn read_gated_request<R: AsyncBufRead + Unpin>(
         Ok(()) => Gated::Allowed(env.request),
         Err(resp) => Gated::Rejected(resp),
     })
+}
+
+/// Write one JSON-line response and flush.
+pub async fn write_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
+    let response_json = serde_json::to_string(response)?;
+    stream.write_all(response_json.as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Serve one connection: peer credentials (fail closed), gate, `handler`, reply.
+async fn serve_connection<H, Fut>(stream: UnixStream, gate: &Gatekeeper, handler: &H) -> Result<()>
+where
+    H: Fn(PeerCred, Request) -> Fut,
+    Fut: Future<Output = Response>,
+{
+    let peer = match peer_from_stream(&stream) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("Rejecting connection: {e:#}");
+            return Ok(());
+        }
+    };
+    let mut reader = BufReader::new(stream);
+    let gated = tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        read_gated_request(&mut reader, &peer, gate),
+    )
+    .await
+    .context("timed out waiting for the request line")??;
+    let response = match gated {
+        Gated::Allowed(request) => handler(peer, request).await,
+        Gated::Rejected(response) => response,
+    };
+    write_response(reader.get_mut(), &response).await
+}
+
+/// Accept loop for the command socket. Every connection is served in its own
+/// task, so a long request (Authenticate, WaitForMatch, Enroll) never blocks
+/// others such as Status. Shared state belongs in `handler`'s captures.
+pub async fn serve<H, Fut>(listener: UnixListener, gate: Arc<Gatekeeper>, handler: Arc<H>)
+where
+    H: Fn(PeerCred, Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                error!("Accept error: {}", e);
+                continue;
+            }
+        };
+        let Ok(slot) = slots.clone().try_acquire_owned() else {
+            warn!("Dropping connection: {MAX_CONCURRENT_CONNECTIONS} already open");
+            continue;
+        };
+        let gate = gate.clone();
+        let handler = handler.clone();
+        tokio::spawn(async move {
+            let _slot = slot;
+            if let Err(e) = serve_connection(stream, &gate, &*handler).await {
+                error!("Connection error: {:#}", e);
+            }
+        });
+    }
 }
 
 /// Whether `peer` may stay connected to a frame/debug stream socket. With a
