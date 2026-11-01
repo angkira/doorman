@@ -180,6 +180,82 @@ mod tests {
         );
     }
 
+    /// Exactly the modes `v4l2-ctl --list-formats-ext` printed on the owner's host
+    /// (UGREEN Camera 4K, uvcvideo); see HOST-FACTS.md section 1.
+    fn host_ugreen() -> Vec<DeviceMode> {
+        let mjpg: [(u32, u32, &[u32]); 13] = [
+            (3840, 2160, &[30]),
+            (1280, 720, &[60, 30]),
+            (1920, 1080, &[60, 30]),
+            (4000, 3000, &[30]),
+            (640, 480, &[30]),
+            (640, 360, &[60, 30]),
+            (2560, 1440, &[30]),
+            (2592, 1520, &[30]),
+            (2048, 1536, &[30]),
+            (1280, 960, &[30]),
+            (1024, 768, &[30]),
+            (480, 320, &[30]),
+            (1280, 1024, &[30]),
+        ];
+        let yuyv: [(u32, u32, u32); 12] = [
+            (640, 480, 30),
+            (1920, 1080, 5),
+            (640, 360, 30),
+            (1280, 1024, 5),
+            (2560, 1440, 3),
+            (2592, 1944, 3),
+            (1600, 1200, 5),
+            (480, 320, 30),
+            (320, 240, 30),
+            (800, 600, 15),
+            (1024, 720, 15),
+            (1280, 960, 10),
+        ];
+        let mut modes = Vec::new();
+        for (w, h, rates) in mjpg {
+            modes.extend(rates.iter().map(|fps| m(Mjpeg, w, h, *fps)));
+        }
+        modes.extend(yuyv.iter().map(|(w, h, fps)| m(Yuyv, *w, *h, *fps)));
+        modes
+    }
+
+    #[test]
+    fn host_camera_default_720p30_opens_mjpeg_not_yuyv() {
+        // The failing request at 5f78657 was YUYV 1280x720@30, which this camera
+        // does not offer. The default 1280x720@30 must now resolve to MJPEG.
+        let host = host_ugreen();
+        assert!(!host
+            .iter()
+            .any(|d| d.format == Yuyv && d.width == 1280 && d.height == 720));
+        assert_eq!(
+            select_mode(&host, &want(1280, 720, None)).unwrap(),
+            m(Mjpeg, 1280, 720, 30)
+        );
+        assert_eq!(
+            select_mode(&host, &want(1280, 720, Some(Yuyv))).unwrap(),
+            m(Mjpeg, 1280, 720, 30),
+            "an explicit YUYV request at a size only MJPEG offers falls back to MJPEG"
+        );
+        assert_eq!(
+            select_mode(&host, &want(1280, 720, Some(Mjpeg))).unwrap(),
+            m(Mjpeg, 1280, 720, 30)
+        );
+    }
+
+    #[test]
+    fn host_camera_small_sizes_keep_yuyv_when_unset() {
+        let host = host_ugreen();
+        assert_eq!(
+            select_mode(&host, &want(640, 480, None)).unwrap(),
+            m(Yuyv, 640, 480, 30)
+        );
+        assert_eq!(
+            select_mode(&host, &want(640, 480, Some(Mjpeg))).unwrap(),
+            m(Mjpeg, 640, 480, 30)
+        );
+    }
+
     #[test]
     fn no_usable_mode_lists_what_is_offered() {
         let err = select_mode(&[], &want(640, 480, None)).unwrap_err();
