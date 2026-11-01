@@ -1207,6 +1207,79 @@ fn dir_nonempty(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Prefix of the synthetic plan step that prints [`config_kept_notice`].
+const CONFIG_KEPT_PREFIX: &str = "CONFIG-KEPT:";
+/// Suffix of the rendered config written next to an existing one.
+const CONFIG_NEW_SUFFIX: &str = ".new";
+/// Mode of the installed config (readable by the unprivileged service user).
+const CONFIG_MODE: &str = "0644";
+
+/// Plan steps that install the rendered config at `etc_config`.
+///
+/// Absent file: write it and set mode 0644. Existing file: leave it untouched
+/// (no backup is needed), write `<path>.new` with the same owner/mode logic, and
+/// return the notice step that tells the operator to review it.
+fn config_install_actions(
+    etc_config: &Path,
+    rendered: String,
+    cfg_summary: &str,
+) -> (Vec<Action>, Option<Action>) {
+    let target = etc_config.display().to_string();
+    if !etc_config.exists() {
+        let actions = vec![
+            Action::priv_(
+                format!("Install config -> {target} ({cfg_summary})"),
+                &["tee", &target],
+            )
+            .with_stdin(rendered),
+            Action::priv_(
+                format!("Set {target} mode {CONFIG_MODE}"),
+                &["chmod", CONFIG_MODE, &target],
+            ),
+        ];
+        return (actions, None);
+    }
+    let new_path = format!("{target}{CONFIG_NEW_SUFFIX}");
+    let actions = vec![
+        Action::priv_(
+            format!(
+                "Install config -> {new_path} ({cfg_summary}); existing {target} is kept unchanged"
+            ),
+            &["tee", &new_path],
+        )
+        .with_stdin(rendered),
+        Action::priv_(
+            format!("Set {new_path} mode {CONFIG_MODE}"),
+            &["chmod", CONFIG_MODE, &new_path],
+        ),
+    ];
+    let notice = Action::user(
+        format!(
+            "{CONFIG_KEPT_PREFIX} {}",
+            config_kept_notice(&target, &new_path)
+        ),
+        &["true"],
+    );
+    (actions, Some(notice))
+}
+
+/// Loud multi-line warning printed (to stderr) when the config was not replaced.
+fn config_kept_notice(target: &str, new_path: &str) -> String {
+    format!(
+        "\n\
+         ################################################################\n\
+         WARNING: {target} already exists and was NOT modified.\n\
+         The config rendered for this build was written to:\n\
+         \x20   {new_path}\n\
+         Your running settings may not match this build's defaults or keys.\n\
+         Review, then merge what you want by hand:\n\
+         \x20   diff -u {target} {new_path}\n\
+         Check the config you actually run (exit 2 = obsolete keys, 1 = invalid):\n\
+         \x20   doorman config check --config {target}\n\
+         ################################################################\n"
+    )
+}
+
 /// Build the ordered install plan (no side effects — pure construction).
 fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     let mut plan = Vec::new();
@@ -1433,24 +1506,10 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         ));
     }
 
-    // Config: install doorman.toml with device set to the detected EP.
-    // ALWAYS re-install (no skip-if): the config is installer-managed and a re-run
-    // must reconcile it — skipping when it exists left a stale socket_path
-    // (/run/doorman.sock) after the socket-path migration, so the daemon failed to
-    // bind. `install` overwrites in place; back it up first so a manual edit isn't
-    // silently lost.
+    // Config: render doorman.toml for the detected EP. An existing config is the
+    // operator's file and is NEVER overwritten: the rendered config goes to
+    // `<path>.new` instead and a loud notice is printed at the end of the run.
     let cfg_src = root.join("doorman.toml");
-    if Path::new(ETC_CONFIG).exists() {
-        plan.push(Action::priv_(
-            format!("Back up existing {ETC_CONFIG} -> {ETC_CONFIG}.doorman-bak"),
-            &[
-                "cp",
-                "--update=none",
-                ETC_CONFIG,
-                Box::leak(format!("{ETC_CONFIG}.doorman-bak").into_boxed_str()),
-            ],
-        ));
-    }
     // Render the installed config from the repo source with the EP-appropriate
     // backend/device baked in (and proactive_unlock=true under --auto-unlock), then
     // write via `tee`. ALWAYS render (never copy verbatim): the repo file ships
@@ -1479,17 +1538,9 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         d.ep,
         opts.auto_unlock,
     );
-    plan.push(
-        Action::priv_(
-            format!("Install config -> {ETC_CONFIG} ({cfg_summary})"),
-            &["tee", ETC_CONFIG],
-        )
-        .with_stdin(rendered),
-    );
-    plan.push(Action::priv_(
-        format!("Set {ETC_CONFIG} mode 0644"),
-        &["chmod", "0644", ETC_CONFIG],
-    ));
+    let (config_actions, config_kept_notice) =
+        config_install_actions(Path::new(ETC_CONFIG), rendered, &cfg_summary);
+    plan.extend(config_actions);
 
     // --auto-unlock: install the scoped polkit rule that lets the `doorman` user
     // call logind Session.Unlock() (the daemon's proactive-unlock path). Without
@@ -1881,6 +1932,8 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
         ));
     }
 
+    // Last, so it is the final thing the operator reads.
+    plan.extend(config_kept_notice);
     plan
 }
 
@@ -2089,6 +2142,11 @@ fn execute_plan(plan: &[Action], d: &Diagnosis, _opts: &InstallOpts) -> Result<(
     for a in plan {
         if a.skip_if.map(|f| f()).unwrap_or(false) {
             println!("skip: {}", a.desc);
+            continue;
+        }
+        // The config-kept notice is a loud warning, not a command.
+        if let Some(text) = a.desc.strip_prefix(CONFIG_KEPT_PREFIX) {
+            eprintln!("{}", text.trim_start_matches(' '));
             continue;
         }
         println!("==> {}", a.desc);
@@ -3377,6 +3435,79 @@ mod tests {
                 && a.desc.contains("device=cpu")),
             "cpu config action must advertise backend=tract, device=cpu"
         );
+    }
+
+    /// Run a config plan step as the current user (the real run prepends sudo).
+    fn run_without_sudo(a: &Action) {
+        use std::io::Write as _;
+        let mut child = Command::new(&a.argv[0])
+            .args(&a.argv[1..])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn plan step");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        if let Some(text) = &a.stdin {
+            stdin.write_all(text.as_bytes()).expect("write stdin");
+        }
+        drop(stdin);
+        assert!(child.wait().expect("wait").success(), "{}", a.desc);
+    }
+
+    #[test]
+    fn existing_config_is_never_overwritten_and_new_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().join("doorman.toml");
+        let original = b"# operator edits\n[daemon]\nlog_level = \"debug\"\n";
+        std::fs::write(&etc, original).unwrap();
+
+        let (actions, notice) = config_install_actions(&etc, "rendered = true\n".into(), "cpu");
+        for action in &actions {
+            run_without_sudo(action);
+        }
+
+        assert_eq!(std::fs::read(&etc).unwrap(), original, "config untouched");
+        let new_path = dir.path().join("doorman.toml.new");
+        assert_eq!(
+            std::fs::read_to_string(&new_path).unwrap(),
+            "rendered = true\n"
+        );
+        let mode = std::fs::metadata(&new_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        // No step may target the original path.
+        let target = etc.display().to_string();
+        assert!(actions
+            .iter()
+            .all(|a| a.argv.iter().skip(1).all(|arg| *arg != target)));
+
+        let notice = notice.expect("a kept config produces a notice").desc;
+        assert!(notice.starts_with(CONFIG_KEPT_PREFIX));
+        assert!(notice.contains("WARNING"));
+        assert!(notice.contains(&target));
+        assert!(notice.contains(&new_path.display().to_string()));
+        assert!(notice.contains(&format!("doorman config check --config {target}")));
+        assert!(notice.contains(&format!("diff -u {target} {}", new_path.display())));
+    }
+
+    #[test]
+    fn fresh_install_writes_the_config_without_notice() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().join("doorman.toml");
+
+        let (actions, notice) = config_install_actions(&etc, "rendered = true\n".into(), "cpu");
+        for action in &actions {
+            run_without_sudo(action);
+        }
+
+        assert_eq!(std::fs::read_to_string(&etc).unwrap(), "rendered = true\n");
+        assert_eq!(
+            std::fs::metadata(&etc).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(!dir.path().join("doorman.toml.new").exists());
+        assert!(notice.is_none());
     }
 
     #[test]
