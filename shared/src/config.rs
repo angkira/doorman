@@ -43,6 +43,9 @@ pub struct Config {
 
     #[serde(default)]
     pub dataset: DatasetConfig,
+
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -356,6 +359,36 @@ impl Default for DatasetConfig {
     }
 }
 
+/// Per-attempt timing telemetry (workstream WS6). Default OFF.
+///
+/// When `timing_log` is enabled the daemon appends ONE JSON line per
+/// authentication attempt to `timing_log_path`. A line holds stage durations,
+/// frame counters, the outcome, and the two calibration values (final cosine
+/// similarity and depth-liveness relief). It never holds usernames, uids,
+/// frames or embeddings. The file is rotated to `<path>.1` (one generation
+/// kept) once it exceeds `timing_log_max_bytes`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub timing_log: bool,
+
+    #[serde(default = "default_timing_log_path")]
+    pub timing_log_path: String,
+
+    #[serde(default = "default_timing_log_max_bytes")]
+    pub timing_log_max_bytes: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            timing_log: false,
+            timing_log_path: default_timing_log_path(),
+            timing_log_max_bytes: default_timing_log_max_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
     // Face detector (BlazeFace)
@@ -399,6 +432,12 @@ fn default_debug_socket() -> String {
 }
 fn default_frame_socket() -> String {
     "/run/doorman/doorman-frames.sock".to_string()
+}
+fn default_timing_log_path() -> String {
+    "/run/doorman/timing.jsonl".to_string()
+}
+fn default_timing_log_max_bytes() -> u64 {
+    1024 * 1024
 }
 fn default_processing_fps() -> u32 {
     10
@@ -632,6 +671,7 @@ impl Default for Config {
             models: ModelsConfig::default(),
             recognition: RecognitionConfig::default(),
             dataset: DatasetConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
@@ -707,5 +747,20 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.ml.device, "rocm");
         assert_eq!(config.ml.gpu_device_id, 1);
+    }
+
+    #[test]
+    fn test_telemetry_defaults_and_old_config() {
+        // A config without a [telemetry] table must parse and keep logging off.
+        let config: Config = toml::from_str("[ml]\ndevice = \"cpu\"\n").unwrap();
+        assert!(!config.telemetry.timing_log);
+        assert_eq!(
+            config.telemetry.timing_log_path,
+            "/run/doorman/timing.jsonl"
+        );
+        assert_eq!(config.telemetry.timing_log_max_bytes, 1024 * 1024);
+        let on: Config = toml::from_str("[telemetry]\ntiming_log = true\n").unwrap();
+        assert!(on.telemetry.timing_log);
+        assert_eq!(on.telemetry.timing_log_max_bytes, 1024 * 1024);
     }
 }
