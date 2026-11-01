@@ -18,6 +18,10 @@ use image::GenericImageView;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// Mean-mode swap tests through the real `run_authenticate` (test-only seam).
+#[cfg(test)]
+mod real_path_tests;
+
 /// Longest an authentication waits for the camera to deliver its first frame
 /// (the strict sudo profile caps this further by its own deadline).
 const AUTH_CAMERA_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
@@ -1092,9 +1096,6 @@ fn log_auth_capture_pack(
 
 // Production handlers follow this module; relocating the tests would be a large move.
 #[allow(clippy::items_after_test_module)]
-#[cfg(test)]
-mod real_path_tests;
-
 #[cfg(test)]
 mod tests {
     use super::*;
