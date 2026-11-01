@@ -509,7 +509,11 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
         .iter()
         .map(|stored_emb| crate::ml::cosine_similarity(&aggregated, stored_emb))
         .collect();
-    let best_similarity = gallery_similarities.iter().copied().fold(0.0f32, f32::max);
+    let best_similarity = crate::pipeline::template_score(
+        state.config.decision.template_score,
+        &aggregated,
+        &stored_embeddings,
+    );
     let matched = best_similarity >= threshold;
     timing.decision = Some(decision_started.elapsed());
     timing.similarity = Some(best_similarity);
