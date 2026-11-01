@@ -56,7 +56,7 @@ clap = { workspace = true }
 #   - backend-ort-cuda  -> ort/cuda + download-binaries
 # This keeps `download-binaries` and `load-dynamic` from being enabled together
 # (which would download a CPU dylib that the ROCm dynamic-load path then ignores).
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
 
 # ROCm pre-flight only: dlopen libamdhip64 to ask hipGetDeviceCount whether HIP
 # sees a usable GPU BEFORE registering the ROCm EP (ORT's ROCm init does an
