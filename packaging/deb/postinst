@@ -20,11 +20,7 @@ if getent group video >/dev/null; then
   usermod -aG video doorman || true
 fi
 
-if getent group render >/dev/null; then
-  usermod -aG render doorman || true
-fi
-
-install -d -o doorman -g doorman -m 0750 /var/lib/doorman
+install -d -o doorman -g doorman -m 0700 /var/lib/doorman
 install -d -o doorman -g doorman -m 0750 /var/lib/doorman/models
 install -d -o doorman -g doorman -m 0750 /var/lib/doorman/miopen
 install -d -o doorman -g doorman -m 0750 /var/lib/doorman/.cache

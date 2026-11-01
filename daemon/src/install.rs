@@ -719,6 +719,8 @@ const SYS_SWAY_ADAPTER_DIR: &str = "/usr/lib/doorman/adapters/sway";
 const ETC_DIR: &str = "/etc/doorman";
 const ETC_CONFIG: &str = "/etc/doorman/doorman.toml";
 const STATE_DIR: &str = "/var/lib/doorman";
+/// Mode of the state directory: embeddings and the dataset are private to `doorman`.
+const STATE_DIR_MODE: &str = "0700";
 const MODELS_DIR: &str = "/var/lib/doorman/models";
 const UNIT_PATH: &str = "/etc/systemd/system/doormand.service";
 const DEPTHD_UNIT_PATH: &str = "/etc/systemd/system/doorman-depthd.service";
@@ -802,7 +804,7 @@ fn render_unit(ep: Ep) -> String {
          Type=simple\n\
          User=doorman\n\
          Group=doorman\n\
-         SupplementaryGroups=video render\n\
+         SupplementaryGroups=video\n\
          {env}\
          ExecStart={SYS_BIN} --config {ETC_CONFIG} {device_arg}\n\
          Restart=on-failure\n\
@@ -820,18 +822,13 @@ fn render_unit(ep: Ep) -> String {
          PrivateTmp=true\n\
          RestrictAddressFamilies=AF_UNIX\n\
          StateDirectory=doorman\n\
+         StateDirectoryMode={STATE_DIR_MODE}\n\
          RuntimeDirectory=doorman\n\
          ReadWritePaths={STATE_DIR}\n\
          DevicePolicy=closed\n\
          DeviceAllow=char-video4linux rw\n\
-         # char-drm (DRM major 226) grants the /dev/dri/renderD*/card* nodes. A bare\n\
-         # `DeviceAllow=/dev/dri rw` does NOT cover those char devices under\n\
-         # DevicePolicy=closed, so the ncnn/Vulkan (radv) backend got\n\
-         # \"renderD128: Operation not permitted\" and fell back to CPU. Needed for\n\
-         # Vulkan (ncnn iGPU depth) and harmless for the other EPs.\n\
-         DeviceAllow=char-drm rw\n\
-         DeviceAllow=/dev/dri rw\n\
-         DeviceAllow=/dev/kfd rw\n\
+         # No GPU device nodes and no `render` group: the daemon never touches a GPU\n\
+         # unless the owner adds an opt-in drop-in (docs/systemd-hardening.md).\n\
          MemoryMax=2G\n\
          TasksMax=128\n\
          \n\
@@ -1278,11 +1275,24 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     }
 
     // Phase 3: system provisioning (all sudo).
-    plan.push(Action::priv_(
-        "Create system user 'doorman' (no login shell, video+render groups, HOME=/var/lib/doorman)",
-        &["useradd", "--system", "--home-dir", STATE_DIR, "--no-create-home",
-          "--shell", "/usr/sbin/nologin", "--groups", "video,render", "doorman"],
-    ).skip_when(|| user_exists("doorman")));
+    plan.push(
+        Action::priv_(
+            "Create system user 'doorman' (no login shell, video group, HOME=/var/lib/doorman)",
+            &[
+                "useradd",
+                "--system",
+                "--home-dir",
+                STATE_DIR,
+                "--no-create-home",
+                "--shell",
+                "/usr/sbin/nologin",
+                "--groups",
+                "video",
+                "doorman",
+            ],
+        )
+        .skip_when(|| user_exists("doorman")),
+    );
 
     plan.push(Action::priv_(
         format!("Create directories {ETC_DIR}, {STATE_DIR}, {MODELS_DIR}, {SYS_LIBDIR}"),
@@ -1295,7 +1305,16 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     plan.push(Action::priv_(
         format!("Create state dir {STATE_DIR} owned by doorman"),
         &[
-            "install", "-d", "-m", "0750", "-o", "doorman", "-g", "doorman", STATE_DIR, MODELS_DIR,
+            "install",
+            "-d",
+            "-m",
+            STATE_DIR_MODE,
+            "-o",
+            "doorman",
+            "-g",
+            "doorman",
+            STATE_DIR,
+            MODELS_DIR,
         ],
     ));
     // MIOpen runtime-JIT cache + XDG cache home, owned by doorman and writable
@@ -2773,6 +2792,38 @@ mod tests {
         assert!(u.contains("Environment=HOME=/var/lib/doorman"));
         assert!(u.contains("Environment=XDG_CACHE_HOME=/var/lib/doorman/.cache"));
         assert!(u.contains("Environment=MIOPEN_USER_DB_PATH=/var/lib/doorman/miopen"));
+    }
+
+    #[test]
+    fn daemon_unit_grants_no_gpu_access() {
+        // The daemon must never reach a GPU by default (the owner reserves the
+        // discrete GPU for other work): no DRM/KFD DeviceAllow, no `render` group.
+        for ep in [Ep::Cpu, Ep::Rocm, Ep::Cuda, Ep::CoreMl, Ep::Ncnn] {
+            let u = render_unit(ep);
+            for line in u.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                assert!(
+                    !line.contains("char-drm")
+                        && !line.contains("/dev/dri")
+                        && !line.contains("/dev/kfd")
+                        && !line.contains("/dev/nvidia"),
+                    "{ep:?} unit grants a GPU device: {line}"
+                );
+                if let Some(groups) = line.strip_prefix("SupplementaryGroups=") {
+                    assert!(
+                        !groups.split_whitespace().any(|g| g == "render"),
+                        "{ep:?} unit adds the render group"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_unit_state_directory_is_private() {
+        for ep in [Ep::Cpu, Ep::Rocm] {
+            let u = render_unit(ep);
+            assert!(u.contains("StateDirectoryMode=0700\n"), "{ep:?}");
+        }
     }
 
     #[test]
