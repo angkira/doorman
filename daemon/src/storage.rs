@@ -3,7 +3,8 @@ use doorman_shared::DATA_DIR;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 /// First bytes of a versioned `embeddings.bin`. The legacy (version 1) file has
@@ -14,6 +15,13 @@ const FILE_MAGIC: &[u8; 8] = b"DRMNEMB\0";
 /// then the bincode-encoded `Vec<UserEmbedding>`.
 const FORMAT_VERSION: u32 = 2;
 const HEADER_LEN: usize = FILE_MAGIC.len() + std::mem::size_of::<u32>();
+/// Name (next to `embeddings.bin`) of the one-time copy of a legacy file made
+/// before its first version-2 write. Never overwritten; see docs/storage.md.
+const LEGACY_BACKUP_NAME: &str = "embeddings.bin.v1.bak";
+/// Mode of every file holding biometric data.
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Mode of the data directory.
+const DATA_DIR_MODE: u32 = 0o700;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserEmbedding {
@@ -36,14 +44,18 @@ impl Storage {
         // Ensure data directory exists
         fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
 
-        // Set proper permissions (0700 for user, or current perms)
+        // The directory must be private. Root always enforces it; the unprivileged
+        // service enforces it on a directory it owns (a root-only check never ran
+        // for it; the unit's StateDirectoryMode=0700 is the primary guard).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            // Don't change permissions in user mode - just use defaults
-            // Only set 0700 if running as root
-            if nix::unistd::getuid().is_root() {
-                let perms = fs::Permissions::from_mode(0o700);
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let owned = fs::metadata(&data_dir)
+                .context("Failed to stat data directory")?
+                .uid()
+                == nix::unistd::geteuid().as_raw();
+            if nix::unistd::geteuid().is_root() || owned {
+                let perms = fs::Permissions::from_mode(DATA_DIR_MODE);
                 fs::set_permissions(&data_dir, perms)
                     .context("Failed to set data directory permissions")?;
             }
@@ -113,24 +125,49 @@ impl Storage {
         Ok(map)
     }
 
+    /// Copy a legacy (headerless, version 1) `embeddings.bin` to
+    /// `embeddings.bin.v1.bak` before it is replaced by a version-2 file, so an
+    /// older daemon can be restored. Created with mode 0600 and `create_new`:
+    /// an existing backup is never overwritten.
+    fn backup_legacy_file(&self) -> Result<()> {
+        let data = match fs::read(&self.file_path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e).context("Failed to read embeddings file for backup"),
+        };
+        if data.starts_with(FILE_MAGIC) {
+            return Ok(());
+        }
+        let backup = self.file_path.with_file_name(LEGACY_BACKUP_NAME);
+        match write_private_file(&backup, &data, false) {
+            Ok(()) => {
+                info!("Backed up the version 1 embeddings file to {:?}", backup);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("Failed to write backup {backup:?}")),
+        }
+    }
+
     fn save_embeddings(&self) -> Result<()> {
         let embeddings_vec: Vec<UserEmbedding> = self.embeddings.values().cloned().collect();
         let data = Self::encode_embeddings(&embeddings_vec)?;
 
-        // Write a sibling file and rename it over the target, so a crash while
-        // upgrading a legacy file never leaves a truncated embeddings.bin.
-        let tmp_path = self.file_path.with_extension("bin.tmp");
-        fs::write(&tmp_path, data).context("Failed to write embeddings file")?;
-        fs::rename(&tmp_path, &self.file_path).context("Failed to replace embeddings file")?;
+        self.backup_legacy_file()?;
 
-        // Set restrictive permissions (0600 - only root read/write)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&self.file_path, perms)
-                .context("Failed to set embeddings file permissions")?;
-        }
+        // Write a sibling file (0600 from creation, fsynced) and rename it over
+        // the target, then fsync the directory so the rename is durable: a crash
+        // never leaves a truncated, empty or world-readable embeddings.bin.
+        let tmp_path = self.file_path.with_extension("bin.tmp");
+        write_private_file(&tmp_path, &data, true).context("Failed to write embeddings file")?;
+        fs::rename(&tmp_path, &self.file_path).context("Failed to replace embeddings file")?;
+        let dir = self
+            .file_path
+            .parent()
+            .context("Embeddings file has no parent directory")?;
+        fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .context("Failed to fsync data directory")?;
 
         debug!("Embeddings saved to {:?}", self.file_path);
         Ok(())
@@ -195,6 +232,28 @@ impl Storage {
     pub fn count(&self) -> usize {
         self.embeddings.len()
     }
+}
+
+/// Create `path` with mode 0600 (applied at creation, so the data is never
+/// readable by others), write `data` and fsync it. With `replace`, a stale file
+/// at `path` is removed first so its (possibly looser) mode cannot survive;
+/// without it an existing file is an `AlreadyExists` error.
+fn write_private_file(path: &Path, data: &[u8], replace: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if replace {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE_FILE_MODE)
+        .open(path)?;
+    file.write_all(data)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -268,5 +327,84 @@ mod tests {
             reloaded.get_embeddings("alice").unwrap(),
             &vec![vec![0.0, 0.0, 1.0]]
         );
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn private_file_is_0600_at_creation_and_replaces_a_loose_stale_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embeddings.bin.tmp");
+        // A stale temp file with a loose mode must not leak its mode.
+        fs::write(&path, b"stale").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_file(&path, b"new", true).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        // Without `replace` an existing file is an error, not an overwrite.
+        let err = write_private_file(&path, b"other", false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn saved_file_is_0600_and_no_temp_file_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![1.0]])
+            .await
+            .unwrap();
+        assert_eq!(mode_of(&dir.path().join("embeddings.bin")), 0o600);
+        assert!(!dir.path().join("embeddings.bin.tmp").exists());
+        // A fresh install has nothing to back up.
+        assert!(!dir.path().join(LEGACY_BACKUP_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn data_directory_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        Storage::new_with_dir(dir.path()).await.unwrap();
+        assert_eq!(mode_of(dir.path()), 0o700);
+    }
+
+    #[tokio::test]
+    async fn legacy_backup_is_created_once_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_file = dir.path().join("embeddings.bin");
+        let backup = dir.path().join(LEGACY_BACKUP_NAME);
+        fs::write(&data_file, legacy_bytes()).unwrap();
+
+        let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![0.0, 0.0, 1.0]])
+            .await
+            .unwrap();
+        // First v2 write: the backup is the untouched v1 file, mode 0600.
+        assert_eq!(fs::read(&backup).unwrap(), legacy_bytes());
+        assert_eq!(mode_of(&backup), 0o600);
+        assert!(fs::read(&data_file).unwrap().starts_with(FILE_MAGIC));
+
+        // A second write (file is v2 now) leaves the backup alone.
+        storage
+            .store_embeddings("alice".into(), vec![vec![9.0]])
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), legacy_bytes());
+
+        // Even if a v1 file reappears (rollback), an existing backup is kept.
+        let other_v1 = bincode::serialize(&Vec::<UserEmbedding>::new()).unwrap();
+        fs::write(&data_file, other_v1).unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![5.0]])
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), legacy_bytes());
     }
 }
