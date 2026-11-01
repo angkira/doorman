@@ -248,7 +248,7 @@ impl MLPipeline {
         Ok(self
             .liveness_check(image, face)
             .await
-            .map_or(true, |outcome| outcome.is_pass()))
+            .is_none_or(|outcome| outcome.is_pass()))
     }
 
     /// Fast detection only - no embedding extraction (for real-time preview)
