@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Model-free feature set: no ONNX Runtime download, no models, no camera.
+  # ORT-dependent code paths (latency, directory-mode accuracy) are exercised
+  # on the owner's host, see docs/bench/README.md.
+  FEATURES: --no-default-features --features camera-mock,camera-ffmpeg,preview
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev libpam0g-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets $FEATURES -- -D warnings
+
+      - name: Test
+        # test_video_frame_detection builds a real ML pipeline and needs the ORT backend.
+        run: cargo test --workspace $FEATURES -- --skip test_video_frame_detection
+
+      - name: Build doorman-bench
+        run: cargo build -p doorman-bench --no-default-features
+
+      - name: Bench smoke on synthetic data
+        # Only algorithmic invariants are asserted (in bench/tests/cli.rs, run
+        # above). This step additionally exercises the shipped binary end to end.
+        run: |
+          B=target/debug/doorman-bench
+          D="$RUNNER_TEMP/bench-smoke"
+          $B synth --out "$D" --seed 1
+          $B accuracy --scores "$D/accuracy_scores.csv" --out "$D/report"
+          $B liveness --scores "$D/liveness_scores.csv" --out "$D/report"
+          test -s "$D/report/accuracy.md"
+          test -s "$D/report/liveness_roc.csv"
+
+      - name: Bench latency (needs models and the ort feature)
+        run: |
+          echo "SKIPPED: latency needs ONNX model files and a doorman-bench build with --features ort."
+          echo "CI builds the model-free subset; run 'doorman-bench latency' on a host with models (docs/bench/README.md)."
