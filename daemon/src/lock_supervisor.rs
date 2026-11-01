@@ -30,6 +30,9 @@ use tracing::{info, warn};
 use zbus::zvariant::OwnedObjectPath;
 use zbus::Connection;
 
+/// One `ListSessions` row: (session_id, uid, user_name, seat_id, object_path).
+type LogindSessionEntry = (String, u32, String, String, OwnedObjectPath);
+
 /// logind Manager proxy: enumerate sessions.
 #[zbus::proxy(
     interface = "org.freedesktop.login1.Manager",
@@ -38,7 +41,7 @@ use zbus::Connection;
 )]
 trait LoginManager {
     /// Returns (session_id, uid, user_name, seat_id, object_path).
-    fn list_sessions(&self) -> zbus::Result<Vec<(String, u32, String, String, OwnedObjectPath)>>;
+    fn list_sessions(&self) -> zbus::Result<Vec<LogindSessionEntry>>;
 }
 
 /// logind Session proxy: lock/unlock signals + the hint properties we gate on.
@@ -188,6 +191,7 @@ async fn build_session_proxy(
 /// Pick the active graphical session on seat0. Preference order:
 ///   1. seat0 + graphical (wayland/x11) + Active=true
 ///   2. seat0 + graphical (first match)
+///
 /// Falls back to `None` if none qualifies.
 async fn resolve_graphical_session(conn: &Connection) -> Option<OwnedObjectPath> {
     let manager = match LoginManagerProxy::new(conn).await {

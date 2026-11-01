@@ -127,6 +127,8 @@ fn authenticate_with_deadline(username: &str) -> AuthOutcome {
     }
 }
 
+// `pamh` is an opaque handle that is only handed back to libpam, never dereferenced here.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut pam_sys::PamHandle,

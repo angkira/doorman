@@ -15,7 +15,7 @@ pub enum ConfigError {
     NotFound,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub daemon: DaemonConfig,
@@ -620,22 +620,6 @@ impl Default for ModelsConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            daemon: DaemonConfig::default(),
-            camera: CameraConfig::default(),
-            ml: MLConfig::default(),
-            authentication: AuthConfig::default(),
-            enrollment: EnrollmentConfig::default(),
-            preprocessing: PreprocessingConfig::default(),
-            models: ModelsConfig::default(),
-            recognition: RecognitionConfig::default(),
-            dataset: DatasetConfig::default(),
-        }
-    }
-}
-
 impl Config {
     /// Load config from standard locations
     /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
@@ -667,8 +651,7 @@ impl Config {
 
     /// Save config to path
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         fs::write(path, content)?;
         Ok(())
     }

@@ -17,6 +17,8 @@ use tracing::{debug, info, warn};
 /// Matches embeddings against storage
 /// Updates system lock state
 /// Broadcasts debug information
+// Pipeline wiring takes each channel/handle separately; a params struct would be a refactor.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_recognition_pipeline(
     mut result_rx: tokio::sync::mpsc::Receiver<DetectionResult>,
     storage: Arc<RwLock<Storage>>,
@@ -462,6 +464,7 @@ pub async fn run_recognition_pipeline(
 ///      template toward a persistent look-alike;
 ///   2. it adds real coverage (not a near-duplicate of an existing embedding);
 ///   3. the gallery is below a hard cap.
+///
 /// It APPENDS only — the originally-enrolled embeddings are NEVER evicted, so they
 /// permanently anchor the identity. Combined with the caller's gates (recognition >=
 /// threshold AND the FATAL liveness gate), a spoof or wrong face cannot enter. No-op
@@ -535,6 +538,8 @@ fn should_attempt_unlock(enabled: bool, armed: bool, already_spent: bool) -> boo
     enabled && armed && !already_spent
 }
 
+// Plain data parameters of a persisted record; a params struct would be a refactor.
+#[allow(clippy::too_many_arguments)]
 fn log_dataset_attempt(
     config: &Config,
     enabled: bool,

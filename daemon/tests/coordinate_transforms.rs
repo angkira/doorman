@@ -1,5 +1,5 @@
-/// Unit tests for coordinate transformations in the pipeline
-/// Tests the flow: BlazeFace output -> pixel coords -> preview display
+//! Unit tests for coordinate transformations in the pipeline.
+//! Tests the flow: BlazeFace output -> pixel coords -> preview display
 
 #[cfg(test)]
 mod tests {

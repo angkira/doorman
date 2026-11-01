@@ -183,7 +183,7 @@ mod tests {
         let mut cls = vec![0.01f32; n];
         let mut obj = vec![0.0f32; n];
         let mut bbox = vec![0.0f32; 4 * n];
-        let mut kps = vec![0.0f32; 10 * n];
+        let kps = vec![0.0f32; 10 * n];
         cls[active] = 0.81; // sqrt(0.81*1.0) = 0.9
         obj[active] = 1.0;
         // dx=dy=0.5 (center of cell), dw=dh=0 -> w=h=stride

@@ -313,7 +313,7 @@ impl eframe::App for PreviewApp {
                             ui.painter().rect_stroke(
                                 box_rect,
                                 2.0,
-                                egui::Stroke::new(3.0, color),
+                                egui::Stroke::new(3.0_f32, color),
                             );
 
                             // Label above the box.

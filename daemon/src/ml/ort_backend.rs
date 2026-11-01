@@ -122,8 +122,10 @@ fn rocm_runtime_has_device() -> bool {
 ///   2. `ml.gpu_uuid` names a specific GPU — we never auto-pick by index, so the
 ///      daemon can't bind an off-limits card (e.g. a dGPU) it wasn't told to use,
 ///   3. the HIP runtime actually sees that device (pre-flight).
+///
 /// Otherwise the daemon runs on CPU (logging the reason once). The decision is
 /// cached so the per-model calls don't re-log.
+///
 /// Export the config-driven GPU binding env vars BEFORE any HIP init: select the
 /// ROCm GPU by its STABLE UUID (`ml.gpu_uuid` → `ROCR_VISIBLE_DEVICES`) and apply
 /// an optional `ml.hsa_gfx_version` override. Index-independent and operator-owned
@@ -1151,7 +1153,7 @@ impl MLBackend for OrtBackend {
         let outputs = ort_try!(recognizer_lock.run(ort::inputs![input_tensor]));
 
         let (_, embedding_data) = ort_try!(outputs[0].try_extract_tensor::<f32>());
-        let embedding: Vec<f32> = embedding_data.iter().copied().collect();
+        let embedding: Vec<f32> = embedding_data.to_vec();
 
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         let normalized = if norm > 0.0 {

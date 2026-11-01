@@ -63,8 +63,8 @@ pub async fn run_detection_pipeline(
                     // and is the AUTH-only anti-spoofing check (ipc::handle_authenticate).
                     // Preview is a display overlay, not an unlock decision — running
                     // depth here made it crawl (~2 fps) with rare recognition.
-                    match ml.detect_face(&*frame).await {
-                        Ok(Some(face)) => match ml.extract_embedding(&*frame, &face).await {
+                    match ml.detect_face(&frame).await {
+                        Ok(Some(face)) => match ml.extract_embedding(&frame, &face).await {
                             Ok(emb) => Ok(Some((face, emb))),
                             Err(e) => Err(e),
                         },
@@ -73,7 +73,7 @@ pub async fn run_detection_pipeline(
                     }
                 } else {
                     // Fast detection only (no embedding)
-                    match ml.detect_only(&*frame).await {
+                    match ml.detect_only(&frame).await {
                         Ok(Some(face)) => Ok(Some((face, Vec::new()))), // Empty embedding
                         Ok(None) => Ok(None),
                         Err(e) => Err(e),
@@ -215,7 +215,7 @@ pub async fn run_detection_pipeline(
         // On failure we still forward the detection (box keeps tracking) but
         // drop the embedding so it never enters the aggregation window.
         let mut embedding = Some(embedding);
-        if need_embedding && embedding.as_ref().map_or(false, |e| !e.is_empty()) {
+        if need_embedding && embedding.as_ref().is_some_and(|e| !e.is_empty()) {
             let (_, _, w_norm, h_norm) = face.bbox;
             let area_frac = (w_norm * h_norm).abs();
             let area_ok = min_face_area_frac <= 0.0 || area_frac >= min_face_area_frac;
@@ -247,7 +247,7 @@ pub async fn run_detection_pipeline(
         // embedding frames, so the recognition stage can run the FATAL depth
         // liveness gate before a proactive unlock (Stage B). Detect-only / dropped
         // frames carry neither and can never trigger an unlock.
-        let carry_liveness = embedding.as_ref().map_or(false, |e| !e.is_empty());
+        let carry_liveness = embedding.as_ref().is_some_and(|e| !e.is_empty());
         let (camera_width, camera_height) = camera_dimensions;
         let _ = result_tx.try_send(DetectionResult {
             sequence,
