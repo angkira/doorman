@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# doorman-lock - lock the session and start event-driven face unlock.
+#
+# Starts the screen locker as a background job of this script (it is not
+# allowed to daemonize itself), so $! is the PID of the real locker, then starts `doorman unlock-watch` for
+# exactly that PID. The watcher asks the daemon to report a face match and then
+# SIGTERMs the locker; nothing is polled and nothing is killed by name.
+#
+# Environment (all optional):
+#   DOORMAN_USER            user whose face unlocks (default: current user)
+#   DOORMAN_SOCKET          daemon socket (default: /run/doorman/doorman.sock)
+#   DOORMAN_BIN             doorman CLI (default: doorman)
+#   DOORMAN_LOCK_BACKEND    auto | gtklock | swaylock (default: auto)
+#   DOORMAN_LOCKER_NAME     expected /proc comm of the locker (default: basename)
+#   DOORMAN_UNLOCK_MODE     event (default) | poll (old polling watcher, fallback)
+#   DOORMAN_GTKLOCK_CONFIG  default: ${XDG_CONFIG_HOME:-$HOME/.config}/gtklock/config.ini
+#   DOORMAN_SWAYLOCK_CONFIG default: ${XDG_CONFIG_HOME:-$HOME/.config}/swaylock/config
+#   DOORMAN_LOCKER_SETTLE   seconds to wait before deciding the locker stayed up (0.3)
+#   GTKLOCK, SWAYLOCK       locker executables
+# Extra arguments are passed to the locker.
+set -euo pipefail
+
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}"
+
+user="${DOORMAN_USER:-$(id -un)}"
+socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
+doorman_bin="${DOORMAN_BIN:-doorman}"
+backend="${DOORMAN_LOCK_BACKEND:-auto}"
+unlock_mode="${DOORMAN_UNLOCK_MODE:-event}"
+settle="${DOORMAN_LOCKER_SETTLE:-0.3}"
+gtklock_bin="${GTKLOCK:-gtklock}"
+swaylock_bin="${SWAYLOCK:-swaylock}"
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+gtklock_config="${DOORMAN_GTKLOCK_CONFIG:-$config_home/gtklock/config.ini}"
+swaylock_config="${DOORMAN_SWAYLOCK_CONFIG:-$config_home/swaylock/config}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+poll_watcher="${DOORMAN_LOCK_WATCH_POLL:-$script_dir/doorman-lock-watch-poll}"
+
+state_dir="$XDG_RUNTIME_DIR/doorman"
+log="$state_dir/lock.log"
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+
+log() {
+    printf '%s doorman-lock: %s\n' "$(date -Is)" "$*" >>"$log"
+}
+
+if [ "$backend" = auto ]; then
+    if command -v "$gtklock_bin" >/dev/null 2>&1; then
+        backend=gtklock
+    elif command -v "$swaylock_bin" >/dev/null 2>&1; then
+        backend=swaylock
+    else
+        log "neither $gtklock_bin nor $swaylock_bin found"
+        echo "doorman-lock: no screen locker found (tried $gtklock_bin, $swaylock_bin)" >&2
+        exit 127
+    fi
+fi
+
+case "$backend" in
+    gtklock)
+        locker_cmd=("$gtklock_bin")
+        [ -f "$gtklock_config" ] && locker_cmd+=(--config "$gtklock_config")
+        ;;
+    swaylock)
+        locker_cmd=("$swaylock_bin")
+        [ -f "$swaylock_config" ] && locker_cmd+=(--config "$swaylock_config")
+        ;;
+    *)
+        log "unsupported DOORMAN_LOCK_BACKEND=$backend"
+        echo "doorman-lock: unsupported DOORMAN_LOCK_BACKEND=$backend" >&2
+        exit 2
+        ;;
+esac
+locker_name="${DOORMAN_LOCKER_NAME:-$(basename -- "${locker_cmd[0]}")}"
+
+log "locking: user=$user mode=$unlock_mode cmd=${locker_cmd[*]} $*"
+"${locker_cmd[@]}" "$@" >>"$log" 2>&1 &
+locker_pid=$!
+
+# A locker that is refused because the session is already locked exits at
+# once. That is success: do not start a second locker or a second watcher.
+sleep "$settle"
+if ! kill -0 "$locker_pid" 2>/dev/null; then
+    rc=0
+    wait "$locker_pid" || rc=$?
+    log "locker exited within ${settle}s (rc=$rc): session already locked; nothing more to do"
+    exit 0
+fi
+log "locker pid=$locker_pid name=$locker_name"
+
+# Watch whenever the recorded locker is alive, whatever its exit code will be.
+case "$unlock_mode" in
+    event)
+        "$doorman_bin" --socket "$socket" unlock-watch \
+            --user "$user" --locker-pid "$locker_pid" --locker-name "$locker_name" \
+            >>"$log" 2>&1 &
+        ;;
+    poll)
+        "$poll_watcher" "$user" "$socket" "$locker_name" >>"$log" 2>&1 &
+        ;;
+    *)
+        log "unsupported DOORMAN_UNLOCK_MODE=$unlock_mode (locker left running, password unlock only)"
+        echo "doorman-lock: unsupported DOORMAN_UNLOCK_MODE=$unlock_mode" >&2
+        ;;
+esac
+
+# Stay as the locker's parent so it is reaped the moment it exits.
+rc=0
+wait "$locker_pid" || rc=$?
+log "locker pid=$locker_pid exited rc=$rc"

@@ -42,6 +42,10 @@ use doorman_shared::{
 mod install;
 use install::{DesktopChoice, EpChoice, InstallOpts, PamScope, UninstallOpts};
 
+// Event-driven unlock helper for screen lockers (`doorman unlock-watch`).
+#[path = "../unlock_watch.rs"]
+mod unlock_watch;
+
 /// Default runtime directory when neither `--socket`/`--runtime-dir` nor
 /// `$XDG_RUNTIME_DIR` is set. Matches how the daemon is run on this Mac.
 const FALLBACK_RUNTIME_DIR: &str = "/tmp/doorman-run";
@@ -104,6 +108,26 @@ enum Command {
     },
     /// Show daemon status (version, uptime, camera, models, enrolled users).
     Status,
+    /// Unlock a screen locker on face match: waits on the daemon (WaitForMatch)
+    /// and SIGTERMs the given locker PID. Exit codes: see docs/unlock-path.md.
+    UnlockWatch {
+        /// User whose face unlocks the session.
+        #[arg(long)]
+        user: String,
+        /// PID of the locker process the lock script started.
+        #[arg(long, value_name = "PID")]
+        locker_pid: i32,
+        /// Expected process name of the locker (/proc/<pid>/comm); nothing is
+        /// signalled if the PID now belongs to another process.
+        #[arg(long, value_name = "NAME")]
+        locker_name: Option<String>,
+        /// Length of one WaitForMatch call; calls are re-issued while the locker lives.
+        #[arg(long, value_name = "MS", default_value_t = unlock_watch::DEFAULT_WAIT_TIMEOUT_MS)]
+        timeout_ms: u64,
+        /// Time the locker gets to exit after SIGTERM before SIGKILL.
+        #[arg(long, value_name = "MS", default_value_t = unlock_watch::DEFAULT_TERM_GRACE_MS)]
+        term_grace_ms: u64,
+    },
     /// Build an offline self-improvement candidate from the attempt-log dataset.
     Train {
         /// Data directory containing dataset/attempts-*.jsonl and labels-*.jsonl.
@@ -268,6 +292,23 @@ fn main() {
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
         Command::Test { username } => cmd_test(&sockets, username, cli.json),
         Command::Status => cmd_status(&sockets, cli.json),
+        Command::UnlockWatch {
+            user,
+            locker_pid,
+            locker_name,
+            timeout_ms,
+            term_grace_ms,
+        } => std::process::exit(
+            unlock_watch::run(&unlock_watch::WatchArgs {
+                socket: sockets.command.clone(),
+                user: user.clone(),
+                locker_pid: *locker_pid,
+                locker_name: locker_name.clone(),
+                timeout_ms: *timeout_ms,
+                term_grace: Duration::from_millis(*term_grace_ms),
+            })
+            .code(),
+        ),
         Command::Train {
             data_dir,
             models_dir,
@@ -851,7 +892,9 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
         // send_request already turns these into errors; arm kept for exhaustiveness.
         Response::Denied { .. }
         | Response::RateLimited { .. }
-        | Response::UnsupportedProtocol { .. } => Err(CliError::new(format!(
+        | Response::UnsupportedProtocol { .. }
+        | Response::Matched { .. }
+        | Response::NoMatch { .. } => Err(CliError::new(format!(
             "unexpected response: {response:?}"
         ))),
     }

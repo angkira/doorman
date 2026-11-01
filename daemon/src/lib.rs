@@ -6,6 +6,7 @@ pub mod ml;
 pub mod storage;
 pub mod timing;
 pub mod training;
+pub mod unlock_wait;
 
 // Re-export commonly used types
 pub use camera::Camera;
