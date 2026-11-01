@@ -3,6 +3,9 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("numpy")
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "rnd_depth_fusion_experiment.py"
 SPEC = importlib.util.spec_from_file_location("rnd_depth_fusion_experiment", SCRIPT_PATH)
