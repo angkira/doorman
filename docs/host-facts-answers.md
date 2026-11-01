@@ -183,3 +183,78 @@ The process reads its own maps, so no extra privilege is needed.
   not the current configuration. Host check: `journalctl -u doormand | grep -i
   'ML backend'` shows `Using ML backend: ...` (the ncnn hybrid reports a
   different name from the plain ORT backend).
+
+## Round 3: which depth path runs, and can a GPU be reached by default
+
+Line numbers: `@5f78657` = `git show 5f78657:<path>`, unqualified = HEAD of this branch.
+
+### 3.1 `[ml] backend = "ort", device = "cpu"`
+
+**Fact: the in-process ONNX Runtime CPU depth session on
+`depth_anything_v2_small_fp32.onnx`. `depth.ncnn.*` is never opened.**
+
+| Step | @5f78657 | HEAD |
+|---|---|---|
+| ncnn branch is taken only for `ml.backend == "ncnn"` in a `backend-ncnn` build | `daemon/src/ml/mod.rs:56-58` | `ml/mod.rs:67-69` |
+| every other backend string maps to ORT | `ml/backend.rs` `BackendType::from_str` (ignores its argument) | same |
+| `OrtBackend::new`, depth source decided by `is_gpu` (`device` in rocm/cuda/gpu) | `ort_backend.rs:289-306` | `ort_backend.rs:289-306` |
+| `cpu` is not GPU, so the model is loaded in process on the CPU EP | `ort_backend.rs:316-344` (`DepthSource::InProcess`), file name from `model_config.rs:160` | same lines |
+| relief computed from the in-process pool | `ort_backend.rs:1086` | `ort_backend.rs:1086` |
+
+The ncnn files are read only by `NcnnHybridBackend::new` (`ncnn_hybrid.rs:34-36`).
+
+### 3.2 `--device cpu`
+
+**Fact: `--device` only overwrites `config.ml.device`; it never touches
+`config.ml.backend`** (`daemon/src/main.rs:260,290-291`; @5f78657 `main.rs:237,270-271`).
+Consequence: with `backend = "ort"` it is the case 3.1. With `backend = "ncnn"` (what
+`doorman install --ncnn` writes together with `device = "cpu"`: `install.rs:986-988`)
+`--device cpu` and `device = "cpu"` still run the **Vulkan iGPU depth** path, because the
+ORT-CPU `device` only describes the inner detector/recognizer
+(`ncnn_hybrid.rs:26` builds `OrtBackend`, then `NcnnNet::new` at `:36`, which sets
+`use_vulkan_compute = true` in `daemon/ncnn_shim/ncnn_shim.cpp:149`). The unit header
+"EP: ncnn" on the host therefore points to `ml.backend = "ncnn"` in
+`/etc/doorman/doorman.toml`, but only if that binary was built with `backend-ncnn`;
+a binary without that feature falls through to ORT CPU for the same config. The log line
+`Using ML backend: ...` (`ml/mod.rs:72`) tells which one runs. Both depth files on the host
+are consistent with either case: the ncnn build also loads the ONNX depth model as its
+fallback (`ncnn_hybrid.rs` falls back to `inner.depth_relief`).
+
+### 3.3 Every code path that can create a GPU / Vulkan / ROCm / CUDA session
+
+| Path | Code | Gate (all must hold) |
+|---|---|---|
+| ORT CUDA EP | `ort_backend.rs:508-514` | build feature `backend-ort-cuda` AND `ml.device` = `cuda` or `gpu` |
+| ORT ROCm EP | `ort_backend.rs:164-183` (`rocm_ep_selected`), registered at `:526-540` | build feature `backend-ort-rocm` AND `ml.device` = `rocm`/`gpu` AND non-empty `ml.gpu_uuid` AND HIP sees a device |
+| ORT CoreML EP | `ort_backend.rs:549-580` | build feature `backend-ort-coreml` (macOS only) AND `ml.device` in coreml/ane/gpu/auto; `main.rs:293-297` promotes `cpu` to `coreml` on macOS CoreML builds only |
+| ncnn Vulkan | `ml/mod.rs:67-69`, `ncnn_hybrid.rs:26-36`, `ncnn_shim.cpp:149-150`, `build.rs` | build feature `backend-ncnn` AND `ml.backend = "ncnn"` (`vulkan_device` empty = first integrated GPU, never the discrete one) |
+| Depth sidecar `doorman-depthd` | in-daemon client `ort_backend.rs:306-313`; sidecar `daemon/src/bin/doorman_depthd.rs:132-159` | daemon side: `is_gpu`, i.e. the GPU `device` values above; sidecar side: `--depth-ep`/`DOORMAN_DEPTH_EP` = `rocm`/`gpu` (default `cpu`) in a `backend-ort-rocm` build, plus the `gpu_uuid` gate of `rocm_ep_selected` |
+| Unit/installer | `install.rs` `render_unit`, `render_depthd_unit`, `pick_ep` | see 3.4 |
+
+Shipped configuration: `packaging/doorman.toml.example:26-28` (`backend = "ort"`,
+`device = "cpu"`, no `gpu_uuid`, no `vulkan_device`), `doorman.toml`, and the built-in
+default (`shared/src/config.rs` `default_backend`/`default_device`, also what is used when a
+config fails to load) are all GPU-free. The `.deb` is built with
+`DOORMAN_DEB_FEATURES=backend-ort,...` (`scripts/build_deb.sh:45`): neither the CUDA/ROCm
+registration nor the ncnn code is even compiled in, so editing the config cannot reach a
+GPU there. `packaging/systemd/doormand.service` grants no GPU device nodes (pytest
+`tests/test_packaging_gpu_free.py`).
+
+### 3.4 The one implicit path, now closed
+
+`doorman install` defaulted to `--auto`, and `pick_ep` (`install.rs` `pick_ep`) chose **ROCm**
+when `/sys/class/kfd` (or `rocminfo`) and a ROCm ORT `.so` were found, and **CUDA** when
+`nvidia-smi` was on PATH; the chosen EP decides the cargo feature, `ml.device`, the
+`--device` flag in the unit and the depthd sidecar. So a GPU could be configured without
+the owner asking for it. Fixed: `--auto` now resolves to CPU on Linux (macOS keeps CoreML),
+detection only changes the printed hint, and the GPU backends need `--rocm`, `--cuda`
+(new flag, previously CUDA was reachable only through auto-detection) or `--ncnn`.
+Tests: `ep_auto_never_picks_a_linux_gpu_without_opt_in` and
+`ep_gpu_is_selected_only_by_explicit_flags` (`install.rs`),
+`shipped_configs_select_no_gpu` (`shared/tests/shipped_configs_no_gpu.rs`).
+
+Not changed (explicit config values, so already opt-in): setting `ml.device`,
+`ml.backend = "ncnn"`, `ml.gpu_uuid` or `ml.vulkan_device` by hand.
+Host-only, still unproven from code: which libraries the running process maps
+(`sudo grep -ci onnx /proc/<pid>/maps`, owner item) and whether the installed binary
+has `backend-ncnn` compiled in.
