@@ -88,9 +88,13 @@ Answer from code and git history, and write the answers into STATUS.md.
    MJPG 1280x720 at 30 fps. Make the backend request MJPEG and log the full
    error.
 2. Which model produces the "depth gate" in the installed build (about
-   5f78657)? The installed models directory has only edgeface_s,
-   yunet_2023mar and minifasnet_v2se (plus int8), and the configured
-   models_dir does not exist. Identify the model path and the fallback logic.
+   5f78657)? CORRECTION: the configured models_dir /var/lib/doorman/models
+   DOES exist (an earlier truncated listing said otherwise). It contains
+   depth_anything_v2_small_fp32.onnx and depth.ncnn.bin/.param (full listing in
+   HOST-FACTS.md section 8). The packaged /usr/share/doorman/models has only
+   edgeface_s, yunet_2023mar and minifasnet_v2se (plus int8). Identify which
+   path and which depth backend is selected, and the fallback logic. ORT
+   linkage still needs the owner's maps check (not yet confirmed).
 3. Which ONNX Runtime library is dlopen'd at runtime? Log its path and version
    at startup.
 
