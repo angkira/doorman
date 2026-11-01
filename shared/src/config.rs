@@ -35,6 +35,13 @@ pub const DEFAULT_ACCEPT_N: usize = 3;
 /// Default `[decision] window_m`: size of the sliding window of recent frames.
 pub const DEFAULT_WINDOW_M: usize = 5;
 
+/// Current `schema_version` of the config file format.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    CONFIG_SCHEMA_VERSION
+}
+
 fn default_prearm_window_ms() -> u32 {
     5000
 }
@@ -68,6 +75,11 @@ impl CameraFourcc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Config schema version (see docs/CONFIG.md). Files that omit it are read
+    /// as the current version; a version newer than this build is rejected.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+
     #[serde(default)]
     pub daemon: DaemonConfig,
 
@@ -1208,6 +1220,7 @@ impl Default for ModelsConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            schema_version: CONFIG_SCHEMA_VERSION,
             daemon: DaemonConfig::default(),
             camera: CameraConfig::default(),
             ml: MLConfig::default(),
@@ -1229,6 +1242,12 @@ impl Default for Config {
 impl Config {
     /// Validate every section that has range or consistency rules.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.schema_version > CONFIG_SCHEMA_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "schema_version = {} is newer than this build supports ({CONFIG_SCHEMA_VERSION}); upgrade doorman",
+                self.schema_version
+            )));
+        }
         self.camera.validate()?;
         self.decision.validate()?;
         self.liveness.validate()?;
@@ -1259,6 +1278,16 @@ impl Config {
     /// Load config from standard locations
     /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
     pub fn load() -> Result<Self, ConfigError> {
+        if let Some(path) = Self::find_config_path() {
+            return Self::load_from(&path);
+        }
+
+        // If no config found, use defaults
+        Ok(Self::default())
+    }
+
+    /// The config file `load` would use: the first existing standard location.
+    pub fn find_config_path() -> Option<PathBuf> {
         let locations = vec![
             PathBuf::from("doorman.toml"),
             dirs::config_dir()
@@ -1266,15 +1295,7 @@ impl Config {
                 .unwrap_or_default(),
             PathBuf::from("/etc/doorman/doorman.toml"),
         ];
-
-        for path in locations {
-            if path.exists() {
-                return Self::load_from(&path);
-            }
-        }
-
-        // If no config found, use defaults
-        Ok(Self::default())
+        locations.into_iter().find(|path| path.exists())
     }
 
     /// Load config from specific path

@@ -84,6 +84,19 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigAction {
+    /// Parse and validate the config and report unknown or deprecated keys.
+    /// Exit codes: 0 ok, 1 invalid, 2 valid but unknown/deprecated keys.
+    Check {
+        /// Config file to check (default: the file the daemon would load).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Print every config key with its default as Markdown (docs/CONFIG.md).
+    DumpDefaults,
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Enroll a new user (records from the daemon's current camera source).
     Enroll {
@@ -170,6 +183,11 @@ enum Command {
         /// Maximum allowed absolute FRR regression.
         #[arg(long, default_value_t = 0.01)]
         max_frr_regression: f32,
+    },
+    /// Validate or document the daemon config (see docs/CONFIG.md).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
@@ -335,6 +353,13 @@ fn main() {
             *max_frr_regression,
             cli.json,
         ),
+        Command::Config { action } => match action {
+            ConfigAction::Check { config } => std::process::exit(cmd_config_check(config.as_deref())),
+            ConfigAction::DumpDefaults => {
+                print!("{}", doorman_shared::config_check::render_reference_markdown());
+                Ok(())
+            }
+        },
         Command::Doctor => cmd_doctor(),
         Command::Install {
             dry_run,
@@ -639,6 +664,60 @@ fn print_raw(response: &Response) -> Result<(), CliError> {
         .map_err(|e| CliError::new(format!("failed to serialize response: {e}")))?;
     println!("{json}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// config check
+// ---------------------------------------------------------------------------
+
+/// Exit code: config valid, no unknown or deprecated keys.
+const CONFIG_EXIT_OK: i32 = 0;
+/// Exit code: config unreadable, unparsable or failing validation.
+const CONFIG_EXIT_INVALID: i32 = 1;
+/// Exit code: config valid but has unknown or deprecated keys.
+const CONFIG_EXIT_UNKNOWN_KEYS: i32 = 2;
+
+fn cmd_config_check(explicit: Option<&Path>) -> i32 {
+    let path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => match doorman_shared::Config::find_config_path() {
+            Some(p) => p,
+            None => {
+                println!("no config file found in the standard locations; built-in defaults apply");
+                return CONFIG_EXIT_OK;
+            }
+        },
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("invalid: cannot read {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    let report = match doorman_shared::config_check::check_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("invalid: {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    println!(
+        "{}: valid (schema_version {})",
+        path.display(),
+        report.config.schema_version
+    );
+    for key in &report.unknown_keys {
+        println!("unknown key: {key}");
+    }
+    for (key, hint) in &report.deprecated_keys {
+        println!("deprecated key: {key} ({hint})");
+    }
+    if report.unknown_keys.is_empty() && report.deprecated_keys.is_empty() {
+        CONFIG_EXIT_OK
+    } else {
+        CONFIG_EXIT_UNKNOWN_KEYS
+    }
 }
 
 // ---------------------------------------------------------------------------

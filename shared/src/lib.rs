@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod config;
+pub mod config_check;
 pub use config::{Config, DatasetConfig, IpcConfig, RecognitionConfig};
 
 /// Current IPC protocol major version. Requests without a `protocol_version`
