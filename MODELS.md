@@ -113,3 +113,72 @@ Notes:
   by `scripts/fetch_models.sh`. Do not substitute Base/Large without accepting
   CC-BY-NC-4.0.
 - Ensure you comply with each model's licence for your use case.
+
+## Licence table for every model file seen on the host
+
+Status as of 2026-11-01. "Redistribute" means: may be shipped inside the `.deb`.
+Sources read in this round are cited; Hugging Face (`huggingface.co`) was not
+reachable from the session, so the EdgeFace-S-GAMMA card could not be read.
+
+| File | Model | Weights licence | Redistribute in package | Status |
+|---|---|---|---|---|
+| `face_detection_yunet_2023mar.onnx` | YuNet (OpenCV Zoo) | MIT | yes | verified (table above) |
+| `edgeface_s.onnx` | EdgeFace-S (gamma 0.5), Idiap | CC BY-NC-SA 4.0 (non-commercial, share-alike, attribution) per Idiap cards of sibling variants; the Idiap/EdgeFace-S-GAMMA card was **not read** | **[unverified]**: redistribution is only plausible under CC BY-NC-SA terms | **[unverified]** |
+| `minifasnet_v2se.onnx`, `minifasnet_v2se_int8.onnx` | MiniFASNetV2-SE (facenox ONNX export) | Apache-2.0 (facenox); upstream Minivision weights unstated | yes for the facenox export | facenox verified, upstream **[unverified]** |
+| `depth_anything_v2_small_fp32.onnx`, `depth.ncnn.{param,bin}` | Depth-Anything-V2-Small (and its ncnn conversion) | Apache-2.0 (Small) | yes (not packaged today, see below) | verified from upstream README |
+| `mobilefacenet.onnx`, `w600k_mbf.onnx` | insightface-style MobileFaceNet (WebFace600K) | **non-commercial research only** | **no** | verified, see below |
+| `w600k_r50.onnx` (not on the host; named in code) | insightface buffalo_l ArcFace R50 | **non-commercial research only** | **no** | verified, see below |
+| `scrfd_500m.onnx` | insightface SCRFD | insightface model zoo terms: non-commercial research only | **no** | verified (zoo statement) |
+| `blazeface.onnx(.bak)`, `face_detection_short_range.tflite` | MediaPipe BlazeFace | Apache-2.0 expected | not packaged | [unverified], not read |
+| `ultraface-rfb-320.onnx`, `ultraface-slim-320.onnx` | Ultra-Light-Fast-Generic-Face-Detector | MIT expected | not packaged | [unverified], not read |
+| `liveness.onnx(.data)`, `liveness.pt` | unknown origin | unknown | no | [unverified], provenance unknown |
+
+insightface evidence (read 2026-11-01):
+
+- https://github.com/deepinsight/insightface (README): "The code of InsightFace is
+  released under the MIT License", but the training data and the models trained on
+  it (manually or automatically downloaded) "are available for non-commercial
+  research purposes only"; for the buffalo_l package a licensing contact is given.
+- https://github.com/deepinsight/insightface/tree/master/model_zoo : "ALL models are
+  available for non-commercial research purposes only." The zoo lists buffalo_sc
+  (SCRFD-500MF + MBF@WebFace600K) and a MobileFaceNet WebFace600K entry, which is the
+  family `w600k_mbf.onnx` and (by name) `mobilefacenet.onnx` belong to. The exact
+  origin of the 261 MB `mobilefacenet.onnx` is not known; treat it the same way.
+
+### Packaging rule
+
+The package ships only models with a **verified** redistribution licence. A model
+whose licence is non-commercial, share-alike, or unverified must not be added to
+`runtime_models` in `scripts/build_deb.sh` without the owner's decision.
+
+Current `scripts/build_deb.sh` (`runtime_models`, lines 99-104) ships:
+
+| Packaged file | Redistribution licence | Flag |
+|---|---|---|
+| `face_detection_yunet_2023mar.onnx` | MIT, verified | ok |
+| `minifasnet_v2se.onnx`, `minifasnet_v2se_int8.onnx` | Apache-2.0 (facenox), verified | ok (upstream weights unstated) |
+| `edgeface_s.onnx` | CC BY-NC-SA 4.0 expected, **unverified** | **FLAG**: shipped without a verified redistribution licence; non-commercial and share-alike terms (attribution notice, same licence) apply if the expectation is right. Not removed; owner decides. |
+
+`depth_anything_v2_small_fp32.onnx` (Apache-2.0) is not packaged, which is why a
+package-only install has no depth liveness; the installer copies it from the
+repository `data/models` (`daemon/src/install.rs:1520-1545`).
+
+## Host model directory: used by HEAD vs legacy
+
+`/var/lib/doorman/models` listing from `.plans/2026-11-01_doorman-hardening-latency/HOST-FACTS.md`
+section 8. "Used" means a code path at HEAD opens the file for the default
+`[ml] backend = "ort"`. Nothing here is to be deleted by tooling; the owner decides.
+
+| File | Status at HEAD | Evidence |
+|---|---|---|
+| `face_detection_yunet_2023mar.onnx` | used (detector) | `daemon/src/ml/ort_backend.rs:231`, `model_config.rs:52` |
+| `edgeface_s.onnx` | used (recognizer) | `ort_backend.rs:349`, `model_config.rs:195` |
+| `minifasnet_v2se.onnx` | used (legacy MiniFASNet liveness session, loaded when present; the fatal gate is depth) | `ort_backend.rs:250`, `model_config.rs:114` |
+| `depth_anything_v2_small_fp32.onnx` | used (depth gate, in-process CPU) | `ort_backend.rs:315-344`, `model_config.rs:160` |
+| `depth.ncnn.param`, `depth.ncnn.bin` | used only if `ml.backend = "ncnn"` in a `backend-ncnn` build | `daemon/src/ml/ncnn_hybrid.rs:34-35` |
+| `minifasnet_v2se_int8.onnx` | legacy: packaged, never opened by code | no reference in `daemon/src` or `shared/src` |
+| `w600k_mbf.onnx`, `mobilefacenet.onnx`, `blazeface.onnx`, `blazeface.onnx.bak`, `face_detection_short_range.tflite`, `scrfd_500m.onnx`, `ultraface-rfb-320.onnx`, `ultraface-slim-320.onnx`, `liveness.onnx`, `liveness.onnx.data`, `liveness.pt` | legacy: no file name reference in HEAD code (only a `w600k_r50.onnx` alias, itself unused, `model_config.rs:207`) | grep over `daemon shared bench pam_module` |
+
+The unused files that are insightface-derived (`w600k_mbf.onnx`, `mobilefacenet.onnx`,
+`scrfd_500m.onnx`) are non-commercial research only; keeping them on a machine is
+a licensing matter for the owner, not a runtime one.
