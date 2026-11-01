@@ -22,6 +22,18 @@ pub enum ConfigError {
 pub const MAX_WARMUP_FRAMES: u32 = 10;
 /// Upper bound (inclusive, ms) for `[camera] prearm_window_ms`.
 pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
+/// Largest 8-bit luma value; upper bound of `[recognition] min_brightness`.
+pub const MAX_LUMA: f32 = 255.0;
+/// Largest `[liveness] frames`.
+pub const MAX_LIVENESS_FRAMES: usize = 9;
+/// Default `[liveness] depth_input_size` (Depth-Anything-V2 export, 37 * 14).
+pub const DEFAULT_DEPTH_INPUT_SIZE: u32 = 518;
+/// Depth-Anything-V2 patch size: `depth_input_size` must be a multiple of it.
+pub const DEPTH_INPUT_MULTIPLE: u32 = 14;
+/// Default `[decision] accept_n`: frames that must clear the threshold.
+pub const DEFAULT_ACCEPT_N: usize = 3;
+/// Default `[decision] window_m`: size of the sliding window of recent frames.
+pub const DEFAULT_WINDOW_M: usize = 5;
 
 fn default_prearm_window_ms() -> u32 {
     5000
@@ -88,6 +100,12 @@ pub struct Config {
 
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+
+    #[serde(default)]
+    pub decision: DecisionConfig,
+
+    #[serde(default)]
+    pub liveness: LivenessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,6 +358,11 @@ pub struct EnrollmentConfig {
 
     #[serde(default = "default_min_valid_frames")]
     pub min_valid_frames: usize,
+
+    /// Enrolment drops a captured template whose cosine to an already kept one
+    /// is at or above this value (near-duplicate pruning). Range (0, 1].
+    #[serde(default = "default_prune_cosine")]
+    pub prune_cosine: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +410,11 @@ pub struct RecognitionConfig {
     /// frame area. Rejects tiny / far-away faces. `0.0` disables the size gate.
     #[serde(default = "default_min_face_area_frac")]
     pub min_face_area_frac: f32,
+
+    /// Frame-quality gate: minimum mean luma (0..=255) inside the face box.
+    /// Rejects frames that are too dark to embed reliably. `0.0` disables it.
+    #[serde(default)]
+    pub min_brightness: f32,
 }
 
 impl Default for RecognitionConfig {
@@ -396,7 +424,161 @@ impl Default for RecognitionConfig {
             hysteresis_frames: default_hysteresis_frames(),
             min_sharpness: default_min_sharpness(),
             min_face_area_frac: default_min_face_area_frac(),
+            min_brightness: 0.0,
         }
+    }
+}
+
+/// How the per-frame evidence becomes an accept/reject decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionMode {
+    /// Collect `auth_frames` embeddings, average them, score once (original behaviour).
+    Mean,
+    /// Score every frame; accept as soon as `accept_n` of the last `window_m`
+    /// frames reach the threshold (and liveness passed).
+    NOfM,
+}
+
+/// How one embedding is scored against a user's stored templates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateScore {
+    /// Highest cosine over the stored templates (original behaviour).
+    Max,
+    /// Mean of the three highest template cosines.
+    Top3Mean,
+    /// Cosine against the renormalised mean of all templates.
+    Centroid,
+}
+
+/// `[decision]`: decision rule and template scoring. Defaults reproduce the
+/// original behaviour; see docs/decision-and-liveness.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionConfig {
+    #[serde(default = "default_decision_mode")]
+    pub mode: DecisionMode,
+
+    /// `n_of_m` only: frames that must be at or above the threshold.
+    #[serde(default = "default_accept_n")]
+    pub accept_n: usize,
+
+    /// `n_of_m` only: size of the sliding window of most recent quality frames.
+    #[serde(default = "default_window_m")]
+    pub window_m: usize,
+
+    #[serde(default = "default_template_score")]
+    pub template_score: TemplateScore,
+
+    /// Flip test-time augmentation: embed the aligned crop and its mirror,
+    /// average and renormalise. Costs one extra recognizer pass per frame.
+    #[serde(default)]
+    pub flip_tta: bool,
+}
+
+impl Default for DecisionConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_decision_mode(),
+            accept_n: default_accept_n(),
+            window_m: default_window_m(),
+            template_score: default_template_score(),
+            flip_tta: false,
+        }
+    }
+}
+
+impl DecisionConfig {
+    /// Reject `accept_n`/`window_m` outside `1 <= N <= M` with an explicit error.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.accept_n < 1 || self.accept_n > self.window_m {
+            return Err(ConfigError::Invalid(format!(
+                "decision.accept_n = {} and decision.window_m = {} must satisfy 1 <= accept_n <= window_m",
+                self.accept_n, self.window_m
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// How per-frame liveness results become one verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LivenessAggregate {
+    /// Median relief over the evaluated frames (majority of frames on one
+    /// side of the threshold, which is equivalent for an odd frame count).
+    Median,
+}
+
+/// Statistic that turns a depth patch into the relief value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReliefStat {
+    /// `std(face depth) / (global max - global min)` (original behaviour).
+    #[serde(rename = "minmax")]
+    MinMax,
+    /// `(p90 - p10)` of the face depth over the same range of the whole map,
+    /// robust to outlier pixels. Thresholds are NOT comparable with `minmax`.
+    #[serde(rename = "p10_p90")]
+    P10P90,
+}
+
+/// `[liveness]`: how the depth-relief liveness gate is evaluated. The relief
+/// threshold itself stays `authentication.liveness_depth_threshold`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessConfig {
+    /// Frames to evaluate (odd, 1..=9). `1` is the original single-frame check.
+    #[serde(default = "default_liveness_frames")]
+    pub frames: usize,
+
+    #[serde(default = "default_liveness_aggregate")]
+    pub aggregate: LivenessAggregate,
+
+    #[serde(default = "default_relief_stat")]
+    pub relief_stat: ReliefStat,
+
+    /// Square depth network input size; a multiple of 14. Sizes other than the
+    /// default need a model exported for that size (or with dynamic axes).
+    #[serde(default = "default_depth_input_size")]
+    pub depth_input_size: u32,
+
+    /// Extra liveness signals (screen flash, head pose). None are implemented:
+    /// any entry is rejected so a security setting is never silently ignored.
+    #[serde(default)]
+    pub signals: Vec<String>,
+}
+
+impl Default for LivenessConfig {
+    fn default() -> Self {
+        Self {
+            frames: default_liveness_frames(),
+            aggregate: default_liveness_aggregate(),
+            relief_stat: default_relief_stat(),
+            depth_input_size: default_depth_input_size(),
+            signals: Vec::new(),
+        }
+    }
+}
+
+impl LivenessConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.frames.is_multiple_of(2) || self.frames > MAX_LIVENESS_FRAMES {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.frames = {} must be odd and at most {MAX_LIVENESS_FRAMES}",
+                self.frames
+            )));
+        }
+        if self.depth_input_size == 0 || !self.depth_input_size.is_multiple_of(DEPTH_INPUT_MULTIPLE) {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.depth_input_size = {} must be a positive multiple of {DEPTH_INPUT_MULTIPLE}",
+                self.depth_input_size
+            )));
+        }
+        if let Some(name) = self.signals.first() {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.signals contains {name:?}, but no extra liveness signal is implemented yet"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -635,11 +817,38 @@ fn default_liveness_depth_threshold() -> f32 {
 fn default_timeout_secs() -> u64 {
     3
 }
+fn default_decision_mode() -> DecisionMode {
+    DecisionMode::Mean
+}
+fn default_accept_n() -> usize {
+    DEFAULT_ACCEPT_N
+}
+fn default_window_m() -> usize {
+    DEFAULT_WINDOW_M
+}
+fn default_template_score() -> TemplateScore {
+    TemplateScore::Max
+}
+fn default_liveness_frames() -> usize {
+    1
+}
+fn default_liveness_aggregate() -> LivenessAggregate {
+    LivenessAggregate::Median
+}
+fn default_relief_stat() -> ReliefStat {
+    ReliefStat::MinMax
+}
+fn default_depth_input_size() -> u32 {
+    DEFAULT_DEPTH_INPUT_SIZE
+}
 fn default_enroll_frames() -> usize {
     20
 }
 fn default_min_valid_frames() -> usize {
     5
+}
+fn default_prune_cosine() -> f32 {
+    0.95
 }
 fn default_aggregation_window() -> usize {
     5
@@ -781,6 +990,7 @@ impl Default for EnrollmentConfig {
         Self {
             enroll_frames: default_enroll_frames(),
             min_valid_frames: default_min_valid_frames(),
+            prune_cosine: default_prune_cosine(),
         }
     }
 }
@@ -824,11 +1034,41 @@ impl Default for Config {
             dataset: DatasetConfig::default(),
             ipc: IpcConfig::default(),
             telemetry: TelemetryConfig::default(),
+            decision: DecisionConfig::default(),
+            liveness: LivenessConfig::default(),
         }
     }
 }
 
 impl Config {
+    /// Validate every section that has range or consistency rules.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.camera.validate()?;
+        self.decision.validate()?;
+        self.liveness.validate()?;
+        let brightness = self.recognition.min_brightness;
+        if !(0.0..=MAX_LUMA).contains(&brightness) {
+            return Err(ConfigError::Invalid(format!(
+                "recognition.min_brightness = {brightness} is out of range (0..={MAX_LUMA})"
+            )));
+        }
+        let prune = self.enrollment.prune_cosine;
+        if !(prune > 0.0 && prune <= 1.0) {
+            return Err(ConfigError::Invalid(format!(
+                "enrollment.prune_cosine = {prune} is out of range (0, 1]"
+            )));
+        }
+        if self.decision.mode == DecisionMode::NOfM
+            && self.authentication.auth_frames < self.decision.accept_n
+        {
+            return Err(ConfigError::Invalid(format!(
+                "authentication.auth_frames = {} is the frame budget of decision.mode = \"n_of_m\" and must be >= decision.accept_n = {}",
+                self.authentication.auth_frames, self.decision.accept_n
+            )));
+        }
+        Ok(())
+    }
+
     /// Load config from standard locations
     /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
     pub fn load() -> Result<Self, ConfigError> {
@@ -854,7 +1094,7 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
-        config.camera.validate()?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -935,6 +1175,99 @@ mod tests {
         let on: Config = toml::from_str("[telemetry]\ntiming_log = true\n").unwrap();
         assert!(on.telemetry.timing_log);
         assert_eq!(on.telemetry.timing_log_max_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn decision_defaults_keep_current_behaviour_and_old_configs_parse() {
+        let old: Config = toml::from_str("[ml]\ndevice = \"cpu\"\n").unwrap();
+        assert_eq!(old.decision.mode, DecisionMode::Mean);
+        assert_eq!(old.decision.template_score, TemplateScore::Max);
+        assert_eq!((old.decision.accept_n, old.decision.window_m), (3, 5));
+        assert!(!old.decision.flip_tta);
+        assert!(old.validate().is_ok());
+
+        let new: Config = toml::from_str(
+            "[decision]\nmode = \"n_of_m\"\ntemplate_score = \"top3_mean\"\naccept_n = 2\nwindow_m = 4\n",
+        )
+        .unwrap();
+        assert_eq!(new.decision.mode, DecisionMode::NOfM);
+        assert_eq!(new.decision.template_score, TemplateScore::Top3Mean);
+        assert!(new.validate().is_ok());
+    }
+
+    #[test]
+    fn liveness_defaults_keep_current_behaviour_and_are_validated() {
+        let old: Config = toml::from_str("[ml]\ndevice = \"cpu\"\n").unwrap();
+        assert_eq!(old.liveness.frames, 1);
+        assert_eq!(old.liveness.aggregate, LivenessAggregate::Median);
+        assert_eq!(old.liveness.relief_stat, ReliefStat::MinMax);
+        assert_eq!(old.liveness.depth_input_size, 518);
+        assert!(old.liveness.signals.is_empty());
+        assert!(old.validate().is_ok());
+
+        let new: Config = toml::from_str(
+            "[liveness]\nframes = 3\nrelief_stat = \"p10_p90\"\ndepth_input_size = 308\n",
+        )
+        .unwrap();
+        assert_eq!(new.liveness.relief_stat, ReliefStat::P10P90);
+        assert!(new.validate().is_ok());
+
+        let bad = |toml: &str| {
+            let cfg: Config = toml::from_str(toml).unwrap();
+            cfg.validate().unwrap_err().to_string()
+        };
+        assert!(bad("[liveness]\nframes = 2\n").contains("liveness.frames"));
+        assert!(bad("[liveness]\nframes = 11\n").contains("liveness.frames"));
+        assert!(bad("[liveness]\ndepth_input_size = 500\n").contains("multiple of 14"));
+        assert!(bad("[liveness]\ndepth_input_size = 0\n").contains("depth_input_size"));
+        assert!(bad("[liveness]\nsignals = [\"screen_flash\"]\n").contains("screen_flash"));
+        assert!(toml::from_str::<Config>("[liveness]\nrelief_stat = \"mean\"\n").is_err());
+    }
+
+    #[test]
+    fn min_brightness_is_off_by_default_and_range_checked() {
+        let old: Config = toml::from_str("[recognition]\nmin_sharpness = 8.0\n").unwrap();
+        assert_eq!(old.recognition.min_brightness, 0.0);
+        assert!(old.validate().is_ok());
+        for bad in ["-1.0", "256.0"] {
+            let cfg: Config =
+                toml::from_str(&format!("[recognition]\nmin_brightness = {bad}\n")).unwrap();
+            assert!(cfg.validate().unwrap_err().to_string().contains("min_brightness"));
+        }
+    }
+
+    #[test]
+    fn enrollment_prune_cosine_defaults_and_is_validated() {
+        let old: Config = toml::from_str("[enrollment]\nenroll_frames = 20\n").unwrap();
+        assert_eq!(old.enrollment.prune_cosine, 0.95);
+        for bad in ["0.0", "1.5", "-0.1"] {
+            let cfg: Config =
+                toml::from_str(&format!("[enrollment]\nprune_cosine = {bad}\n")).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("prune_cosine"), "{err}");
+        }
+    }
+
+    #[test]
+    fn decision_validation_rejects_bad_n_and_m_and_unknown_modes() {
+        let bad = |n, m| DecisionConfig {
+            accept_n: n,
+            window_m: m,
+            ..DecisionConfig::default()
+        };
+        assert!(bad(1, 1).validate().is_ok());
+        for (n, m) in [(0, 5), (6, 5)] {
+            let err = bad(n, m).validate().unwrap_err().to_string();
+            assert!(err.contains("accept_n") && err.contains("window_m"), "{err}");
+        }
+        let short_budget: Config = toml::from_str(
+            "[authentication]\nauth_frames = 2\n[decision]\nmode = \"n_of_m\"\n",
+        )
+        .unwrap();
+        let err = short_budget.validate().unwrap_err().to_string();
+        assert!(err.contains("auth_frames") && err.contains("accept_n"), "{err}");
+        assert!(toml::from_str::<Config>("[decision]\nmode = \"sum\"\n").is_err());
+        assert!(toml::from_str::<Config>("[decision]\ntemplate_score = \"min\"\n").is_err());
     }
 
     #[test]

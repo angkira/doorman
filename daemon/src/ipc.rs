@@ -8,6 +8,10 @@ use doorman_shared::{
 };
 use async_trait::async_trait;
 use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
+use crate::pipeline::{LivenessState, SequentialDecider, Step};
+use doorman_shared::config::DecisionMode;
+use doormand::decision::{AuthDecision, AuthOutcome};
+use doormand::liveness::{LivenessAggregator, LivenessOutcome, LivenessProgress};
 use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
 use image::GenericImageView;
 use std::sync::Arc;
@@ -85,8 +89,10 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
     let is_authenticate = matches!(request, Request::Authenticate { .. });
 
     let response = match request {
-        Request::Authenticate { username } => handle_authenticate(state, &username).await,
-        Request::Enroll { username } => handle_enroll(state, &username).await,
+        Request::Authenticate { username } => {
+            run_authenticate(state, &username).await.into_response()
+        }
+        Request::Enroll { username, add } => handle_enroll(state, &username, add).await,
         Request::ListUsers => handle_list_users(state).await,
         Request::RemoveUser { username } => handle_remove_user(state, &username).await,
         Request::Status => handle_status(state).await,
@@ -146,22 +152,9 @@ impl DecisionSource for AuthenticateSource<'_> {
         {
             return AttemptOutcome::NotEnrolled;
         }
-        match handle_authenticate(self.state, username).await {
-            Response::Success { message, .. } => {
-                match message
-                    .as_deref()
-                    .and_then(unlock_wait::parse_authenticated_similarity)
-                {
-                    Some(similarity) => AttemptOutcome::Matched { similarity },
-                    None => {
-                        // Fail closed: a success we cannot read is not a match.
-                        error!("Authenticate succeeded with an unparsable message: {message:?}");
-                        AttemptOutcome::NotMatched
-                    }
-                }
-            }
-            _ => AttemptOutcome::NotMatched,
-        }
+        run_authenticate(self.state, username)
+            .await
+            .attempt_outcome()
     }
 }
 
@@ -284,7 +277,9 @@ async fn collect_frames_for_duration(
     frames
 }
 
-async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
+/// Decision core of `Authenticate` and `WaitForMatch`; callers build the wire
+/// response (or the wait outcome) from the returned [`AuthDecision`].
+async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
     info!("Authentication request for user: {}", username);
     // Emits one timing record (debug log + optional JSONL file) when dropped.
     let mut timing = crate::timing::AttemptTiming::start(&state.config.telemetry);
@@ -296,9 +291,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         None => {
             warn!("User not enrolled: {}", username);
             timing.outcome = crate::timing::TimingOutcome::NotEnrolled;
-            return Response::Failure {
-                reason: "User not enrolled".to_string(),
-            };
+            return AuthDecision::bare(AuthOutcome::NotEnrolled);
         }
     };
     drop(storage);
@@ -314,7 +307,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         Err(err_msg) => {
             error!("{}", err_msg);
             timing.outcome = crate::timing::TimingOutcome::CameraUnavailable;
-            return Response::Failure { reason: err_msg };
+            return AuthDecision::bare(AuthOutcome::CameraUnavailable { message: err_msg });
         }
     };
     timing.camera_open = Some(timing.since_start());
@@ -338,9 +331,22 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
     let rec = &state.config.recognition;
     let threshold = state.config.authentication.similarity_threshold;
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(auth_frames);
+    // `n_of_m` mode: score every frame as it arrives and stop at the first
+    // terminal step. `mean` mode leaves the decider unset.
+    let dec = &state.config.decision;
+    let mut sequential = (dec.mode == DecisionMode::NOfM)
+        .then(|| SequentialDecider::new(threshold, dec.accept_n, dec.window_m, auth_frames));
+    let mut sequential_step = Step::Continue;
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
-    let mut liveness_checked = false;
+    // Liveness: the aggregator exists while the check is enabled; `liveness`
+    // holds its final verdict once decided (None = disabled or still pending).
+    let mut liveness_agg = state
+        .config
+        .authentication
+        .liveness_enabled
+        .then(|| LivenessAggregator::new(state.config.liveness.frames));
+    let mut liveness: Option<LivenessOutcome> = None;
     let mut frames_seen = 0usize;
     let mut rx = state.latest_frame.clone();
     let mut maybe_frame = rx.borrow_and_update().clone();
@@ -385,85 +391,72 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         if first_quality_face_area_frac.is_none() {
             first_quality_face_area_frac = face_area_frac(&face);
         }
-        // First quality face: run the anti-spoofing depth gate ONCE.
-        if !liveness_checked {
-            liveness_checked = true;
+        // Anti-spoofing depth gate: evaluated on the first quality frames until the
+        // aggregate (`[liveness] frames`, median) is decided; 1 frame by default.
+        if let (Some(agg), None) = (liveness_agg.as_mut(), liveness.as_ref()) {
             let liveness_started = std::time::Instant::now();
-            let liveness_result = state.ml_pipeline.liveness_gate(&frame, &face).await;
-            timing.liveness = Some(liveness_started.elapsed());
-            timing.liveness_passed = liveness_result.as_ref().ok().copied();
-            match liveness_result {
-                Ok(true) => {}
-                Ok(false) => {
-                    timing.outcome = crate::timing::TimingOutcome::LivenessRejected;
-                    warn!(
-                        "Authentication failed for {}: liveness/anti-spoof gate rejected",
-                        username
-                    );
-                    log_auth_failure_attempt(
-                        state,
-                        &attempt_id,
-                        username,
-                        Outcome::SuspectedSpoof,
-                        Some(false),
-                        "liveness_rejected",
-                        AttemptConditions {
-                            face_area_frac: first_quality_face_area_frac,
-                            ..AttemptConditions::default()
-                        },
-                    );
-                    log_auth_capture_pack(
-                        state,
-                        &attempt_id,
-                        Some(username),
-                        Outcome::SuspectedSpoof,
-                        GtSource::PamFaceAuth,
-                        raw_face_frames,
-                    );
-                    return Response::Failure {
-                        reason: "Liveness check failed (not a live face).".to_string(),
-                    };
+            let frame_result = state.ml_pipeline.liveness_check(&frame, &face).await;
+            let depth_elapsed = liveness_started.elapsed();
+            timing.liveness = Some(timing.liveness.unwrap_or_default() + depth_elapsed);
+            timing.liveness_frames += 1;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let (_, _, box_w, box_h) = face.bbox;
+                debug!(
+                    "Liveness frame {}: relief={:?} face_box={:.0}x{:.0}px sharpness={:.2} brightness={:.1} depth_ms={:.1}",
+                    i,
+                    frame_result.as_ref().and_then(LivenessOutcome::relief),
+                    box_w * frame.width() as f32,
+                    box_h * frame.height() as f32,
+                    crate::pipeline::sharpness_score(&frame),
+                    crate::pipeline::face_brightness(&frame, face.bbox),
+                    depth_elapsed.as_secs_f64() * 1000.0,
+                );
+            }
+            if let Some(outcome) = frame_result {
+                if let LivenessProgress::Decided(verdict) = agg.push(outcome) {
+                    timing.liveness_passed = Some(verdict.is_pass());
+                    timing.liveness_relief = verdict.relief();
+                    liveness = Some(verdict);
                 }
-                Err(e) => {
-                    timing.outcome = crate::timing::TimingOutcome::LivenessError;
-                    warn!(
-                        "Authentication failed for {}: liveness error: {}",
-                        username, e
-                    );
-                    log_auth_failure_attempt(
-                        state,
-                        &attempt_id,
-                        username,
-                        Outcome::SuspectedSpoof,
-                        Some(false),
-                        "liveness_error",
-                        AttemptConditions {
-                            face_area_frac: first_quality_face_area_frac,
-                            ..AttemptConditions::default()
-                        },
-                    );
-                    log_auth_capture_pack(
-                        state,
-                        &attempt_id,
-                        Some(username),
-                        Outcome::SuspectedSpoof,
-                        GtSource::PamFaceAuth,
-                        raw_face_frames,
-                    );
-                    return Response::Failure {
-                        reason: "Liveness check error.".to_string(),
-                    };
-                }
+            }
+            if matches!(
+                liveness,
+                Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. })
+            ) {
+                return liveness_failure(
+                    state,
+                    &mut timing,
+                    &attempt_id,
+                    username,
+                    first_quality_face_area_frac,
+                    raw_face_frames,
+                    frames_seen,
+                    liveness,
+                );
             }
         }
         let embed_started = std::time::Instant::now();
         let embed_result = state.ml_pipeline.extract_embedding(&frame, &face).await;
         timing.embed.record(embed_started.elapsed());
         match embed_result {
-            Ok(embedding) => passed_embeddings.push(embedding),
+            Ok(embedding) => {
+                if let Some(decider) = sequential.as_mut() {
+                    let score = crate::pipeline::template_score(
+                        dec.template_score,
+                        &embedding,
+                        &stored_embeddings,
+                    );
+                    debug!("Frame {}: template score {:.4}", i, score);
+                    sequential_step = decider.push(
+                        score,
+                        liveness_state(liveness_agg.is_some(), &liveness),
+                    );
+                }
+                passed_embeddings.push(embedding);
+            }
             Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
         }
-        if passed_embeddings.len() >= auth_frames {
+        if passed_embeddings.len() >= auth_frames || sequential_step != Step::Continue {
             break;
         }
         maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
@@ -482,9 +475,7 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             "no_frames",
             AttemptConditions::default(),
         );
-        return Response::Failure {
-            reason: "Failed to capture frames".to_string(),
-        };
+        return AuthDecision::bare(AuthOutcome::NoFrames);
     }
 
     info!(
@@ -529,10 +520,29 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             GtSource::PamFaceAuth,
             raw_face_frames,
         );
-        return Response::Failure {
-            reason: "No clear face detected. Please ensure good lighting and look at the camera."
-                .to_string(),
+        return AuthDecision {
+            frames_seen,
+            liveness,
+            ..AuthDecision::bare(AuthOutcome::NoClearFace)
         };
+    }
+
+    // The authentication timeout ended the run before the liveness aggregate
+    // was decided: fail closed, as unavailable.
+    if liveness_agg.is_some() && liveness.is_none() {
+        let undecided = Some(LivenessOutcome::Unavailable {
+            reason: "liveness undecided before the authentication timeout".to_string(),
+        });
+        return liveness_failure(
+            state,
+            &mut timing,
+            &attempt_id,
+            username,
+            first_quality_face_area_frac,
+            raw_face_frames,
+            frames_seen,
+            undecided,
+        );
     }
 
     let decision_started = std::time::Instant::now();
@@ -543,8 +553,21 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
         .iter()
         .map(|stored_emb| crate::ml::cosine_similarity(&aggregated, stored_emb))
         .collect();
-    let best_similarity = gallery_similarities.iter().copied().fold(0.0f32, f32::max);
-    let matched = best_similarity >= threshold;
+    let (matched, best_similarity) = match &sequential {
+        Some(decider) => match sequential_step {
+            Step::Accept { similarity } => (true, similarity),
+            // Rejected or ran out of frames/time: report the best frame score.
+            Step::Reject(_) | Step::Continue => (false, decider.best_in_window()),
+        },
+        None => {
+            let score = crate::pipeline::template_score(
+                dec.template_score,
+                &aggregated,
+                &stored_embeddings,
+            );
+            (score >= threshold, score)
+        }
+    };
     timing.decision = Some(decision_started.elapsed());
     timing.similarity = Some(best_similarity);
     timing.outcome = if matched {
@@ -617,10 +640,6 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             "Authentication successful for {} (similarity: {:.4})",
             username, best_similarity
         );
-        Response::Success {
-            message: Some(unlock_wait::authenticated_message(best_similarity)),
-            data: None,
-        }
     } else {
         warn!(
             "Authentication failed for {} (aggregated similarity: {:.4})",
@@ -645,12 +664,89 @@ async fn handle_authenticate(state: &DaemonState, username: &str) -> Response {
             GtSource::PamFaceAuth,
             raw_face_frames,
         );
-        Response::Failure {
-            reason: format!(
-                "Face not recognized (confidence: {:.2}%)",
-                best_similarity * 100.0
-            ),
+    }
+    AuthDecision {
+        outcome: if matched {
+            AuthOutcome::Matched
+        } else {
+            AuthOutcome::NotMatched
+        },
+        similarity: Some(best_similarity),
+        frames_used: passed_embeddings.len(),
+        frames_seen,
+        liveness,
+    }
+}
+
+/// Liveness as the sequential decider sees it. A rejected or unavailable check
+/// ends the run before any frame is scored, so only pass or disabled reach it.
+fn liveness_state(enabled: bool, verdict: &Option<LivenessOutcome>) -> LivenessState {
+    match (enabled, verdict) {
+        (false, _) | (true, Some(LivenessOutcome::Pass { .. })) => LivenessState::Passed,
+        (true, None) => LivenessState::Pending,
+        (true, Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. })) => {
+            LivenessState::Failed
         }
+    }
+}
+
+/// Terminal liveness failure (rejected, unavailable or undecided): record the
+/// attempt and build the decision. `liveness` is the final `Fail` or
+/// `Unavailable` verdict.
+#[allow(clippy::too_many_arguments)]
+fn liveness_failure(
+    state: &DaemonState,
+    timing: &mut crate::timing::AttemptTiming,
+    attempt_id: &str,
+    username: &str,
+    face_area_frac: Option<f32>,
+    raw_face_frames: Vec<dataset::CaptureFrameImage>,
+    frames_seen: usize,
+    liveness: Option<LivenessOutcome>,
+) -> AuthDecision {
+    let (auth_outcome, timing_outcome, code) =
+        if matches!(liveness, Some(LivenessOutcome::Unavailable { .. })) {
+            (
+                AuthOutcome::LivenessError,
+                crate::timing::TimingOutcome::LivenessError,
+                doormand::liveness::LIVENESS_UNAVAILABLE_CODE,
+            )
+        } else {
+            (
+                AuthOutcome::LivenessRejected,
+                crate::timing::TimingOutcome::LivenessRejected,
+                doormand::liveness::LIVENESS_REJECTED_CODE,
+            )
+        };
+    timing.outcome = timing_outcome;
+    warn!(
+        "Authentication failed for {}: liveness gate [{}]: {:?}",
+        username, code, liveness
+    );
+    log_auth_failure_attempt(
+        state,
+        attempt_id,
+        username,
+        Outcome::SuspectedSpoof,
+        Some(false),
+        code,
+        AttemptConditions {
+            face_area_frac,
+            ..AttemptConditions::default()
+        },
+    );
+    log_auth_capture_pack(
+        state,
+        attempt_id,
+        Some(username),
+        Outcome::SuspectedSpoof,
+        GtSource::PamFaceAuth,
+        raw_face_frames,
+    );
+    AuthDecision {
+        frames_seen,
+        liveness,
+        ..AuthDecision::bare(auth_outcome)
     }
 }
 
@@ -675,15 +771,20 @@ fn frame_passes_quality_gate(
     };
     let sharp_ok = rec.min_sharpness <= 0.0 || sharpness >= rec.min_sharpness;
 
-    let pass = area_ok && sharp_ok;
+    let brightness = crate::pipeline::face_brightness(frame, face.bbox);
+    let bright_ok = rec.min_brightness <= 0.0 || brightness >= rec.min_brightness;
+
+    let pass = area_ok && sharp_ok && bright_ok;
     debug!(
-        "{} quality gate frame {}: sharpness={:.2} (min {:.2}) area_frac={:.4} (min {:.4}) -> {}",
+        "{} quality gate frame {}: sharpness={:.2} (min {:.2}) area_frac={:.4} (min {:.4}) brightness={:.1} (min {:.1}) -> {}",
         ctx,
         idx,
         sharpness,
         rec.min_sharpness,
         area_frac,
         rec.min_face_area_frac,
+        brightness,
+        rec.min_brightness,
         if pass { "PASS" } else { "REJECT" }
     );
     pass
@@ -850,8 +951,8 @@ mod tests {
     }
 }
 
-async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
-    info!("Enrollment request for user: {}", username);
+async fn handle_enroll(state: &DaemonState, username: &str, add: bool) -> Response {
+    info!("Enrollment request for user: {} (add: {})", username, add);
 
     // Turn the camera ON on-demand (works even when the screen is unlocked and the
     // camera is otherwise gated off) and wait for frames. The lease is held for the
@@ -999,23 +1100,34 @@ async fn handle_enroll(state: &DaemonState, username: &str) -> Response {
     //      farthest-point selection, so the stored set is spread across conditions
     //      rather than clustered on one.
     const TARGET_EMBEDDINGS: usize = 30;
-    let mut pool = valid_embeddings;
-    {
+    let existing_templates: Vec<Vec<f32>> = {
         let storage = state.storage.read().await;
-        if let Some(existing) = storage.get_embeddings(username) {
-            info!(
-                "Capacious enroll: merging {} new + {} existing embeddings for {}",
-                pool.len(),
-                existing.len(),
-                username
-            );
-            pool.extend(existing.iter().cloned());
-        }
+        storage
+            .get_embeddings(username)
+            .cloned()
+            .unwrap_or_default()
+    };
+    if !existing_templates.is_empty() {
+        info!(
+            "Capacious enroll: merging {} new + {} existing embeddings for {}",
+            valid_embeddings.len(),
+            existing_templates.len(),
+            username
+        );
     }
-    let selected_embeddings = if pool.len() <= TARGET_EMBEDDINGS {
-        pool
-    } else {
-        select_diverse_embeddings(pool, TARGET_EMBEDDINGS)
+    let selected_embeddings = match crate::pipeline::plan_templates(
+        valid_embeddings,
+        &existing_templates,
+        if add {
+            crate::pipeline::EnrollMode::Append
+        } else {
+            crate::pipeline::EnrollMode::Merge
+        },
+        state.config.enrollment.prune_cosine,
+        TARGET_EMBEDDINGS,
+    ) {
+        Ok(templates) => templates,
+        Err(reason) => return Response::Failure { reason },
     };
 
     info!(

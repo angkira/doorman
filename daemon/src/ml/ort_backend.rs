@@ -5,6 +5,8 @@ use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "_ort")]
 use async_trait::async_trait;
 #[cfg(feature = "_ort")]
+use doorman_shared::config::{LivenessConfig, ReliefStat};
+#[cfg(feature = "_ort")]
 use doorman_shared::Config;
 #[cfg(feature = "_ort")]
 use image::DynamicImage;
@@ -43,6 +45,10 @@ pub struct OrtBackend {
     depth_source: DepthSource,
     recognizer_pool: Vec<Mutex<Session>>,
     pool_index: AtomicUsize,
+    /// `[decision] flip_tta`: also embed the mirrored aligned crop and average.
+    flip_tta: bool,
+    /// `[liveness]`: depth input size and relief statistic.
+    liveness: LivenessConfig,
 }
 
 /// Source of the depth-relief PAD pass. See `OrtBackend::depth_source`.
@@ -333,6 +339,8 @@ impl OrtBackend {
             depth_source,
             recognizer_pool,
             pool_index: AtomicUsize::new(0),
+            flip_tta: config.decision.flip_tta,
+            liveness: config.liveness.clone(),
         })
     }
 
@@ -582,26 +590,20 @@ pub fn depth_preprocess(image: &DynamicImage, size: u32) -> Vec<f32> {
 /// Compute the depth-relief PAD score from a depth map and a normalized face bbox.
 ///
 /// `depth` is the per-pixel inverse-depth vector (length ≥ d_h × d_w) in row-major
-/// order. Maps the face bbox into depth-map coordinates, computes
-/// `relief = std(face_depth) / (depth_range + eps)` clamped to `[0, 1]`.
+/// order. Maps the face bbox into depth-map coordinates, gathers that patch and
+/// scores it with `stat` (see `liveness::relief_from_patch`; `minmax` is
+/// `std(face_depth) / (depth_range + eps)` clamped to `[0, 1]`).
 ///
 /// When the face-region crop is empty (degenerate bbox) the whole-map depth values
 /// are used, producing a near-zero relief.
 #[cfg(feature = "_ort")]
-pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face) -> f32 {
-    // Global depth range over the whole map.
-    let mut gmin = f32::INFINITY;
-    let mut gmax = f32::NEG_INFINITY;
-    for &v in depth.iter() {
-        if v < gmin {
-            gmin = v;
-        }
-        if v > gmax {
-            gmax = v;
-        }
-    }
-    let global_range = (gmax - gmin) + 1e-8;
-
+pub fn relief_from_depth_map(
+    stat: ReliefStat,
+    depth: &[f32],
+    d_h: usize,
+    d_w: usize,
+    face: &Face,
+) -> f32 {
     // Map the normalized face bbox into depth-map pixel coordinates.
     let (nx, ny, nw, nh) = face.bbox;
     let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
@@ -611,7 +613,7 @@ pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face)
     let x1 = x1.min(d_w);
     let y1 = y1.min(d_h);
 
-    // Collect the face-region depth values; fall back to whole map if empty.
+    // Collect the face-region depth values (empty for a degenerate bbox).
     let mut face_vals: Vec<f32> = Vec::new();
     if x1 > x0 && y1 > y0 {
         for y in y0..y1 {
@@ -621,19 +623,7 @@ pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face)
             }
         }
     }
-    let face_vals = if face_vals.is_empty() {
-        depth.to_vec()
-    } else {
-        face_vals
-    };
-
-    // std(face_depth).
-    let count = face_vals.len() as f32;
-    let mean = face_vals.iter().sum::<f32>() / count;
-    let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
-    let std = var.sqrt();
-
-    (std / global_range).clamp(0.0, 1.0)
+    crate::liveness::relief_from_patch(stat, &face_vals, None, &depth[..d_h * d_w])
 }
 
 /// Run the Depth-Anything-V2 depth pass on `session` for `image` and compute the
@@ -653,11 +643,9 @@ pub fn compute_depth_relief(
     session: &Mutex<Session>,
     image: &DynamicImage,
     face: &Face,
+    liveness: &LivenessConfig,
 ) -> Result<f32> {
-    use super::model_config::DepthPadConfig;
-
-    let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
-    let size = cfg.input_size;
+    let size = liveness.depth_input_size;
 
     let input = depth_preprocess(image, size);
 
@@ -690,7 +678,7 @@ pub fn compute_depth_relief(
         return Err(anyhow!("Depth output too small: shape {:?} len {}", dims, depth.len()));
     }
 
-    let relief = relief_from_depth_map(&depth, d_h, d_w, face);
+    let relief = relief_from_depth_map(liveness.relief_stat, &depth, d_h, d_w, face);
     tracing::debug!(
         "Depth-PAD relief={:.4} depth_grid={}x{}",
         relief, d_w, d_h
@@ -1030,7 +1018,7 @@ impl MLBackend for OrtBackend {
                     Some(s) => s,
                     None => return Ok(None),
                 };
-                let relief = compute_depth_relief(session, image, face)?;
+                let relief = compute_depth_relief(session, image, face, &self.liveness)?;
                 Ok(Some(relief))
             }
             // GPU device: delegate the depth pass to the out-of-process sidecar.
@@ -1083,6 +1071,30 @@ impl MLBackend for OrtBackend {
             None => Self::bbox_crop_resize(image, face, SIZE),
         };
 
+        let embedding = Self::embed_aligned(recognizer, &aligned)?;
+        if self.flip_tta {
+            let mirrored = Self::embed_aligned(recognizer, &super::tta::flip_horizontal(&aligned))?;
+            return Ok(super::tta::average_normalized(&embedding, &mirrored));
+        }
+        Ok(embedding)
+    }
+
+    fn is_ready(&self) -> bool {
+        // Liveness is a non-fatal convenience check and does NOT gate readiness.
+        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
+    }
+
+    fn name(&self) -> &'static str {
+        "ONNX Runtime"
+    }
+}
+
+#[cfg(feature = "_ort")]
+impl OrtBackend {
+    /// Run the recognizer on one aligned 112x112 RGB crop and return the
+    /// L2-normalised embedding.
+    fn embed_aligned(recognizer: &Mutex<Session>, aligned: &image::RgbImage) -> Result<Vec<f32>> {
+        const SIZE: u32 = 112;
         // Preprocess: RGB, (x - 127.5)/127.5, NCHW planar.
         let n = (SIZE * SIZE) as usize;
         let mut input = vec![0.0f32; 3 * n];
@@ -1111,14 +1123,5 @@ impl MLBackend for OrtBackend {
         };
 
         Ok(normalized)
-    }
-
-    fn is_ready(&self) -> bool {
-        // Liveness is a non-fatal convenience check and does NOT gate readiness.
-        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
-    }
-
-    fn name(&self) -> &'static str {
-        "ONNX Runtime"
     }
 }

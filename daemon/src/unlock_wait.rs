@@ -101,19 +101,6 @@ pub fn effective_timeout(requested_ms: u64, max_ms: u64) -> Duration {
     Duration::from_millis(requested_ms.min(max_ms))
 }
 
-/// Success message of `Authenticate`; `parse_authenticated_similarity` is its inverse.
-pub fn authenticated_message(similarity: f32) -> String {
-    format!("Authenticated (confidence: {:.2}%)", similarity * 100.0)
-}
-
-/// Similarity carried by an `Authenticate` success message (percent, 2 decimals).
-pub fn parse_authenticated_similarity(message: &str) -> Option<f32> {
-    let percent = message
-        .strip_prefix("Authenticated (confidence: ")?
-        .strip_suffix("%)")?;
-    Some(percent.parse::<f32>().ok()? / 100.0)
-}
-
 fn unix_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -257,13 +244,6 @@ mod tests {
             }
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn authenticated_message_roundtrips_similarity() {
-        let s = parse_authenticated_similarity(&authenticated_message(0.8123)).unwrap();
-        assert!((s - 0.8123).abs() < 0.0001, "{s}");
-        assert_eq!(parse_authenticated_similarity("Face not recognized"), None);
     }
 
     #[test]

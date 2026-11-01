@@ -9,14 +9,20 @@ mod aggregate;
 mod camera_producer;
 mod frame_fanout;
 mod detection_pipeline;
+mod enroll_plan;
 mod recognition_pipeline;
+mod scoring;
+mod sequential;
 mod types;
 
-pub use aggregate::{aggregate_embeddings, sharpness_score};
+pub use aggregate::{aggregate_embeddings, face_brightness, sharpness_score};
 pub use camera_producer::{spawn_camera_producer, CameraSource};
 pub use frame_fanout::run_frame_fanout;
 pub use detection_pipeline::run_detection_pipeline;
 pub use recognition_pipeline::run_recognition_pipeline;
+pub use enroll_plan::{plan_templates, EnrollMode};
+pub use scoring::template_score;
+pub use sequential::{LivenessState, SequentialDecider, Step};
 pub use types::{RawFrame, DetectionResult};
 
 use crate::DaemonState;
