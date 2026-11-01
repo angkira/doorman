@@ -8,6 +8,8 @@ use doorman_shared::{
 };
 use async_trait::async_trait;
 use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
+use crate::pipeline::{LivenessState, SequentialDecider, Step};
+use doorman_shared::config::DecisionMode;
 use doormand::decision::{AuthDecision, AuthOutcome};
 use doormand::liveness::LivenessOutcome;
 use doormand::unlock_wait::{self, AttemptOutcome, DecisionSource};
@@ -329,6 +331,12 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
     let rec = &state.config.recognition;
     let threshold = state.config.authentication.similarity_threshold;
     let mut passed_embeddings: Vec<Vec<f32>> = Vec::with_capacity(auth_frames);
+    // `n_of_m` mode: score every frame as it arrives and stop at the first
+    // terminal step. `mean` mode leaves the decider unset.
+    let dec = &state.config.decision;
+    let mut sequential = (dec.mode == DecisionMode::NOfM)
+        .then(|| SequentialDecider::new(threshold, dec.accept_n, dec.window_m, auth_frames));
+    let mut sequential_step = Step::Continue;
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
     let mut liveness_checked = false;
@@ -427,10 +435,21 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
         let embed_result = state.ml_pipeline.extract_embedding(&frame, &face).await;
         timing.embed.record(embed_started.elapsed());
         match embed_result {
-            Ok(embedding) => passed_embeddings.push(embedding),
+            Ok(embedding) => {
+                if let Some(decider) = sequential.as_mut() {
+                    let score = crate::pipeline::template_score(
+                        dec.template_score,
+                        &embedding,
+                        &stored_embeddings,
+                    );
+                    debug!("Frame {}: template score {:.4}", i, score);
+                    sequential_step = decider.push(score, liveness_state(&liveness));
+                }
+                passed_embeddings.push(embedding);
+            }
             Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
         }
-        if passed_embeddings.len() >= auth_frames {
+        if passed_embeddings.len() >= auth_frames || sequential_step != Step::Continue {
             break;
         }
         maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
@@ -509,12 +528,21 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
         .iter()
         .map(|stored_emb| crate::ml::cosine_similarity(&aggregated, stored_emb))
         .collect();
-    let best_similarity = crate::pipeline::template_score(
-        state.config.decision.template_score,
-        &aggregated,
-        &stored_embeddings,
-    );
-    let matched = best_similarity >= threshold;
+    let (matched, best_similarity) = match &sequential {
+        Some(decider) => match sequential_step {
+            Step::Accept { similarity } => (true, similarity),
+            // Rejected or ran out of frames/time: report the best frame score.
+            Step::Reject(_) | Step::Continue => (false, decider.best_in_window()),
+        },
+        None => {
+            let score = crate::pipeline::template_score(
+                dec.template_score,
+                &aggregated,
+                &stored_embeddings,
+            );
+            (score >= threshold, score)
+        }
+    };
     timing.decision = Some(decision_started.elapsed());
     timing.similarity = Some(best_similarity);
     timing.outcome = if matched {
@@ -622,6 +650,17 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
         frames_used: passed_embeddings.len(),
         frames_seen,
         liveness,
+    }
+}
+
+/// Liveness as the sequential decider sees it. A rejected or unavailable check
+/// ends the run before any frame is scored, so only pass or disabled reach it.
+fn liveness_state(liveness: &Option<LivenessOutcome>) -> LivenessState {
+    match liveness {
+        None | Some(LivenessOutcome::Pass { .. }) => LivenessState::Passed,
+        Some(LivenessOutcome::Fail { .. } | LivenessOutcome::Unavailable { .. }) => {
+            LivenessState::Failed
+        }
     }
 }
 

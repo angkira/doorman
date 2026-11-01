@@ -919,6 +919,14 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.camera.validate()?;
         self.decision.validate()?;
+        if self.decision.mode == DecisionMode::NOfM
+            && self.authentication.auth_frames < self.decision.accept_n
+        {
+            return Err(ConfigError::Invalid(format!(
+                "authentication.auth_frames = {} is the frame budget of decision.mode = \"n_of_m\" and must be >= decision.accept_n = {}",
+                self.authentication.auth_frames, self.decision.accept_n
+            )));
+        }
         Ok(())
     }
 
@@ -1059,6 +1067,12 @@ mod tests {
             let err = bad(n, m).validate().unwrap_err().to_string();
             assert!(err.contains("accept_n") && err.contains("window_m"), "{err}");
         }
+        let short_budget: Config = toml::from_str(
+            "[authentication]\nauth_frames = 2\n[decision]\nmode = \"n_of_m\"\n",
+        )
+        .unwrap();
+        let err = short_budget.validate().unwrap_err().to_string();
+        assert!(err.contains("auth_frames") && err.contains("accept_n"), "{err}");
         assert!(toml::from_str::<Config>("[decision]\nmode = \"sum\"\n").is_err());
         assert!(toml::from_str::<Config>("[decision]\ntemplate_score = \"min\"\n").is_err());
     }
