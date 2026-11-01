@@ -1,0 +1,18 @@
+# WS8 — Packaging, config schema, privacy defaults, cleanup (P2, effort S)
+
+## Tasks
+1. **Config schema & migration**: dpkg flags `/etc/doorman/doorman.toml` as an *obsolete conffile* and the installed daemon (built 2026-06-24, ~`5f78657`) is older than HEAD (`210776c`, `7c511d9` changed `shared/src/config.rs`). Add a `doorman config check` (validate + report unknown/missing keys + deprecated keys) and a config `schema_version`. Package postinst must **not overwrite** a user-modified config; ship `doorman.toml.dpkg-new` semantics and print a migration hint. Document all keys with defaults in `docs/CONFIG.md` (generate from the config struct if practical).
+2. **Privacy defaults**: change defaults to `keep_raw_frames = false`, retention bounded (e.g. `max_capture_packs_per_day` small, `retention_days`), dataset capture opt-in via an explicit `doorman dataset enable` with a warning. Existing installs keep their current explicit settings (do not silently delete data); add `doorman dataset purge --older-than` for the owner to use. Document where frames live and their permissions (0700 doorman-owned).
+3. **Model packaging**: ship the depth model with the package (currently only in an unreadable `/var/lib/doorman/models`); ship checksums and a `doorman models verify`; either use or remove the unused MiniFASNet files (decide with WS3, record the decision). State licences of every shipped model in `docs/MODELS.md` (EdgeFace weights: licence unverified — check; YuNet MIT; Depth-Anything-V2-Small Apache-2.0 per HF card — verify).
+4. **Runtime version transparency**: print loaded ONNX Runtime version/provider and model checksums at startup (info log) and in `doorman status`. The host had both a distro ORT 1.21 and a crate-bundled runtime — make the choice explicit and documented.
+5. **Systemd unit hardening review**: keep `NoNewPrivileges`, `ProtectSystem=strict`, `MemoryMax=2G`; verify `DeviceAllow` for the camera only, `ProtectHome`, `PrivateTmp`, and that the daemon cannot touch GPU devices other than what's configured (`--device cpu`, never the discrete GPU). Add `systemd-analyze security doormand` score to docs.
+6. **Repo cleanup**: remove the stray root file `2026-06-23-144649-this-session-is-being-continued-from-a-previous-c.txt` **only if** it is still untracked/unneeded (owner decides; if it ever got committed, remove it and check it for secrets); keep the repo root clean (no new files in root); make `packaging/adapters/niri/config.kdl` portable (it hard-codes a personal wallpaper path — use a documented placeholder/include); keep `.plans/` and `.session/` conventions.
+7. **Docs**: README section "Architecture & trust boundaries" (socket → peer-cred policy → pipeline → decision), "Latency budget" (per-stage numbers from WS6), "Known limitations" (RGB liveness is a heuristic; not a strong auth factor).
+8. **CI**: add jobs for fmt/clippy/test/shellcheck/`py_compile` + pytest; add a package build smoke test (`scripts/build_deb.sh` produces a `.deb` that passes `lintian` basic checks if available and `dpkg-deb -I`).
+9. **Tests for the previously untested**: lock/unlock flow helpers (WS2), socket permissions (WS1), config loader with old-schema fixtures.
+
+## Out of scope for the cloud dev
+Anything that restarts services or reinstalls on the owner's host, changes `/etc/pam.d/*` on the host, or removes `/usr/local/bin/doormand` and `/etc/doorman/*.bak*` — list these as owner actions in the PR (commands included), don't attempt them.
+
+## Acceptance
+`doorman config check` passes on the current host config (owner runs); fresh `.deb` build is reproducible in CI; defaults for dataset capture are off for new installs; docs updated.
