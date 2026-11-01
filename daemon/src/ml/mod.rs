@@ -5,6 +5,9 @@ mod model_config;
 /// routing and the `doorman-depthd` sidecar binary). Public so the bin can use it.
 pub mod depth_ipc;
 
+/// Locate the ONNX Runtime shared library mapped into this process.
+pub mod ort_probe;
+
 #[cfg(feature = "_ort")]
 mod align;
 

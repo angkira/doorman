@@ -187,7 +187,9 @@ fn rocm_ep_selected(config: &Config) -> bool {
 ///
 /// `backend-ort`/`-cuda` statically link the runtime that ort-sys downloads at
 /// build time (bundled); `backend-ort-rocm` loads a system libonnxruntime.so
-/// chosen via ORT_DYLIB_PATH. The build string carries the runtime's version.
+/// chosen via ORT_DYLIB_PATH. The build string carries the runtime's version and
+/// `/proc/self/maps` names the library file that was actually mapped (the
+/// `ort::info()` call comes first so a lazily `dlopen`ed library is loaded).
 #[cfg(feature = "_ort")]
 pub fn runtime_info() -> String {
     let linkage = if cfg!(feature = "backend-ort-rocm") {
@@ -195,7 +197,11 @@ pub fn runtime_info() -> String {
     } else {
         "bundled (ort download-binaries)"
     };
-    format!("{linkage}; {}", ort::info())
+    let version = ort::info();
+    format!(
+        "{linkage}; {version}; {}",
+        super::ort_probe::describe_loaded_onnxruntime()
+    )
 }
 
 #[cfg(feature = "_ort")]
