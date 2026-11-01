@@ -28,7 +28,7 @@ pub struct DaemonState {
     /// solely by that thread and is never shared across threads; consumers
     /// (IPC enroll/auth/status/detect) read frames from this watch channel
     /// instead of touching the camera directly.
-    pub latest_frame: tokio::sync::watch::Receiver<Option<Arc<image::DynamicImage>>>,
+    pub latest_frame: tokio::sync::watch::Receiver<Option<pipeline::RawFrame>>,
     pub ml_pipeline: Arc<ml::MLPipeline>,
     pub storage: Arc<RwLock<storage::Storage>>,
     pub start_time: std::time::Instant,
@@ -401,7 +401,7 @@ async fn main() -> Result<()> {
     // frame to `latest_frame_rx` (for IPC consumers) and forwards `RawFrame`s to
     // the pipeline via `camera_rx`.
     let (latest_frame_tx, latest_frame_rx) =
-        tokio::sync::watch::channel::<Option<Arc<image::DynamicImage>>>(None);
+        tokio::sync::watch::channel::<Option<pipeline::RawFrame>>(None);
     let (camera_tx, camera_rx) = tokio::sync::mpsc::channel::<pipeline::RawFrame>(30);
     // Camera capture gate. The producer opens/holds the live camera only while this
     // is `true`. Initial value = `always_track` (super-security: camera on from boot);

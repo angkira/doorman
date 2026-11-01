@@ -192,7 +192,7 @@ async fn wait_for_frame(
 
     // Fast path: a frame is already available.
     if let Some(frame) = rx.borrow().clone() {
-        return Ok(frame);
+        return Ok(frame.image);
     }
 
     // Otherwise wait for the producer to publish a frame.
@@ -202,7 +202,7 @@ async fn wait_for_frame(
                 return Err("Camera producer stopped".to_string());
             }
             if let Some(frame) = rx.borrow().clone() {
-                return Ok(frame);
+                return Ok(frame.image);
             }
         }
     };
@@ -216,9 +216,9 @@ async fn wait_for_frame(
 }
 
 async fn wait_for_auth_frame_until(
-    rx: &mut tokio::sync::watch::Receiver<Option<std::sync::Arc<image::DynamicImage>>>,
+    rx: &mut tokio::sync::watch::Receiver<Option<crate::pipeline::RawFrame>>,
     deadline: std::time::Instant,
-) -> Option<std::sync::Arc<image::DynamicImage>> {
+) -> Option<crate::pipeline::RawFrame> {
     loop {
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -253,7 +253,7 @@ async fn collect_frames_for_duration(
     let duration = std::time::Duration::from_secs(duration_secs);
 
     if let Some(frame) = rx.borrow().clone() {
-        frames.push((*frame).clone());
+        frames.push((*frame.image).clone());
     }
 
     while start.elapsed() < duration {
@@ -266,7 +266,7 @@ async fn collect_frames_for_duration(
         {
             Ok(Ok(())) => {
                 if let Some(frame) = rx.borrow().clone() {
-                    frames.push((*frame).clone());
+                    frames.push((*frame.image).clone());
                 }
             }
             Ok(Err(_)) => break, // producer stopped
@@ -359,7 +359,7 @@ async fn run_authenticate(state: &DaemonState, username: &str) -> AuthDecision {
                 None => break,
             },
         };
-        let frame = (*frame).clone();
+        let frame = (*frame.image).clone();
         let i = frames_seen;
         frames_seen += 1;
         timing.frames_seen = frames_seen;
