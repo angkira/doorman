@@ -123,6 +123,42 @@ requires the liveness verdict to have passed; frame scores wait (`Pending`)
 until then. The default stays 1 (current behaviour); 3 is the recommended value
 to try.
 
+### Binding liveness to the frames that decide
+
+Liveness is evaluated on the first quality frames, before the frames that carry
+the match are collected. Without more, a live face followed by a photo or phone
+of the owner passes both checks (review finding M2). Therefore, **when an
+attempt is about to be accepted** (`n_of_m` accept, or `mean` over the
+aggregated frames), the deciding frame, i.e. the last quality frame whose
+embedding was scored, must itself pass the depth check
+(`confirm_on_deciding_frame` in `daemon/src/liveness.rs`, called from
+`run_authenticate`). In `n_of_m` mode that is the frame that completes the Nth
+hit; in `mean` mode it is the last frame of the aggregate, which lies in its
+last third. If that frame was already the one liveness was decided on, no second
+inference is made. A failed or unavailable recheck rejects fail-closed with the
+usual `liveness_rejected` / `liveness_unavailable` code; non-matching attempts
+never pay for it.
+
+Latency cost: one extra depth pass (about 0.5-1.3 s on CPU at 518) for every
+attempt that would otherwise be accepted and whose deciding frame was not
+already checked, which is the normal case (default `frames = 1`, accept at
+frame 3 or later). The recheck is a single-frame decision (no median), so the
+per-frame false-reject rate (relief 0.0491 vs 0.0500 was seen once) now applies
+twice per unlock; a genuine retry is the cost of a rejection.
+
+Residual risk: only the first checked frame(s) and the deciding frame are
+verified. An attacker who can show a live face at the start and at the end and
+a photo on the frames in between could still supply the accepting hits from the
+unchecked middle frames (`n_of_m` needs N hits, so this needs N >= 2 photo
+frames between two live ones within roughly a second; `mean` averages them in).
+Closing that fully means a depth pass on every accepting frame
+(`~N x 0.5-1.3 s`), which was not chosen for latency. A deeper fix needs
+identity-bound liveness (same face track), listed under future work. The
+synthetic swap tests are in `daemon/src/ipc.rs`
+(`live_then_photo_swap_is_rejected_by_the_deciding_frame_check`); they mirror
+the control flow with synthetic frames because `run_authenticate` needs the ML
+models and a camera.
+
 ### Relief statistic and depth input size
 
 `minmax` is the original `std(face depth) / (max - min of the whole depth map)`.
@@ -206,6 +242,10 @@ Then enrol a second condition with `doorman enroll <user> --add`.
       with an old photo on a phone: still rejected.
 - [ ] `liveness.frames = 3`: `liveness_frames` is 2 for most attempts, 3 on
       disagreement; no extra false rejects over 20 attempts.
+- [ ] Deciding-frame check: `[telemetry] timing_log` shows
+      `liveness_frames` one higher than before for accepted attempts (the
+      recheck); show a photo on a phone after covering the camera and
+      presenting a face for the first moment: rejected as `liveness_rejected`.
 - [ ] Rename the depth model: `doorman test` prints `[liveness_unavailable]`
       and the password still works; restore it.
 - [ ] `enroll --add` in a second lighting condition keeps the first

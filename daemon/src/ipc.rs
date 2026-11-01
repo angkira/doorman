@@ -446,6 +446,9 @@ async fn run_authenticate(
         .liveness_enabled
         .then(|| LivenessAggregator::new(liveness_frames));
     let mut liveness: Option<LivenessOutcome> = None;
+    // The last quality frame whose embedding was scored (it completes the
+    // decision), and whether liveness was already evaluated on that very frame.
+    let mut deciding_frame: Option<(image::DynamicImage, crate::ml::Face, bool)> = None;
     let mut frames_seen = 0usize;
     let mut rx = state.latest_frame.clone();
     let mut maybe_frame = rx.borrow_and_update().clone();
@@ -498,7 +501,10 @@ async fn run_authenticate(
         }
         // Anti-spoofing depth gate: evaluated on the first quality frames until the
         // aggregate (`[liveness] frames`, median) is decided; 1 frame by default.
+        // The deciding frame is confirmed separately before accepting (below).
+        let mut checked_this_frame = false;
         if let (Some(agg), None) = (liveness_agg.as_mut(), liveness.as_ref()) {
+            checked_this_frame = true;
             let liveness_started = std::time::Instant::now();
             let frame_result = state.ml_pipeline.liveness_check(&frame, &face).await;
             let depth_elapsed = liveness_started.elapsed();
@@ -556,6 +562,7 @@ async fn run_authenticate(
                         decider.push(score, liveness_state(liveness_agg.is_some(), &liveness));
                 }
                 passed_embeddings.push(embedding);
+                deciding_frame = Some((frame, face, checked_this_frame));
             }
             Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
         }
@@ -671,6 +678,38 @@ async fn run_authenticate(
             (score >= threshold, score)
         }
     };
+    // Bind liveness to the frames that produced the match: the first quality
+    // frames were checked, but a photo shown afterwards would still score as the
+    // owner. The deciding (last scored) frame must itself be live. Costs one more
+    // depth inference unless that frame was the one already checked.
+    if matched && liveness_agg.is_some() {
+        if let Some((frame, face, checked)) = deciding_frame.take() {
+            let recheck_started = std::time::Instant::now();
+            let confirmed = doormand::liveness::confirm_on_deciding_frame(checked, || {
+                state.ml_pipeline.liveness_check(&frame, &face)
+            })
+            .await;
+            if !checked {
+                timing.liveness =
+                    Some(timing.liveness.unwrap_or_default() + recheck_started.elapsed());
+                timing.liveness_frames += 1;
+            }
+            if let Err(not_live) = confirmed {
+                timing.liveness_passed = Some(false);
+                timing.liveness_relief = not_live.relief();
+                return liveness_failure(
+                    state,
+                    &mut timing,
+                    &attempt_id,
+                    username,
+                    first_quality_face_area_frac,
+                    raw_face_frames,
+                    frames_seen,
+                    Some(not_live),
+                );
+            }
+        }
+    }
     timing.decision = Some(decision_started.elapsed());
     timing.similarity = Some(best_similarity);
     timing.outcome = if matched {
@@ -1053,6 +1092,111 @@ mod tests {
         assert_eq!(captured[0].source_index, 1);
         assert_eq!(captured[1].source_index, 2);
         assert_eq!(captured[2].source_index, 3);
+    }
+
+    /// Synthetic frame: its similarity to the owner's template and the depth
+    /// relief it would show (a live face has relief, a photo is flat).
+    #[derive(Clone, Copy)]
+    struct SynthFrame {
+        score: f32,
+        relief: f32,
+    }
+
+    const LIVE: SynthFrame = SynthFrame {
+        score: 0.8,
+        relief: 0.2,
+    };
+    /// A photo of the owner: matches just as well, but flat.
+    const PHOTO: SynthFrame = SynthFrame {
+        score: 0.8,
+        relief: 0.01,
+    };
+    const THRESHOLD: f32 = 0.4;
+    const RELIEF_THRESHOLD: f32 = 0.05;
+
+    fn depth_check(frame: SynthFrame) -> LivenessOutcome {
+        if frame.relief >= RELIEF_THRESHOLD {
+            LivenessOutcome::Pass {
+                relief: frame.relief,
+            }
+        } else {
+            LivenessOutcome::Fail {
+                relief: frame.relief,
+            }
+        }
+    }
+
+    /// Mirrors the order of `run_authenticate`: liveness on the first quality
+    /// frames until decided, every frame scored, accept via the sequential
+    /// decider, then the deciding-frame confirmation. `Ok(similarity)` = accepted.
+    async fn run(frames: &[SynthFrame], liveness_frames: usize, confirm: bool) -> bool {
+        use crate::pipeline::{LivenessState, SequentialDecider, Step};
+        use doormand::liveness::{LivenessAggregator, LivenessProgress};
+        let mut agg = LivenessAggregator::new(liveness_frames);
+        let mut verdict: Option<LivenessOutcome> = None;
+        let mut decider = SequentialDecider::new(THRESHOLD, 3, 5, frames.len());
+        let mut deciding: Option<(SynthFrame, bool)> = None;
+        let mut step = Step::Continue;
+        for frame in frames {
+            let mut checked = false;
+            if verdict.is_none() {
+                checked = true;
+                if let LivenessProgress::Decided(v) = agg.push(depth_check(*frame)) {
+                    verdict = Some(v);
+                }
+            }
+            if matches!(verdict, Some(ref v) if !v.is_pass()) {
+                return false;
+            }
+            let state = match verdict {
+                Some(_) => LivenessState::Passed,
+                None => LivenessState::Pending,
+            };
+            step = decider.push(frame.score, state);
+            deciding = Some((*frame, checked));
+            if step != Step::Continue {
+                break;
+            }
+        }
+        if !matches!(step, Step::Accept { .. }) {
+            return false;
+        }
+        if !confirm {
+            return true;
+        }
+        let (frame, checked) = deciding.expect("accepted after at least one frame");
+        doormand::liveness::confirm_on_deciding_frame(checked, || async move {
+            Some(depth_check(frame))
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn live_then_photo_frames_are_accepted_without_the_binding() {
+        // The review's finding: this is the hole the binding closes.
+        let swap = [LIVE, PHOTO, PHOTO, PHOTO];
+        assert!(run(&swap, 1, false).await);
+    }
+
+    #[tokio::test]
+    async fn live_then_photo_swap_is_rejected_by_the_deciding_frame_check() {
+        for swap in [
+            vec![LIVE, PHOTO, PHOTO, PHOTO],
+            vec![LIVE, LIVE, PHOTO, PHOTO, PHOTO],
+        ] {
+            assert!(!run(&swap, 1, true).await, "swap must not accept");
+        }
+        // Multi-frame liveness (3 frames) decided by two live frames (majority),
+        // then photos complete the three accepting hits.
+        let swap = [LIVE, LIVE, PHOTO, PHOTO, PHOTO];
+        assert!(!run(&swap, 3, true).await);
+    }
+
+    #[tokio::test]
+    async fn genuine_live_frames_are_still_accepted_and_photos_alone_never() {
+        assert!(run(&[LIVE, LIVE, LIVE, LIVE], 1, true).await);
+        assert!(!run(&[PHOTO, PHOTO, PHOTO, PHOTO], 1, true).await);
     }
 }
 
