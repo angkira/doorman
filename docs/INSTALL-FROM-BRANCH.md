@@ -5,9 +5,47 @@ Every step that changes the system is a `sudo` command you run yourself; this
 document changes nothing. Paths use `$HOME`; adjust the placeholders in angle
 brackets.
 
-Keep a second root shell open from step 1 until the end of step 9
-(`sudo -i` in another terminal). PAM and sudo come last (step 12), never
-earlier.
+> **Do NOT use `doorman install` for this path.** It rebuilds from source,
+> installs the PAM module, writes `/etc/pam.d/<service>`, copies the user's
+> `~/.local/share/doorman/embeddings.bin` into the system store and restarts the
+> services. This document installs the prebuilt `.deb` instead, which edits no
+> PAM file and touches no enrolment.
+>
+> **Do NOT run `apt purge doorman` or `apt remove --purge doorman`**, now or
+> during a rollback. See "Never purge" below.
+
+## 0. Open a second root shell
+
+In another terminal or TTY (Ctrl+Alt+F3), run `sudo -i` and keep that shell
+open until the verification in step 9 is done (and, for step 12, until `sudo`
+is tested from a third terminal). If the new daemon, the lock screen or PAM
+misbehaves, a session that is already root needs no `sudo` and no face or
+password prompt to repair it. Opening one afterwards may be impossible,
+because `sudo` is exactly what can break. PAM and sudo come last (step 12),
+never earlier.
+
+## Never purge
+
+`packaging/deb/postrm` runs on `purge` (`apt purge doorman`,
+`apt remove --purge doorman`, `dpkg -P doorman`):
+
+```sh
+rm -rf /etc/doorman /var/lib/doorman
+userdel doorman; groupdel doorman
+```
+
+That deletes, with no copy and no prompt:
+
+* `/etc/doorman/` completely: `doorman.toml`, `doorman.toml.bak`,
+  `doorman.toml.new`, anything else in it. The package declares no conffiles,
+  so dpkg does not protect these files either.
+* `/var/lib/doorman/` completely: `embeddings.bin` (all enrolments) and
+  `embeddings.bin.v1.bak`, `models/` (including the depth model and any
+  `depth.ncnn.*`), the `miopen` and `.cache` directories, and the dataset
+  (attempt records and capture packs) if logging was enabled.
+* The system user `doorman` and the group `doorman`.
+
+A plain `apt remove doorman` (no `--purge`) leaves all of these in place.
 
 ## What is different from your installed build
 
@@ -18,27 +56,63 @@ earlier.
 * The packaged unit grants no GPU access. Your host has a drop-in
   `10-drm.conf` that does; it must go (step 8).
 * The first write of `embeddings.bin` converts it to a new format (version 2)
-  that older daemons cannot read. A backup is made automatically (step 1).
+  that older daemons cannot read. A copy is made automatically
+  (`embeddings.bin.v1.bak`), and step 1 makes your own tarball first.
 
 ## 1. Pre-flight backups
 
-Do this before installing. Nothing below is overwritten without these copies.
+Do this before installing, in the root shell from step 0. The old `.deb` is not
+available and the new package has the same version number, so `apt` cannot
+downgrade: this tarball is the rollback (step 13). Nothing below is overwritten
+without these copies.
 
 ```sh
-B="$HOME/doorman-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$B"
-sudo cp -a /var/lib/doorman/embeddings.bin "$B/"
-sudo cp -a /etc/doorman/doorman.toml "$B/"
-sudo cp -a /etc/systemd/system/doormand.service "$B/" 2>/dev/null || true
-sudo cp -a /etc/systemd/system/doormand.service.d "$B/" 2>/dev/null || true
-sudo cp -a /usr/bin/doormand /usr/bin/doorman "$B/" 2>/dev/null || true
-dpkg -l doorman 2>/dev/null | tail -n 1 > "$B/installed-package.txt" || true
-sudo chown -R "$(id -u):$(id -g)" "$B"
-ls -l "$B"
+# in the root shell
+umask 077
+systemctl stop doormand                  # a consistent embeddings.bin
+R="/root/doorman-rollback-$(date +%Y%m%d-%H%M%S)"
+install -d -m 0700 -o root -g root "$R"  # embeddings are biometric data
+
+# 1. what the package owns right now (informational and the base of the list)
+dpkg -L doorman | tee "$R/dpkg-L.txt"
+dpkg -l doorman | tail -n 1 > "$R/installed-package.txt"
+
+# 2. files to archive: package files (not directories), the PAM module wherever
+#    it lives, unit files and drop-ins, config, enrolments
+{
+  while IFS= read -r f; do
+    if [ -f "$f" ] || [ -L "$f" ]; then printf '%s\n' "$f"; fi
+  done < "$R/dpkg-L.txt"
+  find /lib/*/security /usr/lib/*/security -name '*pam_doorman.so' 2>/dev/null
+  for p in /usr/bin/doorman* /usr/local/bin/doorman* \
+           /etc/systemd/system/doormand.service /etc/systemd/system/doormand.service.d \
+           /etc/doorman /var/lib/doorman/embeddings.bin*; do
+    if [ -e "$p" ]; then printf '%s\n' "$p"; fi
+  done
+} | sort -u > "$R/files.txt"
+
+# 3. archive them (tar strips the leading / and restores with -C /)
+tar --numeric-owner -cpf "$R/doorman-installed.tar" -T "$R/files.txt"
+tar -tvf "$R/doorman-installed.tar" | grep -E 'bin/doorman|pam_doorman|\.service|embeddings|doorman.toml'
+ls -l "$R"
+systemctl start doormand
 ```
 
-Also keep the old `.deb` file if you still have it; rollback (step 13) needs it.
-Daemon-side, the first v2 write copies a legacy `embeddings.bin` to
+The explicit set this covers: `/usr/bin/doorman*` (`doormand`, `doorman`), the
+PAM module (`libpam_doorman.so` and the `pam_doorman.so` link, normally under
+`/usr/lib/<multiarch>/security/`), `/lib/systemd/system/doormand.service`,
+`/usr/lib/systemd/user/doormand.service`, `/etc/systemd/system/doormand.service`
+and `doormand.service.d/` (your `10-drm.conf`), `/etc/doorman/`, and
+`/var/lib/doorman/embeddings.bin` (with `.v1.bak` if present). Models under
+`/var/lib/doorman/models` are not archived (large, restored by the package
+`postinst`).
+
+Check the tarball lists the binaries and `embeddings.bin` before going on.
+Keep it until the new build has run for a while. Copy it off the machine if you
+want it to survive a disk failure; it holds your face templates, so keep the
+copy private.
+
+Daemon-side, the first v2 write also copies a legacy `embeddings.bin` to
 `/var/lib/doorman/embeddings.bin.v1.bak` (mode 0600, never overwritten).
 
 ## 2. Get the .deb
@@ -190,17 +264,35 @@ yet; collect timings first (step 11).
 
 ## 10. Lock-screen scripts (niri)
 
-The niri scripts are not in the deb. From the checkout of the branch:
+The niri scripts are not in the deb. Back up the scripts you have now, then
+install. From the checkout of the branch:
 
 ```sh
 cd "$HOME/doorman-pr13"
+TS="$(date +%Y%m%d-%H%M%S)"
+for f in doorman-lock doorman-lock-watch-poll; do
+    if [ -e "$HOME/.local/bin/$f" ]; then
+        cp -a "$HOME/.local/bin/$f" "$HOME/.local/bin/$f.bak-$TS"
+    fi
+done
+ls -l "$HOME"/.local/bin/doorman-lock*
 install -D -m 0755 packaging/adapters/niri/bin/doorman-lock "$HOME/.local/bin/doorman-lock"
 install -D -m 0755 packaging/adapters/niri/bin/doorman-lock-watch-poll "$HOME/.local/bin/doorman-lock-watch-poll"
 command -v doorman doorman-lock
 ```
 
+Restore the previous scripts (use the `TS` printed by `ls`):
+
+```sh
+for f in doorman-lock doorman-lock-watch-poll; do
+    if [ -e "$HOME/.local/bin/$f.bak-$TS" ]; then
+        install -m 0755 "$HOME/.local/bin/$f.bak-$TS" "$HOME/.local/bin/$f"
+    fi
+done
+```
+
 (`scripts/install_local_niri_desktop.sh` also replaces your niri and waybar
-configs, with backups; the two commands above do not.) Bind the lock key to
+configs, with backups; the commands above do not.) Bind the lock key to
 `doorman-lock`, lock once, and read `$XDG_RUNTIME_DIR/doorman/lock.log`. When gtklock
 exits with rc=1 while the session is locked, the log shows `attaching watcher` with
 the PID of the live gtklock. Checklist: `docs/unlock-path.md`.
@@ -233,31 +325,41 @@ terminal. Nothing in the package edits PAM.
 
 ## 13. Rollback
 
-Stop the daemon first. Use your step 1 copies in `$B`.
+The old `.deb` is not available and the new package has the same version, so
+`apt install --allow-downgrades` does nothing useful. Restore from the step 1
+tarball in `$R` instead, in the root shell. Never `apt purge` (see "Never purge").
 
 ```sh
-sudo systemctl stop doormand
-
-# 1. old package (the .deb you kept) or the old binaries
-sudo apt install --allow-downgrades "<path to the old doorman .deb>"
-#    or: sudo install -m 0755 "$B/doormand" /usr/bin/doormand; sudo install -m 0755 "$B/doorman" /usr/bin/doorman
-
-# 2. embeddings: the daemon wrote a v2 file; the old daemon needs the v1 file
-sudo ls -l /var/lib/doorman/embeddings.bin*
-sudo cp -a /var/lib/doorman/embeddings.bin "$B/embeddings.bin.v2-after-upgrade"
-sudo install -o doorman -g doorman -m 0600 /var/lib/doorman/embeddings.bin.v1.bak /var/lib/doorman/embeddings.bin
-#    if there is no .v1.bak, use the copy from step 1:
-#    sudo install -o doorman -g doorman -m 0600 "$B/embeddings.bin" /var/lib/doorman/embeddings.bin
-
-# 3. config and unit
-sudo install -m 0644 "$B/doorman.toml" /etc/doorman/doorman.toml
-#    only if you removed them and want the old unit back:
-#    sudo cp -a "$B/doormand.service" /etc/systemd/system/ ; sudo cp -a "$B/doormand.service.d" /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl start doormand
+# in the root shell; R is the directory from step 1
+systemctl stop doormand
+cp -a /var/lib/doorman/embeddings.bin "$R/embeddings.bin.v2-after-upgrade"   # enrolments made since
+tar --numeric-owner -xpf "$R/doorman-installed.tar" -C /
+ls -l /var/lib/doorman/embeddings.bin* /usr/bin/doorman*
+systemctl daemon-reload
+systemctl start doormand
 systemctl is-active doormand
 ```
 
-Enrolments made on the new build (after the backup) are not in the v1 file;
-re-enrol with the old build. Restoring the old GPU drop-in is not recommended:
-the daemon does not need the GPU.
+This restores the old binaries, PAM module, unit files and drop-in,
+`/etc/doorman` and the v1 `embeddings.bin` over what the new package
+installed. Files the new package added that the old one did not have stay.
+dpkg still records the new package version, so `dpkg -V doorman` reports the
+changed files; that is expected until you install a package again. Enrolments
+made on the new build are not in the v1 file: re-enrol with the old build.
+Restoring the old GPU drop-in is not recommended: the daemon does not need the
+GPU. Restore the niri scripts with the commands in step 10.
+
+Optional, **untested**: rebuild the old commit as a `.deb` and reinstall it
+with `dpkg -i`, which accepts the same version. This is not needed if the
+tarball restore works.
+
+```sh
+git clone https://github.com/angkira/doorman.git "$HOME/doorman-old"
+cd "$HOME/doorman-old"
+git checkout 5f78657
+scripts/build_deb.sh          # may not exist or behave the same at that commit
+sudo dpkg -i target/debian/dist/doorman_*.deb
+```
+
+Then put `embeddings.bin` and `/etc/doorman/doorman.toml` back from the tarball
+as above.
