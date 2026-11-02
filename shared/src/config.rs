@@ -22,6 +22,9 @@ pub enum ConfigError {
 pub const MAX_WARMUP_FRAMES: u32 = 10;
 /// Upper bound (inclusive, ms) for `[camera] prearm_window_ms`.
 pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
+/// Bounds (inclusive, ms) for `[camera] native_first_frame_timeout_ms`.
+pub const MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS: u32 = 100;
+pub const MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS: u32 = 10_000;
 /// Largest 8-bit luma value; upper bound of `[recognition] min_brightness`.
 pub const MAX_LUMA: f32 = 255.0;
 /// Largest `[liveness] frames`.
@@ -44,6 +47,24 @@ fn default_schema_version() -> u32 {
 
 fn default_prearm_window_ms() -> u32 {
     5000
+}
+
+fn default_native_first_frame_timeout_ms() -> u32 {
+    1500
+}
+
+/// Which live-camera backend `[camera] backend` selects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CameraBackendChoice {
+    /// Native (V4L2) backend, accepted only after it delivered a real first
+    /// frame; otherwise the ffmpeg backend.
+    #[default]
+    Auto,
+    /// Native backend only (no ffmpeg fallback).
+    Native,
+    /// ffmpeg backend only (the native backend is not tried).
+    Ffmpeg,
 }
 
 /// Accepted `[camera] fourcc` spellings (case-insensitive) for MJPEG.
@@ -230,6 +251,16 @@ pub struct CameraConfig {
     /// After the window the normal `locked && !idle` rule applies. 0..=30000.
     #[serde(default = "default_prearm_window_ms")]
     pub prearm_window_ms: u32,
+
+    /// Live-camera backend: "auto" (native V4L2 with a validated first frame,
+    /// then ffmpeg), "native" (no ffmpeg fallback) or "ffmpeg" (skip native).
+    #[serde(default)]
+    pub backend: CameraBackendChoice,
+
+    /// With the native backend: how long (ms) the first decoded frame may take
+    /// before the backend is rejected (then ffmpeg under "auto"). 100..=10000.
+    #[serde(default = "default_native_first_frame_timeout_ms")]
+    pub native_first_frame_timeout_ms: u32,
 }
 
 impl CameraConfig {
@@ -245,6 +276,15 @@ impl CameraConfig {
             return Err(ConfigError::Invalid(format!(
                 "camera.prearm_window_ms = {} is out of range (0..={MAX_PREARM_WINDOW_MS})",
                 self.prearm_window_ms
+            )));
+        }
+        if !(MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS..=MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS)
+            .contains(&self.native_first_frame_timeout_ms)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "camera.native_first_frame_timeout_ms = {} is out of range \
+                 ({MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS}..={MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS})",
+                self.native_first_frame_timeout_ms
             )));
         }
         self.fourcc()?;
@@ -1185,6 +1225,8 @@ impl Default for CameraConfig {
             warmup_frames: 0,
             prearm_on_lock: false,
             prearm_window_ms: default_prearm_window_ms(),
+            backend: CameraBackendChoice::default(),
+            native_first_frame_timeout_ms: default_native_first_frame_timeout_ms(),
         }
     }
 }
@@ -1539,6 +1581,44 @@ mod tests {
         );
         assert!(toml::from_str::<Config>("[decision]\nmode = \"sum\"\n").is_err());
         assert!(toml::from_str::<Config>("[decision]\ntemplate_score = \"min\"\n").is_err());
+    }
+
+    #[test]
+    fn test_camera_backend_choice_and_first_frame_timeout() {
+        let old: Config = toml::from_str("[camera]\nwidth = 1024\n").unwrap();
+        assert_eq!(old.camera.backend, CameraBackendChoice::Auto);
+        assert_eq!(old.camera.native_first_frame_timeout_ms, 1500);
+
+        for (name, want) in [
+            ("auto", CameraBackendChoice::Auto),
+            ("native", CameraBackendChoice::Native),
+            ("ffmpeg", CameraBackendChoice::Ffmpeg),
+        ] {
+            let cfg: Config = toml::from_str(&format!("[camera]\nbackend = \"{name}\"\n")).unwrap();
+            assert_eq!(cfg.camera.backend, want);
+        }
+        assert!(toml::from_str::<Config>("[camera]\nbackend = \"gstreamer\"\n").is_err());
+
+        let timeout = |native_first_frame_timeout_ms| CameraConfig {
+            native_first_frame_timeout_ms,
+            ..CameraConfig::default()
+        };
+        assert!(timeout(MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS)
+            .validate()
+            .is_ok());
+        assert!(timeout(MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS)
+            .validate()
+            .is_ok());
+        for bad in [
+            MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS - 1,
+            MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS + 1,
+        ] {
+            let err = timeout(bad).validate().unwrap_err().to_string();
+            assert!(
+                err.contains("native_first_frame_timeout_ms") && err.contains("100..=10000"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

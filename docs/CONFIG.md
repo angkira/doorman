@@ -44,10 +44,12 @@ see the comments in `packaging/doorman.toml.example`).
 | Key | Default |
 |---|---|
 | `always_track` | `false` |
+| `backend` | `"auto"` |
 | `device_index` | `0` |
 | `fourcc` | `unset` |
 | `fps` | `30` |
 | `height` | `720` |
+| `native_first_frame_timeout_ms` | `1500` |
 | `prearm_on_lock` | `false` |
 | `prearm_window_ms` | `5000` |
 | `presence_autolock_secs` | `0` |
