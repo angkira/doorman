@@ -12,6 +12,7 @@
 //! headless CI) without a physical camera.
 
 use anyhow::Result;
+use doorman_shared::config::CameraBackendChoice;
 use doorman_shared::Config;
 use image::DynamicImage;
 
@@ -61,6 +62,8 @@ pub use gstreamer_backend::GStreamerCamera;
 
 pub mod gate;
 
+pub mod probe;
+
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
 mod format_select;
 
@@ -68,6 +71,18 @@ mod format_select;
 mod v4l2_backend;
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 pub use v4l2_backend::V4L2Camera;
+
+#[allow(dead_code)] // unused when no native backend is compiled in
+/// May the native (V4L2/nokhwa) backend be tried for `choice`?
+fn native_allowed(choice: CameraBackendChoice) -> bool {
+    choice != CameraBackendChoice::Ffmpeg
+}
+
+#[allow(dead_code)] // unused without the ffmpeg backend
+/// May the ffmpeg backend be tried for `choice`? "native" never falls back to it.
+fn ffmpeg_allowed(choice: CameraBackendChoice) -> bool {
+    choice != CameraBackendChoice::Native
+}
 
 /// Backend enum for the unified camera.
 enum CameraBackendInner {
@@ -78,6 +93,8 @@ enum CameraBackendInner {
     GStreamer(GStreamerCamera),
     #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
     V4L2(V4L2Camera),
+    /// Camera whose frames come from a closure (fault injection in tests).
+    Scripted(Box<dyn FnMut() -> Result<DynamicImage> + Send>),
 }
 
 /// Public Camera type with automatic fallback to the mock backend.
@@ -112,6 +129,13 @@ impl Camera {
         }
     }
 
+    /// Camera whose frames come from `next` (fault injection in tests).
+    pub fn scripted(next: impl FnMut() -> Result<DynamicImage> + Send + 'static) -> Self {
+        Self {
+            inner: CameraBackendInner::Scripted(Box::new(next)),
+        }
+    }
+
     /// Name of the active backend, for logging.
     pub fn backend_name(&self) -> &'static str {
         match &self.inner {
@@ -122,6 +146,7 @@ impl Camera {
             CameraBackendInner::GStreamer(cam) => cam.backend_name(),
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(cam) => cam.backend_name(),
+            CameraBackendInner::Scripted(_) => "scripted",
         }
     }
 
@@ -141,8 +166,9 @@ impl Camera {
         }
 
         // Then V4L2 / native webcam (nokhwa).
+        // Only accepted after it delivered a real first frame (see probe.rs).
         #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
-        {
+        if native_allowed(config.camera.backend) {
             match V4L2Camera::new_with_config(config).await {
                 Ok(cam) => {
                     tracing::info!("Using V4L2/nokhwa camera backend");
@@ -152,13 +178,15 @@ impl Camera {
                 }
                 Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {:#}, trying next backend", e),
             }
+        } else {
+            tracing::info!("[camera] backend = \"ffmpeg\": skipping the native backend");
         }
 
         // Live webcam via the ffmpeg CLI (reliable real camera on macOS, where
         // nokhwa's AVFoundation path hangs). Degrades to mock if ffmpeg is
         // missing or the OS denies camera access.
         #[cfg(feature = "camera-ffmpeg")]
-        {
+        if ffmpeg_allowed(config.camera.backend) {
             match FfmpegCamera::new_with_config(config).await {
                 Ok(cam) => {
                     tracing::info!("Using ffmpeg live webcam backend");
@@ -191,6 +219,7 @@ impl Camera {
             CameraBackendInner::GStreamer(cam) => cam.capture_frame(),
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(cam) => cam.capture_frame(),
+            CameraBackendInner::Scripted(next) => next(),
         }
     }
 
@@ -203,6 +232,7 @@ impl Camera {
             CameraBackendInner::GStreamer(cam) => cam.capture_frames(count),
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(cam) => cam.capture_frames(count),
+            CameraBackendInner::Scripted(next) => (0..count).filter_map(|_| next().ok()).collect(),
         }
     }
 
@@ -239,6 +269,26 @@ impl Camera {
             CameraBackendInner::GStreamer(_) => true,
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(_) => true,
+            CameraBackendInner::Scripted(_) => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_choice_selects_which_backends_are_tried() {
+        // (choice, native tried, ffmpeg tried)
+        let table = [
+            (CameraBackendChoice::Auto, true, true),
+            (CameraBackendChoice::Native, true, false),
+            (CameraBackendChoice::Ffmpeg, false, true),
+        ];
+        for (choice, native, ffmpeg) in table {
+            assert_eq!(native_allowed(choice), native, "{choice:?}");
+            assert_eq!(ffmpeg_allowed(choice), ffmpeg, "{choice:?}");
         }
     }
 }

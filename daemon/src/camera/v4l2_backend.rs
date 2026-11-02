@@ -8,6 +8,7 @@
 ///
 /// Note: Prefer GStreamer backend for desktop integration
 use super::format_select::{select_mode, DeviceMode, WantedMode};
+use super::probe::validate_first_frame;
 use super::CameraBackend;
 use anyhow::{anyhow, Context, Result};
 use doorman_shared::config::CameraFourcc;
@@ -19,7 +20,7 @@ use nokhwa::utils::{
     Resolution,
 };
 use nokhwa::Camera as NokhwaCamera;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 pub struct V4L2Camera {
@@ -147,7 +148,26 @@ impl CameraBackend for V4L2Camera {
             open_started.elapsed().as_secs_f64() * 1000.0
         );
 
-        Ok(Self { camera })
+        // An open stream proves nothing about frames (see docs/camera.md): read
+        // and decode one real frame before declaring the backend usable, so a
+        // device that cannot deliver falls through to the next backend.
+        let timeout = Duration::from_millis(u64::from(config.camera.native_first_frame_timeout_ms));
+        let first_frame_started = Instant::now();
+        let camera = validate_first_frame(Self { camera }, timeout, |cam| {
+            cam.capture_frame().map(|_| ())
+        })
+        .with_context(|| {
+            format!(
+                "native camera opened at {chosen:?} but delivered no usable first frame \
+                 (native_first_frame_timeout_ms = {})",
+                config.camera.native_first_frame_timeout_ms
+            )
+        })?;
+        info!(
+            "V4L2 first frame validated in {:.1} ms",
+            first_frame_started.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(camera)
     }
 
     fn capture_frame(&mut self) -> Result<DynamicImage> {
