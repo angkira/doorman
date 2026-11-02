@@ -1280,6 +1280,60 @@ fn config_kept_notice(target: &str, new_path: &str) -> String {
     )
 }
 
+/// Prefix of the synthetic plan step that prints [`embeddings_kept_notice`].
+const EMBEDDINGS_KEPT_PREFIX: &str = "EMBEDDINGS-KEPT:";
+
+/// Plan steps that carry the invoking user's enrollment `src` into the system
+/// store `dest`.
+///
+/// Absent `dest`: copy (never clobbering, even if it appears meanwhile) and give
+/// it to the service user. Existing `dest`: it holds the system's enrollments,
+/// so it is never overwritten; return the notice step with the warning instead.
+fn embeddings_install_actions(src: &Path, dest: &Path) -> (Vec<Action>, Option<Action>) {
+    let src_s = src.display().to_string();
+    let dest_s = dest.display().to_string();
+    if dest.exists() {
+        let notice = Action::user(
+            format!(
+                "{EMBEDDINGS_KEPT_PREFIX} {}",
+                embeddings_kept_notice(&src_s, &dest_s)
+            ),
+            &["true"],
+        );
+        return (Vec::new(), Some(notice));
+    }
+    let actions = vec![
+        Action::priv_(
+            format!("Carry enrollment: copy {src_s} -> {dest_s} (only because it does not exist)"),
+            &["cp", "--update=none", &src_s, &dest_s],
+        ),
+        Action::priv_(
+            "chown carried embeddings to doorman:doorman".to_string(),
+            &["chown", "doorman:doorman", &dest_s],
+        ),
+    ];
+    (actions, None)
+}
+
+/// Loud multi-line warning printed (to stderr) when the system embeddings were kept.
+fn embeddings_kept_notice(src: &str, dest: &str) -> String {
+    format!(
+        "\n\
+         ################################################################\n\
+         WARNING: {dest} already exists and was NOT modified.\n\
+         Your user enrollment file was NOT copied over it:\n\
+         \x20   {src}\n\
+         To import it deliberately, stop the daemon, back up the system file, then copy:\n\
+         \x20   sudo systemctl stop doormand\n\
+         \x20   sudo cp -a {dest} {dest}.bak-$(date +%Y%m%d-%H%M%S)\n\
+         \x20   sudo cp {src} {dest}\n\
+         \x20   sudo chown doorman:doorman {dest}\n\
+         \x20   sudo systemctl start doormand\n\
+         Enrollments in the system file that are not in the user file are lost by that copy.\n\
+         ################################################################\n"
+    )
+}
+
 /// Build the ordered install plan (no side effects — pure construction).
 fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     let mut plan = Vec::new();
@@ -1782,28 +1836,14 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
     // Carry the invoking user's enrollment into the system daemon's store so they
     // are already enrolled (the system daemon reads /var/lib/doorman/embeddings.bin).
     // Without this the user must run `sudo doorman enroll` against the system socket.
+    let mut embeddings_kept_notice = None;
     let user_embeddings =
         invoking_user_home().map(|h| h.join(".local/share/doorman/embeddings.bin"));
     if let Some(src) = user_embeddings.as_ref().filter(|p| p.exists()) {
-        plan.push(Action::priv_(
-            format!(
-                "Carry enrollment: copy {} -> {STATE_DIR}/embeddings.bin",
-                src.display()
-            ),
-            &[
-                "cp",
-                Box::leak(src.display().to_string().into_boxed_str()),
-                Box::leak(format!("{STATE_DIR}/embeddings.bin").into_boxed_str()),
-            ],
-        ));
-        plan.push(Action::priv_(
-            "chown carried embeddings to doorman:doorman".to_string(),
-            &[
-                "chown",
-                "doorman:doorman",
-                Box::leak(format!("{STATE_DIR}/embeddings.bin").into_boxed_str()),
-            ],
-        ));
+        let dest = PathBuf::from(format!("{STATE_DIR}/embeddings.bin"));
+        let (actions, notice) = embeddings_install_actions(src, &dest);
+        plan.extend(actions);
+        embeddings_kept_notice = notice;
     }
 
     // ROCm: depth-liveness sidecar unit (runs depth on the iGPU, ordered BEFORE
@@ -1887,7 +1927,7 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
                         .to_string()
                         .into_boxed_str(),
                 ),
-                "/lib/x86_64-linux-gnu/security/libpam_doorman.so",
+                Box::leak(format!("{PAM_MODULE_DIR}/libpam_doorman.so").into_boxed_str()),
             ],
         ));
         // Backup the existing pam file — ONLY if /etc/pam.d/<svc> already exists.
@@ -1934,6 +1974,7 @@ fn build_install_plan(d: &Diagnosis, opts: &InstallOpts) -> Vec<Action> {
 
     // Last, so it is the final thing the operator reads.
     plan.extend(config_kept_notice);
+    plan.extend(embeddings_kept_notice);
     plan
 }
 
@@ -2030,10 +2071,68 @@ fn health_check(timeout: Duration) -> Result<(), String> {
     ))
 }
 
+/// Directory the PAM module is installed into.
+const PAM_MODULE_DIR: &str = "/lib/x86_64-linux-gnu/security";
+
+/// What a real `doorman install` run does, stated before anything happens.
+fn install_summary(opts: &InstallOpts) -> String {
+    let pam = match opts.pam_scope {
+        PamScope::None => "PAM: untouched (--no-pam).".to_string(),
+        _ => format!(
+            "PAM (when a PAM service is detected): rebuild libpam_doorman.so, install it\n    \
+             to {PAM_MODULE_DIR}, back up and write /etc/pam.d/<service>."
+        ),
+    };
+    format!(
+        "\n`doorman install` will change this system (--dry-run only lists the steps):\n  \
+         - build doormand, doorman and doorman-preview from this checkout with cargo\n  \
+         - create the system user 'doorman' and the directories {ETC_DIR}, {STATE_DIR}, {SYS_LIBDIR}\n  \
+         - install binaries to {SYS_BIN}, {SYS_CLI}, {SYS_PREVIEW} (and {SYS_DEPTHD_BIN} on ROCm)\n  \
+         - copy the model files into {MODELS_DIR}\n  \
+         - write {ETC_CONFIG}; an existing one is kept and the new one goes to {ETC_CONFIG}{CONFIG_NEW_SUFFIX}\n  \
+         - copy ~/.local/share/doorman/embeddings.bin to {STATE_DIR}/embeddings.bin ONLY if the latter does not exist\n  \
+         - write the systemd unit {UNIT_PATH}, run daemon-reload, enable and RESTART the doorman service(s)\n  \
+         - {pam}\n"
+    )
+}
+
+/// Decide whether the install may proceed. `--yes` always proceeds; without it an
+/// interactive terminal is asked via `ask`; a non-interactive run is refused.
+fn confirmation_gate(
+    assume_yes: bool,
+    interactive: bool,
+    ask: impl FnOnce() -> bool,
+) -> Result<bool, String> {
+    if assume_yes {
+        return Ok(true);
+    }
+    if !interactive {
+        return Err(
+            "refusing to install: stdin is not a terminal and --yes was not given. Re-run \
+             interactively and answer the confirmation, or pass --yes."
+                .into(),
+        );
+    }
+    Ok(ask())
+}
+
 /// Print the plan; if dry-run, stop. Otherwise (not implemented here for safety
 /// in this environment) we would execute each action. Per the implementation
 /// boundary, the REAL privileged execution is the user's supervised run.
 pub fn run_install(opts: &InstallOpts) -> Result<(), String> {
+    // Before anything else: say what a real run does and get consent. A dry run
+    // changes nothing, so it needs neither.
+    if !opts.dry_run {
+        eprintln!("{}", install_summary(opts));
+        let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        if !confirmation_gate(opts.assume_yes, interactive, || {
+            confirm("Continue with `doorman install`?")
+        })? {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
     if matches!(opts.pam_scope, PamScope::Login | PamScope::Sudo) {
         eprintln!(
             "\n  !!  --{} integrates face auth with a HIGH-RISK surface.\n      \
@@ -2145,7 +2244,11 @@ fn execute_plan(plan: &[Action], d: &Diagnosis, _opts: &InstallOpts) -> Result<(
             continue;
         }
         // The config-kept notice is a loud warning, not a command.
-        if let Some(text) = a.desc.strip_prefix(CONFIG_KEPT_PREFIX) {
+        if let Some(text) = a
+            .desc
+            .strip_prefix(CONFIG_KEPT_PREFIX)
+            .or_else(|| a.desc.strip_prefix(EMBEDDINGS_KEPT_PREFIX))
+        {
             eprintln!("{}", text.trim_start_matches(' '));
             continue;
         }
@@ -3508,6 +3611,90 @@ mod tests {
         );
         assert!(!dir.path().join("doorman.toml.new").exists());
         assert!(notice.is_none());
+    }
+
+    #[test]
+    fn existing_system_embeddings_are_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("user-embeddings.bin");
+        let dest = dir.path().join("embeddings.bin");
+        std::fs::write(&src, b"user enrollment").unwrap();
+        let original = b"system enrollments";
+        std::fs::write(&dest, original).unwrap();
+
+        let (actions, notice) = embeddings_install_actions(&src, &dest);
+
+        assert!(actions.is_empty(), "no step may touch an existing file");
+        assert_eq!(std::fs::read(&dest).unwrap(), original);
+        let notice = notice.expect("a kept file produces a notice").desc;
+        assert!(notice.starts_with(EMBEDDINGS_KEPT_PREFIX));
+        assert!(notice.contains("WARNING"));
+        assert!(notice.contains(&src.display().to_string()));
+        assert!(notice.contains(&dest.display().to_string()));
+        assert!(notice.contains("sudo cp -a"));
+    }
+
+    #[test]
+    fn fresh_install_copies_the_user_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("user-embeddings.bin");
+        let dest = dir.path().join("embeddings.bin");
+        std::fs::write(&src, b"user enrollment").unwrap();
+
+        let (actions, notice) = embeddings_install_actions(&src, &dest);
+
+        assert!(notice.is_none());
+        // The chown step needs the doorman user; only the copy runs here.
+        let copy = actions.iter().find(|a| a.argv[0] == "cp").expect("cp step");
+        run_without_sudo(copy);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"user enrollment");
+        assert!(actions.iter().any(|a| a.argv[0] == "chown"));
+    }
+
+    #[test]
+    fn copy_step_does_not_clobber_a_file_that_appears_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("user-embeddings.bin");
+        let dest = dir.path().join("embeddings.bin");
+        std::fs::write(&src, b"user enrollment").unwrap();
+        let (actions, _) = embeddings_install_actions(&src, &dest);
+        std::fs::write(&dest, b"created meanwhile").unwrap();
+
+        run_without_sudo(actions.iter().find(|a| a.argv[0] == "cp").unwrap());
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"created meanwhile");
+    }
+
+    #[test]
+    fn install_refuses_without_terminal_and_without_yes() {
+        let err = confirmation_gate(false, false, || panic!("must not prompt")).unwrap_err();
+        assert!(err.contains("--yes"));
+    }
+
+    #[test]
+    fn install_gate_honours_yes_and_the_interactive_answer() {
+        assert_eq!(confirmation_gate(true, false, || false), Ok(true));
+        assert_eq!(confirmation_gate(false, true, || true), Ok(true));
+        assert_eq!(confirmation_gate(false, true, || false), Ok(false));
+    }
+
+    #[test]
+    fn install_summary_names_what_the_install_changes() {
+        let mut o = opts(false);
+        o.pam_scope = PamScope::ScreenUnlock;
+        let text = install_summary(&o);
+        for needle in [
+            "cargo",
+            "/usr/bin/doormand",
+            "libpam_doorman.so",
+            "/etc/pam.d/",
+            "RESTART",
+            "embeddings.bin",
+        ] {
+            assert!(text.contains(needle), "summary lacks {needle}");
+        }
+        o.pam_scope = PamScope::None;
+        assert!(install_summary(&o).contains("PAM: untouched"));
     }
 
     #[test]
