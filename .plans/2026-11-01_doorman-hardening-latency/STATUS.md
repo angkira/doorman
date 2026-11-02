@@ -81,3 +81,9 @@ Host facts (HOST-FACTS section 9): ORT is statically linked in the installed (ol
 Step-by-step host install of this build: [docs/INSTALL-FROM-BRANCH.md](../../docs/INSTALL-FROM-BRANCH.md).
 
 Round 4 code changes (each with tests): `MODELS.md` moved to `docs/`; mean-mode swap tests through the real `run_authenticate` (`daemon/src/ipc/real_path_tests.rs`, test-only DaemonState + scripted backend); `doorman install` keeps an existing config and writes `doorman.toml.new`; postinst warns about GPU grants in operator systemd files (never edits them); `dataset.raw_face_frame_bundle_size` is a deprecated key in `config check`; `doorman-lock` attaches the watcher to a live locker after a non-zero quick exit (pidfile prevents duplicates). All host-unverified.
+
+## Round 3 review (8daf849)
+Owner review of PR #13 found three issues; fixed, each with tests, all host-unverified:
+- `doorman install` no longer overwrites `/var/lib/doorman/embeddings.bin` with `~/.local/share/doorman/embeddings.bin`: it copies only when the destination is absent (`cp --update=none`), otherwise skips and prints a WARNING with both paths and the deliberate import commands. It also prints what it will change at the very start and needs `yes` or `--yes`; non-interactive without `--yes` is refused (non-zero exit). Dry runs are unaffected.
+- `docs/INSTALL-FROM-BRANCH.md`: do not use `doorman install` for this path; second root shell at step 0; timestamped backup of the niri scripts; do-not-purge warning with the exact `postrm` deletions; rollback from a root-owned 0700 tarball (replaces the impossible `apt --allow-downgrades`); rebuilding 5f78657 as a deb is marked untested.
+- `doorman-lock`: pidfile check and watcher start run under a non-blocking `flock` on `unlock-watch.lock`, so two presses cannot start two watchers; a pidfile whose PID is alive but not an unlock watcher (reused PID) is removed; without flock the old behaviour is logged and used. `docs/unlock-path.md` updated.
