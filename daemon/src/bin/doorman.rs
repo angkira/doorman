@@ -216,7 +216,9 @@ enum Command {
     },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
-    /// Install doorman: daemon service, models, config, and (opt-in) PAM integration.
+    /// From-source developer installer (rebuilds from a checkout; daemon service,
+    /// models, config, opt-in PAM). Not for upgrading a packaged (.deb) install:
+    /// use the package for that.
     Install {
         /// Print every planned action and mutate nothing.
         #[arg(long)]
