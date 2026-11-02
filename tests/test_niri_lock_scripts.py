@@ -3,6 +3,7 @@
 Run with: PYTHONPATH=src pytest tests/test_niri_lock_scripts.py
 """
 
+import fcntl
 import os
 import shutil
 import signal
@@ -296,6 +297,102 @@ def test_stale_pidfile_does_not_block_a_new_watcher(
 
     watch = env.read_args("doorman")
     assert watch[watch.index("--locker-pid") + 1] == str(alive_holder.pid)
+
+
+CONCURRENT_RUNS = 8
+
+
+def test_concurrent_runs_start_exactly_one_watcher(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", LONG_WATCHER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+
+    runs = [env.run() for _ in range(CONCURRENT_RUNS)]
+    env.wait_for("doorman.pid")
+    watcher_pid = int((env.stub_dir / "doorman.pid").read_text())
+    # Runs that did not start the watcher finish at once; the starter waits for it.
+    time.sleep(1.0)
+    calls = (env.stub_dir / "doorman.calls").read_text().splitlines()
+    assert calls.count("unlock-watch") == 1, "exactly one watcher for one locker"
+
+    os.kill(watcher_pid, signal.SIGTERM)
+    for run in runs:
+        run.wait(timeout=TIMEOUT)
+        assert run.returncode == 0
+
+
+def test_held_start_lock_skips_the_watcher(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+    state = env.runtime / "doorman"
+    state.mkdir()
+
+    with open(state / "unlock-watch.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = env.run()
+        proc.wait(timeout=TIMEOUT)
+
+    assert proc.returncode == 0
+    assert not (env.stub_dir / "doorman.args").exists(), "lock holder starts the watcher"
+    assert "holds" in env.log.read_text() and "not starting one" in env.log.read_text()
+
+
+def test_pidfile_with_reused_unrelated_pid_does_not_block(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+    state = env.runtime / "doorman"
+    state.mkdir()
+    unrelated = subprocess.Popen(["sleep", str(TIMEOUT * 4)])
+    try:
+        (state / "unlock-watch.pid").write_text(f"{unrelated.pid}\n")
+
+        proc = env.run()
+        proc.wait(timeout=TIMEOUT)
+    finally:
+        unrelated.kill()
+        unrelated.wait()
+
+    assert proc.returncode == 0
+    watch = env.read_args("doorman")
+    assert watch[watch.index("--locker-pid") + 1] == str(alive_holder.pid)
+    log = env.log.read_text()
+    assert "not an unlock watcher" in log and "removing stale" in log
+    assert "already running" not in log
+
+
+def test_without_flock_the_old_check_and_start_still_works(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+    # A PATH that has the stubs and the tools the script needs, but no flock.
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for tool in ("env", "bash", "sh", "date", "id", "mkdir", "chmod", "cat", "sleep",
+                 "basename", "dirname", "tr", "rm"):
+        found = shutil.which(tool)
+        assert found, tool
+        (tools / tool).symlink_to(found)
+
+    proc = env.run({"PATH": f"{env.stub_dir}:{tools}"})
+    proc.wait(timeout=TIMEOUT)
+
+    assert proc.returncode == 0
+    assert env.read_args("doorman")[2] == "unlock-watch"
+    assert "flock not found" in env.log.read_text()
 
 
 def test_falls_back_to_swaylock_without_gtklock(tmp_path: Path) -> None:

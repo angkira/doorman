@@ -29,7 +29,16 @@ Mod+L -> doorman-lock -> gtklock (background job, PID = $!)
 
    One watcher at a time: its PID is kept in
    `$XDG_RUNTIME_DIR/doorman/unlock-watch.pid`. A second run finds the live
-   watcher, logs `already running` and starts none. A stale pidfile is ignored.
+   watcher, logs `already running` and starts none.
+   Checking the pidfile and starting the watcher is one atomic step under a
+   non-blocking `flock` on `$XDG_RUNTIME_DIR/doorman/unlock-watch.lock`: when
+   two key presses arrive within the settle time and the lock is held, the
+   second run logs `holds ... not starting one` and starts no watcher. A
+   recorded PID counts as a live watcher only if `/proc/<pid>/cmdline` shows
+   `unlock-watch` (or the poll watcher script); a dead PID or a PID reused by
+   an unrelated process is stale, logged as `not an unlock watcher` and the
+   pidfile is removed. If `flock` is missing the script logs it and falls back
+   to the unlocked check-then-start.
    While the locker is alive the script starts the watcher.
 2. `doorman unlock-watch` sends `WaitForMatch{username, timeout_ms}` and
    blocks on the socket. One connection replaces one `doorman test` process

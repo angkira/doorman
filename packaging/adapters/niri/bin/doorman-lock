@@ -13,6 +13,11 @@
 # logind reports LockedHint=yes, the lock belongs to an unknown client: that is
 # logged and no watcher is started (there is nothing to SIGTERM). One watcher
 # at a time: its PID is kept in $XDG_RUNTIME_DIR/doorman/unlock-watch.pid.
+# Checking that file and starting the watcher is one step under a non-blocking
+# flock on $XDG_RUNTIME_DIR/doorman/unlock-watch.lock, so two key presses within
+# the settle time cannot start two watchers for one locker. A recorded PID counts
+# only while /proc shows an unlock watcher behind it (PIDs get reused). Without
+# flock the old unlocked check-then-start is used and logged.
 #
 # Environment (all optional):
 #   DOORMAN_USER            user whose face unlocks (default: current user)
@@ -50,6 +55,7 @@ mkdir -p "$state_dir"
 chmod 700 "$state_dir"
 
 watcher_pidfile="$state_dir/unlock-watch.pid"
+watcher_lockfile="$state_dir/unlock-watch.lock"
 watcher_pid=""
 
 log() {
@@ -64,31 +70,50 @@ cleanup_pidfile() {
 }
 trap cleanup_pidfile EXIT
 
-# True (and logs) when a watcher recorded in the pidfile is still alive.
+# True when $1 is a command line (NUL separators already turned into spaces)
+# of an unlock watcher: the event watcher or the polling fallback script.
+is_unlock_watcher_cmdline() {
+    case "$1" in
+        *" unlock-watch "* | *"$(basename -- "$poll_watcher")"*) return 0 ;;
+    esac
+    return 1
+}
+
+# True (and logs) when a watcher recorded in the pidfile is still alive. A pidfile
+# naming a live process that is not an unlock watcher (reused PID) is stale: it
+# is logged and removed. Without /proc only liveness can be checked.
 live_watcher_running() {
-    local recorded
+    local recorded cmdline
     recorded="$(cat "$watcher_pidfile" 2>/dev/null || true)"
     case "$recorded" in
         '' | *[!0-9]*) return 1 ;;
     esac
-    if kill -0 "$recorded" 2>/dev/null; then
-        log "unlock watcher pid=$recorded is already running"
-        return 0
+    kill -0 "$recorded" 2>/dev/null || return 1
+    if [ -r /proc/self/cmdline ]; then
+        cmdline="$(tr '\0' ' ' <"/proc/$recorded/cmdline" 2>/dev/null || true)"
+        if ! is_unlock_watcher_cmdline "$cmdline"; then
+            log "pidfile names pid=$recorded which is not an unlock watcher (PID reused?): removing stale $watcher_pidfile"
+            rm -f "$watcher_pidfile"
+            return 1
+        fi
     fi
-    return 1
+    log "unlock watcher pid=$recorded is already running"
+    return 0
 }
 
 # Start the watcher for the locker with PID $1 in the background and record it.
+# File descriptor 9 holds the start lock (see start_watcher_once); the watcher
+# gets it closed so it does not keep the lock for its whole life.
 start_watcher() {
     local target_pid="$1"
     case "$unlock_mode" in
         event)
             "$doorman_bin" --socket "$socket" unlock-watch \
                 --user "$user" --locker-pid "$target_pid" --locker-name "$locker_name" \
-                >>"$log" 2>&1 &
+                >>"$log" 2>&1 9>&- &
             ;;
         poll)
-            "$poll_watcher" "$user" "$socket" "$locker_name" >>"$log" 2>&1 &
+            "$poll_watcher" "$user" "$socket" "$locker_name" >>"$log" 2>&1 9>&- &
             ;;
         *)
             log "unsupported DOORMAN_UNLOCK_MODE=$unlock_mode (locker left running, password unlock only)"
@@ -101,6 +126,34 @@ start_watcher() {
     log "unlock watcher pid=$watcher_pid mode=$unlock_mode locker_pid=$target_pid"
 }
 
+# Check the pidfile and start a watcher for the locker with PID $1 as one atomic
+# step. The non-blocking flock on fd 9 serialises concurrent doorman-lock runs:
+# if another run holds it, that run is starting the watcher, so skip. Sets
+# watcher_pid only when this run started the watcher.
+start_watcher_once() {
+    local target_pid="$1" locked=0
+    if ! command -v flock >/dev/null 2>&1; then
+        log "flock not found: checking and starting the watcher without the start lock"
+    elif ! exec 9>"$watcher_lockfile"; then
+        log "cannot open $watcher_lockfile: checking and starting the watcher without the start lock"
+    elif flock -n 9; then
+        locked=1
+    else
+        exec 9>&-
+        log "another doorman-lock holds $watcher_lockfile and is starting the watcher: not starting one"
+        return 0
+    fi
+    if live_watcher_running; then
+        log "decision: not starting a second watcher"
+    else
+        start_watcher "$target_pid"
+    fi
+    if [ "$locked" -eq 1 ]; then
+        exec 9>&-
+    fi
+    return 0
+}
+
 # The locker exited at once with a non-zero status ($1). Decide whether the
 # session lock is nevertheless held and, if a live locker holds it, watch it.
 handle_failed_locker() {
@@ -108,11 +161,7 @@ handle_failed_locker() {
     holder="$(pgrep -n -u "$(id -u)" -x "$locker_name" 2>/dev/null || true)"
     if [ -n "$holder" ]; then
         log "decision: rc=$exit_rc but $locker_name pid=$holder is alive for uid $(id -u): lock held, attaching watcher"
-        if live_watcher_running; then
-            log "decision: not starting a second watcher"
-            return 0
-        fi
-        start_watcher "$holder"
+        start_watcher_once "$holder"
         if [ -n "$watcher_pid" ]; then
             local watch_rc=0
             wait "$watcher_pid" || watch_rc=$?
@@ -183,7 +232,7 @@ fi
 log "locker pid=$locker_pid name=$locker_name"
 
 # Watch whenever the recorded locker is alive, whatever its exit code will be.
-start_watcher "$locker_pid"
+start_watcher_once "$locker_pid"
 
 # Stay as the locker's parent so it is reaped the moment it exits.
 rc=0
