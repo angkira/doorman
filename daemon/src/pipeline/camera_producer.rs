@@ -1,15 +1,39 @@
 use super::types::RawFrame;
 use crate::camera::gate::WarmupGate;
+use crate::camera::probe::{drop_contained, panic_message};
 use crate::camera::Camera;
 use doorman_shared::Config;
+use std::cell::Cell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// How often the idle (gated-off) producer re-checks the capture gate. This
 /// bounds the delay between the gate turning on and the camera open starting.
 const GATE_IDLE_POLL: Duration = Duration::from_millis(20);
+
+/// Pause after a producer panic before the camera is re-opened, so a fault that
+/// repeats on every open cannot spin the CPU or hammer the device.
+const PANIC_RESTART_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Logs at ERROR if the producer thread ends any way other than the documented
+/// graceful exit, so the thread can never disappear silently.
+struct ExitGuard {
+    graceful: bool,
+}
+
+impl Drop for ExitGuard {
+    fn drop(&mut self) {
+        if !self.graceful {
+            error!(
+                "Camera producer thread exited unexpectedly; the frame channel is closed \
+                 and no camera will be opened until the daemon restarts"
+            );
+        }
+    }
+}
 
 /// Timestamps of one cold open, from the start of the open call.
 struct ColdOpen {
@@ -77,8 +101,11 @@ pub enum CameraSource {
 ///    enroll/auth/status/detect — they no longer touch the camera directly), and
 ///  - forwards each frame as a `RawFrame` to the pipeline via `frame_tx`.
 ///
-/// It exits only on a fatal condition (no camera and none could be opened) or
-/// when all receivers are gone.
+/// A panic anywhere in the loop (backend capture, decode, close) is caught and
+/// logged at ERROR with its message; the camera is then released, the latest
+/// frame is cleared (consumers see "unavailable") and the next iteration
+/// re-opens it, falling back to another backend exactly like a first open. The
+/// thread exits only when all receivers are gone.
 pub fn spawn_camera_producer(
     source: CameraSource,
     config: Arc<Config>,
@@ -116,6 +143,7 @@ fn spawn_camera_producer_with(
     info!("Camera producer thread started (target {}fps; opens the camera only while capture is gated ON)", fps);
 
     std::thread::spawn(move || {
+        let mut exit_guard = ExitGuard { graceful: false };
         let interval_ms = 1000 / fps.max(1) as u64;
         let mut sequence = 0u64;
         let mut last_capture = Instant::now();
@@ -150,10 +178,25 @@ fn spawn_camera_producer_with(
             CameraSource::Config => None,
         };
 
-        loop {
+        // Set by the supervisor below after a caught panic; the next run starts by
+        // discarding whatever state the panic left behind.
+        let panicked = Cell::new(false);
+        let mut run = || loop {
+            if panicked.replace(false) {
+                if let Some(cam) = camera.take() {
+                    if let Some(msg) = drop_contained(cam) {
+                        error!("Closing the camera after the panic also panicked: {msg}");
+                    }
+                }
+                cold = None;
+                // Consumers see "camera unavailable" until the re-open delivers.
+                let _ = latest_frame_tx.send(None);
+                std::thread::sleep(PANIC_RESTART_BACKOFF);
+            }
+
             // Graceful shutdown: every receiver gone.
             if frame_tx.is_closed() && latest_frame_tx.is_closed() {
-                debug!("All frame receivers gone, camera producer exiting");
+                info!("All frame receivers gone, camera producer exiting");
                 return;
             }
 
@@ -260,6 +303,27 @@ fn spawn_camera_producer_with(
             // Non-blocking send to the pipeline (drop frame if channel full).
             if let Err(mpsc::error::TrySendError::Closed(_)) = frame_tx.try_send(raw_frame) {
                 debug!("Pipeline frame channel closed");
+            }
+        };
+
+        loop {
+            match catch_unwind(AssertUnwindSafe(&mut run)) {
+                Ok(()) => {
+                    exit_guard.graceful = true;
+                    return;
+                }
+                Err(payload) => {
+                    error!(
+                        "Camera producer panicked: {} — releasing the camera; it will be \
+                         re-opened on the next capture request",
+                        panic_message(payload.as_ref())
+                    );
+                    if is_video {
+                        // A replayed file has nothing to re-open; ExitGuard logs the exit.
+                        return;
+                    }
+                    panicked.set(true);
+                }
             }
         }
     });
@@ -371,6 +435,73 @@ mod tests {
             "second cold open warms up again"
         );
         assert_eq!(h.opens.load(Ordering::SeqCst), 2);
+    }
+
+    /// Producer whose `n`-th open (0-based) is built by `open(n)`. The gate sender
+    /// is returned so it stays alive (gate on) for the test's duration.
+    fn start_with(
+        open: impl Fn(u32) -> Camera + Send + 'static,
+    ) -> (
+        mpsc::Receiver<RawFrame>,
+        Arc<AtomicU32>,
+        watch::Sender<bool>,
+    ) {
+        let mut config = Config::default();
+        config.camera.fps = TEST_FPS;
+        let (latest_tx, _latest) = watch::channel(None);
+        let (tx, rx) = mpsc::channel(64);
+        let (gate, gate_rx) = watch::channel(true);
+        let opens = Arc::new(AtomicU32::new(0));
+        let opens_in = opens.clone();
+        spawn_camera_producer_with(
+            CameraSource::Config,
+            Arc::new(config),
+            latest_tx,
+            tx,
+            gate_rx,
+            move || Ok(open(opens_in.fetch_add(1, Ordering::SeqCst))),
+        );
+        (rx, opens, gate)
+    }
+
+    fn wait_frame(rx: &mut mpsc::Receiver<RawFrame>) -> RawFrame {
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        loop {
+            match rx.try_recv() {
+                Ok(f) => return f,
+                Err(e) if Instant::now() >= deadline => {
+                    panic!("no frame within {TEST_TIMEOUT:?}: {e}")
+                }
+                Err(_) => std::thread::sleep(TEST_POLL),
+            }
+        }
+    }
+
+    #[test]
+    fn capture_panic_is_survived_and_the_camera_is_reopened() {
+        let (mut rx, opens, _gate) = start_with(|n| {
+            if n == 0 {
+                Camera::scripted(|| panic!("mozjpeg exploded"))
+            } else {
+                Camera::synthetic(TEST_SIZE.0, TEST_SIZE.1, TEST_FPS)
+            }
+        });
+        // The first open panics on its first capture; the producer must come back
+        // with a second open instead of leaving the frame channel dead.
+        let frame = wait_frame(&mut rx);
+        assert_eq!(frame.image.width(), TEST_SIZE.0);
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn open_panic_is_survived_and_the_next_request_reopens() {
+        let (mut rx, opens, _gate) = start_with(|n| {
+            assert!(n > 0, "backend constructor panicked");
+            Camera::synthetic(TEST_SIZE.0, TEST_SIZE.1, TEST_FPS)
+        });
+        let frame = wait_frame(&mut rx);
+        assert_eq!(frame.image.width(), TEST_SIZE.0);
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
     }
 
     #[test]

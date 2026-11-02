@@ -86,6 +86,8 @@ Hypotheses, most likely first:
 
 | Key | Default | Meaning |
 |---|---|---|
+| `backend` | `"auto"` | `"auto"`: native V4L2 first, accepted only after it decoded one real frame within `native_first_frame_timeout_ms`, otherwise the ffmpeg backend. `"native"`: native only, no ffmpeg fallback. `"ffmpeg"`: skip native, use ffmpeg (the pre-native behaviour; use it as an override if the native path misbehaves on a host). Anything else is rejected at config load. |
+| `native_first_frame_timeout_ms` | `1500` | How long the native backend may take to deliver its first decoded frame. Valid 100..=10000. A timeout, a capture/decode error or a panic closes the native camera and moves on (see "Native first-frame validation"). |
 | `fourcc` | unset | `"MJPG"` or `"YUYV"`. Unset keeps today's behaviour. |
 | `warmup_frames` | `0` | Frames dropped after a cold open. Valid 0..=10. Recommended: `3`. |
 | `prearm_on_lock` | `false` | Open on the lock event even while `IdleHint` is set, but only for `prearm_window_ms` after it. Recommended: `true`. |
@@ -96,6 +98,36 @@ after the host measurement, not before. The default resolution is also
 unchanged. The recommended starting point to measure is
 `width = 640, height = 480, fourcc = "MJPG", warmup_frames = 3,
 prearm_on_lock = true`, pending the WS6 recall comparison against 1280x720.
+
+## Native first-frame validation and producer recovery
+
+Host test of PR #13 (UGREEN Camera 4K, MJPG 1280x720@30): after the format
+negotiation fix the native open succeeded, so the ffmpeg fallback was never
+reached, and the producer thread then died about 570 ms after "Camera gated ON"
+with no "Camera ready", no "Capture error" and no panic text.
+
+**Proved by code:** the producer thread has exactly two ways to end: the
+"all receivers gone" return (the receiver was alive, so not this one) and an
+unwinding panic. There is no `?` in the thread. So it was a panic (or a
+destructor panic) on the native capture path. **Not proved:** the exact panic
+site; the candidates on that path are the nokhwa/v4l destructors
+(`v4l-0.14.0` `Stream::drop` calls `panic!` on any STREAMOFF error except
+ENODEV; `nokhwa::Camera::drop` calls `stop_stream().unwrap()`) and the mozjpeg
+decode. Also note `v4l` mmap `dequeue` polls with no timeout, so a camera that
+never delivers blocks `frame()` forever. This has not been reproduced on a host.
+
+What the code now does regardless of the exact site:
+
+- `v4l2_backend.rs` reads and decodes one real frame (on a helper thread, with
+  `native_first_frame_timeout_ms`) before declaring the backend usable. On error,
+  panic or timeout the camera is closed and `Camera::new_with_config` falls
+  through to ffmpeg. Limit: on a timeout the blocked read cannot be interrupted,
+  so the device stays held by the helper until that read returns and ffmpeg may
+  find it busy; error and panic paths close the device before falling through.
+- `camera_producer.rs` catches panics: the panic message is logged at ERROR, the
+  camera is closed, consumers see "unavailable" (`latest_frame` cleared) and the
+  next loop iteration re-opens it (and may fall back to ffmpeg). An unexpected
+  thread exit is also logged at ERROR.
 
 ## Privacy invariant
 
