@@ -136,7 +136,8 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// Authenticate a user against the live camera (alias: auth).
+    /// Authenticate a user against the live camera (alias: auth). Exit code: 0
+    /// recognized, 2 not recognized (output starts with `!recognized:`), 1 error.
     #[command(alias = "auth")]
     Test {
         /// Username to authenticate.
@@ -340,7 +341,11 @@ fn main() {
         Command::Enroll { username, add } => cmd_enroll(&sockets, username, *add, cli.json),
         Command::List => cmd_list(&sockets, cli.json),
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
-        Command::Test { username } => cmd_test(&sockets, username, cli.json),
+        Command::Test { username } => cmd_test(&sockets, username, cli.json).map(|code| {
+            if code != TEST_EXIT_RECOGNIZED {
+                std::process::exit(code);
+            }
+        }),
         Command::Status => cmd_status(&sockets, cli.json),
         Command::UnlockWatch {
             user,
@@ -1004,7 +1009,27 @@ fn cmd_remove(sockets: &Sockets, username: &str, yes: bool, json: bool) -> Resul
 // test / auth
 // ---------------------------------------------------------------------------
 
-fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliError> {
+/// `doorman test` exit code: the face was recognized.
+const TEST_EXIT_RECOGNIZED: i32 = 0;
+/// `doorman test` exit code: CLI error (daemon unreachable, denied or unexpected
+/// response); the same code `error:` exits with.
+const TEST_EXIT_ERROR: i32 = 1;
+/// `doorman test` exit code: the daemon answered but did not authenticate the
+/// user (`Response::Failure`, e.g. no match or camera unavailable). Distinct
+/// from `TEST_EXIT_ERROR` so scripts can tell "not recognized" from "daemon
+/// unreachable".
+const TEST_EXIT_NOT_RECOGNIZED: i32 = 2;
+
+/// Exit code for the daemon's answer to `doorman test`; stdout is unaffected.
+fn test_exit_code(response: &Response) -> i32 {
+    match response {
+        Response::Success { .. } => TEST_EXIT_RECOGNIZED,
+        Response::Failure { .. } => TEST_EXIT_NOT_RECOGNIZED,
+        _ => TEST_EXIT_ERROR,
+    }
+}
+
+fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<i32, CliError> {
     let response = send_request(
         &sockets.command,
         &Request::Authenticate {
@@ -1016,7 +1041,8 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
         Duration::from_secs(15),
     )?;
     if json {
-        return print_raw(&response);
+        print_raw(&response)?;
+        return Ok(test_exit_code(&response));
     }
     match response {
         Response::Success { message, .. } => {
@@ -1026,14 +1052,14 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
             } else {
                 println!("recognized: {username} ({detail})");
             }
-            Ok(())
+            Ok(TEST_EXIT_RECOGNIZED)
         }
-        // Authentication failure is a normal, expected outcome — report it but do
-        // not treat it as a CLI error (exit 0) so scripts can distinguish "not
-        // recognized" from "daemon unreachable".
+        // Authentication failure is a normal, expected outcome: the line is not an
+        // `error:`, but the exit code is non-zero so exit-code-only consumers are
+        // not fooled by a rejected or camera-less attempt.
         Response::Failure { reason } => {
             println!("!recognized: {username} ({reason})");
-            Ok(())
+            Ok(TEST_EXIT_NOT_RECOGNIZED)
         }
         other => Err(CliError::new(format!("unexpected response: {other:?}"))),
     }
@@ -1170,4 +1196,45 @@ fn render_progress(phase: &EnrollmentPhase, current: usize, total: usize) {
     // \r keeps the bar on one line; stdout flush so it updates live.
     print!("\r  {label} [{bar}] {current}/{total}");
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use doorman_shared::NoMatchReason;
+
+    #[test]
+    fn test_exit_code_is_zero_only_for_a_recognized_face() {
+        let table = [
+            (
+                Response::Success {
+                    message: None,
+                    data: None,
+                },
+                TEST_EXIT_RECOGNIZED,
+            ),
+            (
+                Response::Failure {
+                    reason: "Camera not available (no frames)".into(),
+                },
+                TEST_EXIT_NOT_RECOGNIZED,
+            ),
+            (
+                Response::Denied {
+                    reason: "peer uid".into(),
+                },
+                TEST_EXIT_ERROR,
+            ),
+            (Response::RateLimited { retry_after_s: 1 }, TEST_EXIT_ERROR),
+            (
+                Response::NoMatch {
+                    reason: NoMatchReason::Timeout,
+                },
+                TEST_EXIT_ERROR,
+            ),
+        ];
+        for (response, want) in table {
+            assert_eq!(test_exit_code(&response), want, "{response:?}");
+        }
+    }
 }

@@ -458,3 +458,50 @@ def test_niri_installer_installs_the_lock_scripts() -> None:
     assert "packaging/adapters/niri/bin/doorman-lock-watch-poll\"" in installer
     kdl = (REPO / "packaging" / "adapters" / "niri" / "config.kdl").read_text()
     assert "/home/" not in kdl.split("doorman-lock")[0].splitlines()[-1]
+
+
+# `doorman test` prints "!recognized:" and exits 2 on a rejected attempt; the
+# fake answers that once, then recognizes the face. Counts its invocations.
+DOORMAN_TEST_STUB = """#!/bin/sh
+printf 'x\\n' >> "$STUB_DIR/doorman.calls"
+if [ "$(wc -l < "$STUB_DIR/doorman.calls")" -lt 2 ]; then
+    echo "!recognized: alice (Camera not available (no frames))"
+    exit 2
+fi
+echo "recognized: alice"
+"""
+
+PKILL_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_DIR/pkill.calls"
+"""
+
+ALWAYS_PGREP_STUB = """#!/bin/sh
+echo 4242
+"""
+
+
+def test_poll_watcher_survives_nonzero_not_recognized_and_stops_on_recognized(
+    tmp_path: Path,
+) -> None:
+    """A non-zero `doorman test` exit must neither unlock nor stop the watcher."""
+    env = Env(tmp_path)
+    env.stub("pgrep", ALWAYS_PGREP_STUB)
+    env.stub("pkill", PKILL_STUB)
+    env.stub("doorman", DOORMAN_TEST_STUB)
+    result = subprocess.run(
+        [str(POLL), "alice", str(tmp_path / "doorman.sock"), "gtklock"],
+        env={
+            **env.env,
+            "DOORMAN_BIN": str(env.stub_dir / "doorman"),
+            "DOORMAN_POLL_INTERVAL": "0.05",
+            "DOORMAN_POLL_TERM_GRACE": "0",
+        },
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (env.stub_dir / "doorman.calls").read_text().count("x") == 2
+    assert "!recognized: alice" in result.stdout
+    kills = (env.stub_dir / "pkill.calls").read_text().splitlines()
+    assert kills and all("-x gtklock" in k for k in kills)
