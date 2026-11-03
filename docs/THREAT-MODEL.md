@@ -161,7 +161,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 |---|---|---|---|---|
 | T | Vulnerable or yanked dependency | `cargo deny` job (advisories, yanked, licenses, sources=crates.io), `Cargo.lock` committed and `--locked` everywhere; ignores carry reason and review date in `deny.toml` | 9 ignored advisories (unmaintained or GUI-only, listed in `deny.toml`), including `bincode 1.x` in the daemon itself | partial |
 | T | Malicious crate / typosquat | lock file + `cargo deny` sources; no build scripts audited | no `cargo vet`, no vendoring, large GUI tree (eframe) in the default build | open |
-| T | Compromised GitHub Action | `permissions: contents: read`; actions pinned to major tags (`@v4`, `@v2`, `@stable`) | tags are mutable; not pinned to commit SHAs | open |
+| T | Compromised GitHub Action | `permissions: contents: read`; every action pinned to a full commit SHA (tag in a trailing comment) | pins must be bumped by hand (no Dependabot configured); a malicious upstream commit that we later bump to is not caught | mitigated |
 | T | Tampered release artifact / models | `fetch_models.sh` checks SHA-256 | no signed releases or SBOM | open |
 | T | Parser bugs in untrusted-input paths | fuzz targets and seeded tests for IPC lines, config, embeddings (this change) | no continuous fuzzing beyond a 60 s CI run; image/ONNX/camera decoders are not fuzzed | partial |
 
@@ -186,7 +186,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 4. ~~Root-run CLI loads `./doorman.toml` from the working directory (`dataset purge`).~~ Closed: root only accepts a trusted config path.
 5. Models are not integrity-checked at load; no `SystemCallFilter=`; ONNX/image decoding runs inside the daemon that is the root of trust.
 6. Daemon compromise = authentication bypass (design property; sandbox only limits collateral damage).
-7. Release/CI hardening: actions not SHA-pinned, no signed artifacts or SBOM, no `cargo vet`, 9 documented advisory ignores.
+7. Release/CI hardening: no signed artifacts or SBOM, no `cargo vet`, 9 documented advisory ignores.
 8. ~~Sway adapter writes a log to a predictable `/tmp` path.~~ Closed: logs under `$XDG_RUNTIME_DIR/doorman/`.
 9. Template protection beyond file permissions (next section).
 
