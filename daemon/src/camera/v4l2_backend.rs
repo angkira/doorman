@@ -7,6 +7,7 @@
 /// - Fallback for systems without GStreamer/PipeWire
 ///
 /// Note: Prefer GStreamer backend for desktop integration
+use super::device_guard;
 use super::format_select::{select_mode, DeviceMode, WantedMode};
 use super::probe::validate_first_frame;
 use super::CameraBackend;
@@ -20,6 +21,7 @@ use nokhwa::utils::{
     Resolution,
 };
 use nokhwa::Camera as NokhwaCamera;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -74,9 +76,30 @@ fn known_devices() -> String {
 impl CameraBackend for V4L2Camera {
     async fn new_with_config(config: &Config) -> Result<Self> {
         info!("Initializing V4L2 camera backend (direct hardware access)");
-        info!("Opening camera {}...", config.camera.device_index);
+        let node = device_guard::resolve_node(
+            config.camera.device_path.as_deref(),
+            config.camera.device_index,
+            Path::new(device_guard::DEV_ROOT),
+            &device_guard::RealNodeFs,
+        )?;
+        info!("Opening camera {} ({})...", node.index, node.path.display());
 
-        let index = CameraIndex::Index(config.camera.device_index);
+        // Cheap pre-open check from sysfs; an absent sysfs entry is left to the
+        // authoritative VIDIOC_QUERYCAP check below.
+        let sysfs =
+            device_guard::read_sysfs_facts(Path::new(device_guard::SYSFS_VIDEO4LINUX), node.index);
+        if sysfs.is_some() {
+            device_guard::enforce(
+                &device_guard::DeviceFacts {
+                    sysfs: sysfs.clone(),
+                    ..Default::default()
+                },
+                &node,
+                config.camera.allow_virtual_devices,
+            )?;
+        }
+
+        let index = CameraIndex::Index(node.index);
         let wanted = WantedMode {
             width: config.camera.width,
             height: config.camera.height,
@@ -101,6 +124,18 @@ impl CameraBackend for V4L2Camera {
                 known_devices()
             )
         })?;
+
+        // VIDIOC_QUERYCAP as reported through nokhwa: driver, card, bus info.
+        device_guard::enforce(
+            &device_guard::DeviceFacts {
+                driver: Some(camera.info().description().to_string()),
+                card: Some(camera.info().human_name()),
+                bus_info: Some(camera.info().misc()),
+                sysfs,
+            },
+            &node,
+            config.camera.allow_virtual_devices,
+        )?;
 
         let offered = camera.compatible_camera_formats().map_err(|e| {
             anyhow!(

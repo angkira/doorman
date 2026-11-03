@@ -70,6 +70,19 @@ impl GStreamerCamera {
             ));
         }
 
+        // The pipeline is pinned to /dev/video0; refuse it when it is virtual.
+        {
+            use super::device_guard::{
+                enforce_sysfs, resolve_node, RealNodeFs, DEV_ROOT, SYSFS_VIDEO4LINUX,
+            };
+            let node = resolve_node(None, 0, std::path::Path::new(DEV_ROOT), &RealNodeFs)?;
+            enforce_sysfs(
+                &node,
+                std::path::Path::new(SYSFS_VIDEO4LINUX),
+                config.camera.allow_virtual_devices,
+            )?;
+        }
+
         // Build pipeline string
         // v4l2src: Direct access to V4L2 camera (works reliably)
         // queue: Buffer frames for smooth playback

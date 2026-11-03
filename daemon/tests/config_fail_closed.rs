@@ -37,10 +37,7 @@ fn unparsable_config_flag_is_fatal() {
 
 #[test]
 fn invalid_value_in_env_config_is_fatal() {
-    assert_refused(&run_with_config(
-        "[enrollment]\nprune_cosine = 0.0\n",
-        true,
-    ));
+    assert_refused(&run_with_config("[enrollment]\nprune_cosine = 0.0\n", true));
 }
 
 #[test]

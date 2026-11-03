@@ -50,9 +50,11 @@ or directory is group/world-writable.
 
 | Key | Default |
 |---|---|
+| `allow_virtual_devices` | `false` |
 | `always_track` | `false` |
 | `backend` | `"auto"` |
 | `device_index` | `0` |
+| `device_path` | `unset` |
 | `fourcc` | `unset` |
 | `fps` | `30` |
 | `height` | `720` |

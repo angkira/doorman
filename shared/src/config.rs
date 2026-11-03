@@ -262,6 +262,19 @@ pub struct CameraConfig {
     /// before the backend is rejected (then ffmpeg under "auto"). 100..=10000.
     #[serde(default = "default_native_first_frame_timeout_ms")]
     pub native_first_frame_timeout_ms: u32,
+
+    /// Pin the camera by a stable device node instead of `device_index`, for
+    /// example `/dev/v4l/by-id/usb-Vendor_Camera-video-index0`. The path is
+    /// resolved on every open and must end at a `/dev/videoN` character
+    /// device. Unset: use `device_index`.
+    #[serde(default)]
+    pub device_path: Option<String>,
+
+    /// Accept virtual capture devices (v4l2loopback, vivid, ...). Default
+    /// `false`: members of the `video` group can feed arbitrary frames into
+    /// such a device, so the daemon refuses them. Enable only for testing.
+    #[serde(default)]
+    pub allow_virtual_devices: bool,
 }
 
 impl CameraConfig {
@@ -1228,6 +1241,8 @@ impl Default for CameraConfig {
             prearm_window_ms: default_prearm_window_ms(),
             backend: CameraBackendChoice::default(),
             native_first_frame_timeout_ms: default_native_first_frame_timeout_ms(),
+            device_path: None,
+            allow_virtual_devices: false,
         }
     }
 }
@@ -1752,5 +1767,32 @@ mod tests {
             toml::from_str("[pam.sudo]\nenabled = true\nsimilarity_threshold = 0.5").unwrap();
         assert!(ok.validate().is_ok());
         assert_eq!(ok.pam.sudo.effective_threshold(&ok.authentication), 0.5);
+    }
+}
+
+#[cfg(test)]
+mod camera_guard_tests {
+    use super::Config;
+
+    #[test]
+    fn virtual_devices_are_refused_by_default_and_device_path_is_unset() {
+        let cfg = Config::default();
+        assert!(!cfg.camera.allow_virtual_devices);
+        assert_eq!(cfg.camera.device_path, None);
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.camera.allow_virtual_devices);
+    }
+
+    #[test]
+    fn camera_guard_keys_parse() {
+        let cfg: Config = toml::from_str(
+            "[camera]\nallow_virtual_devices = true\ndevice_path = \"/dev/v4l/by-id/usb-X-video-index0\"\n",
+        )
+        .unwrap();
+        assert!(cfg.camera.allow_virtual_devices);
+        assert_eq!(
+            cfg.camera.device_path.as_deref(),
+            Some("/dev/v4l/by-id/usb-X-video-index0")
+        );
     }
 }

@@ -62,6 +62,15 @@ pub use gstreamer_backend::GStreamerCamera;
 
 pub mod gate;
 
+#[cfg(any(
+    feature = "camera-ffmpeg",
+    feature = "camera-gstreamer",
+    feature = "camera-v4l2",
+    feature = "camera-nokhwa",
+    test
+))]
+pub mod device_guard;
+
 pub mod probe;
 
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]

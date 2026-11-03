@@ -90,8 +90,8 @@ frames: **accepted**.
 | STRIDE | Threat | Existing mitigation | Residual risk | Status |
 |---|---|---|---|---|
 | S | **Presentation attack** (photo, replayed video on a screen, mask) | monocular-depth liveness (MiniFASNet / depth relief, `docs/decision-and-liveness.md`), N-of-M frame decision, sudo profile requires liveness | an RGB webcam heuristic; "photos, screens and masks are not ruled out" (README, SUDO.md). Attack success rate is **not measured** in this repo | open |
-| S | **Virtual camera / v4l2loopback replay**: a process or module feeds prerecorded or synthetic frames into a `/dev/video*` node | `DevicePolicy=closed` limits the daemon to video4linux char devices; loopback nodes are video4linux devices, so they are **allowed** | The daemon selects the camera by `device_index` (default 0) and never checks the V4L2 driver, card name, bus info or capabilities (grep of `daemon/src/camera/` finds no loopback/driver check). A loopback device loaded before the real camera enumerates can take index 0. Creating one needs root (module load) or an already-loaded `v4l2loopback` with permissive node access, so this matters mostly for an attacker who already has local code execution plus a loaded module. **The daemon cannot detect or refuse a virtual camera.** | open |
-| S | A USB device posing as a camera | none (any V4L2 capture node is accepted by index) | physical attacker with a USB port; also open-ended device re-enumeration changes `device_index` meaning | open |
+| S | **Virtual camera / v4l2loopback replay**: a process or module feeds prerecorded or synthetic frames into a `/dev/video*` node | `daemon/src/camera/device_guard.rs`: native V4L2 backend checks sysfs and `VIDIOC_QUERYCAP` driver/card/bus_info; ffmpeg and GStreamer backends check sysfs (best effort, unverifiable nodes refused); virtual devices refused unless `[camera] allow_virtual_devices = true` (default false). `[camera] device_path` pins a `/dev/v4l/by-id/...` symlink (must resolve to a `/dev/videoN` char device). Tests: `camera::device_guard::tests::*`, `camera_guard_tests` | root can spoof any of it; a USB device reporting a physical identity, or a loopback-like driver with another name and a parent device, passes; ffmpeg/GStreamer checks are sysfs-only; not run against a real v4l2loopback device here | partial |
+| S | A USB device posing as a camera | `device_path` pinning to the owner's by-id node (a different device has a different by-id name) | a device cloning the identity strings, or a physical attacker who unplugs the real camera when `device_path` is unset | partial |
 | I | Camera used without the owner noticing | LED is hardware-controlled; the daemon opens the camera only for requests that pass the gate | a permitted request (own username) turns the camera on | accepted |
 | T | Replay by tampering with frames in the daemon | frames live in daemon memory in a separate uid with `NoNewPrivileges` | root or same-uid ptrace is out of scope | accepted |
 | D | Covering the lens | falls through to the password | unlock slower | accepted |
@@ -170,7 +170,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 | Threat | What the code does | Status |
 |---|---|---|
 | Presentation attack (print, screen, mask) | single/few-frame depth liveness, N-of-M decision; heuristic only | open: no PAD evaluation per ISO/IEC 30107-3 style testing in this repo (that standard's procedures are not reproduced here) |
-| Camera feed injection (v4l2loopback, virtual cameras, OBS, hostile USB camera) | none; device chosen by index; loopback devices are allowed by `DeviceAllow=char-video4linux` | open: the daemon can neither detect nor refuse a virtual camera. A possible mitigation is to read `VIDIOC_QUERYCAP` (driver name `v4l2 loopback`, bus_info `platform:v4l2loopback-*`) and refuse such nodes, and to select the device by stable `by-id`/`by-path` instead of index. Not implemented. |
+| Camera feed injection (v4l2loopback, virtual cameras, OBS, hostile USB camera) | virtual devices refused by `device_guard` (see section 3); `device_path` pinning | partial: see section 3 for residual risk |
 | Template theft | 0600/0700, plain vectors | partial, see next section |
 | Hill-climbing / template inversion | attacker needs access to scores or the template; scores are not returned to unprivileged peers (only success/failure; `Matched.similarity` goes to the authorized caller of `WaitForMatch`) | accepted; embeddings are 512-d model outputs, not invertible by design but model inversion attacks exist in the literature, unquantified here |
 | False accept rate | decision threshold: cosine 0.4 (`default_similarity_threshold`), N-of-M frames | open: **the false accept rate at 0.4 is unknown**. `scripts/threshold_security_eval.py` computes an impostor distribution on LFW-like data, but no result is recorded in `docs/`. A near-twin, sibling or a demographic group with a worse model can have a much higher FAR than a pooled number. |
@@ -180,7 +180,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 
 ## Summary of open items
 
-1. Virtual-camera (v4l2loopback) and USB camera spoofing: no detection; device chosen by index.
+1. Virtual-camera (v4l2loopback) refused by default and camera pinnable by `device_path`; a hostile USB camera or a root attacker can still spoof (partial).
 2. Presentation-attack resistance and FAR at threshold 0.4 not measured.
 3. ~~Daemon silently falls back to default config on a bad config.~~ Closed: it exits non-zero.
 4. ~~Root-run CLI loads `./doorman.toml` from the working directory (`dataset purge`).~~ Closed: root only accepts a trusted config path.

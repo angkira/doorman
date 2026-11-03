@@ -51,7 +51,11 @@ fn dropping_ffmpeg_camera_kills_and_reaps_child() {
     let old_path = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{}", dir.display(), old_path));
 
-    let cam = futures::executor::block_on(FfmpegCamera::new_with_config(&Config::default()))
+    // The stub needs no device; skip the virtual-camera guard (device_guard.rs),
+    // which would refuse a host without /sys/class/video4linux/video0.
+    let mut config = Config::default();
+    config.camera.allow_virtual_devices = true;
+    let cam = futures::executor::block_on(FfmpegCamera::new_with_config(&config))
         .expect("stub ffmpeg should spawn");
     let pid = wait_for_pid(&pid_file);
     let proc_dir = format!("/proc/{pid}");

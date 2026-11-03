@@ -91,6 +91,8 @@ Hypotheses, most likely first:
 | `fourcc` | unset | `"MJPG"` or `"YUYV"`. Unset keeps today's behaviour. |
 | `warmup_frames` | `0` | Frames dropped after a cold open. Valid 0..=10. Recommended: `3`. |
 | `prearm_on_lock` | `false` | Open on the lock event even while `IdleHint` is set, but only for `prearm_window_ms` after it. Recommended: `true`. |
+| `device_path` | unset | Pin the camera by a stable node such as `/dev/v4l/by-id/usb-..-video-index0` (resolved on every open; must end at a `/dev/videoN` character device). Overrides `device_index`. Recommended, because index numbering changes when devices enumerate in another order. |
+| `allow_virtual_devices` | `false` | Virtual capture devices (v4l2loopback, vivid, akvcam, ...) are refused. Set `true` only for testing. See "Virtual cameras" below. |
 | `prearm_window_ms` | `5000` | How long after the `LockedHint` false->true edge prearm may keep the camera open while idle. Valid 0..=30000 (0 disables prearm). After the window the normal `locked && !idle` rule applies, so a screen that stays off for hours does not keep the camera on. |
 
 Defaults are unchanged on purpose: they change auth timing, so they are turned on
@@ -167,3 +169,23 @@ Daemon log lines from one lock cycle (`journalctl -u doormand | grep -E "Camera|
 ```
 (paste)
 ```
+
+## Virtual cameras (v4l2loopback)
+
+Nodes of `v4l2loopback` are writable by the `video` group, and the daemon is in
+that group, so any member could feed arbitrary frames to it. `device_guard.rs`
+refuses virtual devices before capture:
+
+- native V4L2 backend: sysfs facts (`/sys/class/video4linux/videoN/name`,
+  `device/driver`, presence of a parent device) before opening, then the
+  `VIDIOC_QUERYCAP` driver, card and bus_info strings after opening (as reported
+  by nokhwa). Markers: `v4l2loopback`, `akvcam`, `vivid`, `vimc`, `virtual`,
+  `droidcam`, `dummy`.
+- ffmpeg backend (Linux) and GStreamer backend: sysfs facts only, best effort. A
+  node missing from sysfs cannot be verified and is refused.
+
+Residual risk: root can load any module or rename a device; a malicious USB
+device can report a real-camera identity; a loopback driver that uses a
+different name and has a parent device would pass the sysfs checks. Pinning
+`device_path` to the owner's physical camera narrows this to the last case. The
+GStreamer backend is hard-wired to `/dev/video0` (checked, not configurable).

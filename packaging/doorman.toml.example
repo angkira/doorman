@@ -19,6 +19,11 @@ debug_mode   = false
 # V4L2 device index (/dev/video0 -> 0). The lean Linux build uses the
 # camera-v4l2 or camera-gstreamer backend selected at compile time.
 device_index = 0
+# Pin the physical camera by a stable node instead of the index, e.g.
+# device_path = "/dev/v4l/by-id/usb-Vendor_Camera-video-index0"
+# Virtual devices (v4l2loopback, vivid) are refused unless this is true;
+# keep it false in production.
+allow_virtual_devices = false
 width  = 1280
 height = 720
 fps    = 30

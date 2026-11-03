@@ -40,6 +40,34 @@ impl FfmpegCamera {
         which_ffmpeg().is_some()
     }
 
+    /// Resolve the configured node and refuse virtual devices (best effort:
+    /// sysfs only, see `device_guard`). macOS selects by AVFoundation index and
+    /// has no sysfs, so only Linux is checked.
+    fn checked_device_index(config: &Config) -> Result<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            use super::device_guard::{
+                enforce_sysfs, resolve_node, RealNodeFs, DEV_ROOT, SYSFS_VIDEO4LINUX,
+            };
+            let node = resolve_node(
+                config.camera.device_path.as_deref(),
+                config.camera.device_index,
+                std::path::Path::new(DEV_ROOT),
+                &RealNodeFs,
+            )?;
+            enforce_sysfs(
+                &node,
+                std::path::Path::new(SYSFS_VIDEO4LINUX),
+                config.camera.allow_virtual_devices,
+            )?;
+            Ok(node.index)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(config.camera.device_index)
+        }
+    }
+
     fn spawn_capture(
         width: u32,
         height: u32,
@@ -126,7 +154,7 @@ impl CameraBackend for FfmpegCamera {
         let width = config.camera.width;
         let height = config.camera.height;
         let fps = config.camera.fps;
-        let device_index = config.camera.device_index;
+        let device_index = Self::checked_device_index(config)?;
 
         info!(
             "Initializing ffmpeg webcam backend (device {}, {}x{} @ {}fps)",
