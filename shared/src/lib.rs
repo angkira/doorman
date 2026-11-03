@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 pub mod config;
 pub mod config_check;
+pub mod config_trust;
 pub use config::{Config, DatasetConfig, IpcConfig, RecognitionConfig};
 
 /// Current IPC protocol major version.

@@ -12,3 +12,4 @@ thiserror = { workspace = true }
 toml = "1.0"
 dirs = "6.0"
 
+libc = "0.2"

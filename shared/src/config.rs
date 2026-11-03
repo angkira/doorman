@@ -1,3 +1,4 @@
+use crate::config_trust;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1362,15 +1363,46 @@ impl Config {
         Ok(())
     }
 
-    /// Load config from standard locations
-    /// Priority: ./doorman.toml > ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml
+    /// Load config from the standard locations (see [`Config::load_with`]).
     pub fn load() -> Result<Self, ConfigError> {
-        if let Some(path) = Self::find_config_path() {
-            return Self::load_from(&path);
-        }
+        Self::load_with(None)
+    }
 
-        // If no config found, use defaults
-        Ok(Self::default())
+    /// Load config for this process.
+    ///
+    /// Non-root: `explicit` > `DOORMAN_CONFIG` > ./doorman.toml >
+    /// ~/.config/doorman/doorman.toml > /etc/doorman/doorman.toml > defaults.
+    /// Root: `explicit` > `DOORMAN_CONFIG` > /etc/doorman/doorman.toml >
+    /// defaults, and the chosen file must be root-owned and not writable by
+    /// others (see [`crate::config_trust`]); otherwise this is an error.
+    pub fn load_with(explicit: Option<&Path>) -> Result<Self, ConfigError> {
+        let env = std::env::var("DOORMAN_CONFIG").ok();
+        Self::load_resolved(
+            config_trust::effective_uid(),
+            explicit,
+            env.as_deref(),
+            &config_trust::FsMetadata,
+        )
+    }
+
+    /// [`Config::load_with`] with the uid, environment value and metadata
+    /// source injected.
+    pub fn load_resolved(
+        euid: u32,
+        explicit: Option<&Path>,
+        env: Option<&str>,
+        meta: &dyn config_trust::MetadataProvider,
+    ) -> Result<Self, ConfigError> {
+        let standard = if euid == config_trust::ROOT_UID {
+            None
+        } else {
+            Self::find_config_path()
+        };
+        match config_trust::resolve(euid, explicit, env, standard, meta)? {
+            Some(path) => Self::load_from(&path),
+            // If no config found, use defaults
+            None => Ok(Self::default()),
+        }
     }
 
     /// The config file `load` would use: the first existing standard location.

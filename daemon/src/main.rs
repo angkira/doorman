@@ -259,22 +259,12 @@ async fn main() -> Result<()> {
     // EP (Neural Engine + GPU + CPU fallback); otherwise the daemon stays on CPU.
     let device_override = std::env::args().skip_while(|arg| arg != "--device").nth(1);
 
-    // Load configuration from --config, DOORMAN_CONFIG env var, or standard locations
-    let mut config = if let Some(config_path) = config_file {
-        info!("Loading config from --config: {:?}", config_path);
-        Config::load_from(&config_path).unwrap_or_else(|e| {
-            warn!("Failed to load config from --config: {}", e);
-            Config::default()
-        })
-    } else if let Ok(config_path) = std::env::var("DOORMAN_CONFIG") {
-        info!("Loading config from DOORMAN_CONFIG: {}", config_path);
-        Config::load_from(&std::path::PathBuf::from(config_path)).unwrap_or_else(|e| {
-            warn!("Failed to load config from DOORMAN_CONFIG: {}", e);
-            Config::default()
-        })
-    } else {
-        Config::load().unwrap_or_default()
-    };
+    // Load configuration from --config, DOORMAN_CONFIG env var, or standard
+    // locations (a root process only accepts a trusted file, see config_trust).
+    let mut config = Config::load_with(config_file.as_deref()).unwrap_or_else(|e| {
+        warn!("Failed to load config: {}", e);
+        Config::default()
+    });
     if preview_mode {
         config.daemon.preview_mode = true;
         config.daemon.debug_mode = true; // Preview mode implies debug mode

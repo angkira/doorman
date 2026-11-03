@@ -103,7 +103,7 @@ frames: **accepted**.
 | T | Edit threshold, sudo settings, `admin_uids` | file is root-owned; `Config::validate` rejects out-of-range values and sudo-without-liveness; `doorman config check` diffs unknown keys; parser fuzzed (no panic, deep nesting handled) | needs root to edit | mitigated |
 | T | Typo in a security key is ignored | `doorman config check` reports unknown keys | the daemon itself does not reject unknown keys (no `deny_unknown_fields`) | partial |
 | T | **A bad config silently weakens the daemon**: with `--config` or `DOORMAN_CONFIG`, a parse or validation error logs a warning and runs with `Config::default()` (`daemon/src/main.rs` lines ~263-277) | defaults are not insecure (sudo off), but a stricter threshold set by the admin is lost without the daemon stopping | silent fallback to default threshold 0.4 and default `admin_uids` | open |
-| E | A root-run CLI reads an attacker-chosen config: `Config::load()` tries `./doorman.toml` first, and `sudo doorman dataset purge` uses it (`daemon/src/bin/doorman.rs`, `cmd_dataset_purge`) | the purge refuses symlinks and paths outside the dataset directory it computes | an unprivileged user can plant `doorman.toml` in a directory they own and set `daemon.data_dir`, making root delete date-named directories under a path of their choosing | open |
+| E | A root-run CLI reads an attacker-chosen config (formerly `./doorman.toml` for `sudo doorman dataset purge`) | `Config::load_with` (`shared/src/config.rs`, `shared/src/config_trust.rs`): with euid 0 the working directory and user config dir are never read; only `--config`, `DOORMAN_CONFIG` or `/etc/doorman/doorman.toml`, and the file and its directory must be root-owned and not group/world-writable, else an explicit error. Tests: `config_trust::tests::*` (injectable metadata provider). The purge also refuses symlinks and paths outside the dataset directory | the check is on the final path component and its directory only (parent directories further up are not walked); TOCTOU between check and read needs a root-owned writable location, i.e. root | mitigated |
 | I | Config is world-readable (0644) | contains no secrets | reveals uids and thresholds | accepted |
 
 ### 5. Embeddings and dataset files (`/var/lib/doorman`)
@@ -183,7 +183,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 1. Virtual-camera (v4l2loopback) and USB camera spoofing: no detection; device chosen by index.
 2. Presentation-attack resistance and FAR at threshold 0.4 not measured.
 3. Daemon silently falls back to default config on a bad `--config`/`DOORMAN_CONFIG`.
-4. Root-run CLI loads `./doorman.toml` from the working directory (`dataset purge`).
+4. ~~Root-run CLI loads `./doorman.toml` from the working directory (`dataset purge`).~~ Closed: root only accepts a trusted config path.
 5. Models are not integrity-checked at load; no `SystemCallFilter=`; ONNX/image decoding runs inside the daemon that is the root of trust.
 6. Daemon compromise = authentication bypass (design property; sandbox only limits collateral damage).
 7. Release/CI hardening: actions not SHA-pinned, no signed artifacts or SBOM, no `cargo vet`, 9 documented advisory ignores.

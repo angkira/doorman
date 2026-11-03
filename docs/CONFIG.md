@@ -21,6 +21,13 @@ changes.
 `unset` means an optional key with no value (the code picks its own behaviour,
 see the comments in `packaging/doorman.toml.example`).
 
+Which file is read: `--config`, then `DOORMAN_CONFIG`, then (non-root only)
+`./doorman.toml` and `~/.config/doorman/doorman.toml`, then
+`/etc/doorman/doorman.toml`. A process running as root (for example
+`sudo doorman dataset purge`) never reads the working directory or the user
+config directory, and refuses any file that is not owned by root or whose file
+or directory is group/world-writable.
+
 ## Top level
 
 | Key | Default |

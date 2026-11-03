@@ -69,21 +69,11 @@ fn main() -> Result<()> {
     let user_mode = std::env::args().any(|a| a == "--user");
     let config_file = arg_value("--config").map(PathBuf::from);
 
-    // Load config (same precedence as the daemon: --config > DOORMAN_CONFIG >
-    // standard locations), so models_dir / socket dir match the daemon.
-    let mut config = if let Some(p) = config_file {
-        Config::load_from(&p).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load --config: {} — using defaults", e);
-            Config::default()
-        })
-    } else if let Ok(p) = std::env::var("DOORMAN_CONFIG") {
-        Config::load_from(&PathBuf::from(p)).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load DOORMAN_CONFIG: {} — using defaults", e);
-            Config::default()
-        })
-    } else {
-        Config::load().unwrap_or_default()
-    };
+    // Load config (same precedence and root trust rules as the daemon).
+    let mut config = Config::load_with(config_file.as_deref()).unwrap_or_else(|e| {
+        tracing::warn!("Failed to load config: {} — using defaults", e);
+        Config::default()
+    });
 
     // Mirror the daemon's --user path rewriting so the sidecar's socket + models
     // dir land in the SAME place the daemon expects.
