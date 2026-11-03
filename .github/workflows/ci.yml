@@ -155,3 +155,90 @@ jobs:
             dpkg-deb -I "$deb"
             dpkg-deb -c "$deb"
           done
+
+  systemd-security:
+    # Offline exposure score of the packaged unit must not get worse than
+    # packaging/systemd/security-exposure.max (needs systemd >= 252; 24.04 has 255).
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Exposure score
+        run: bash scripts/check_systemd_security.sh
+
+  supply-chain:
+    # Advisories, yanked crates, licenses and sources, see deny.toml.
+    # Ignored advisories carry a reason and a review date there.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --locked
+
+  fuzz:
+    # 60 s per target on nightly (libFuzzer). Verified locally; the seeded
+    # stable equivalents run in the normal test job (daemon/tests/fuzz_smoke.rs).
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ipc_request_line, config_toml, embeddings_file]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 seeds/${{ matrix.target }}
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+
+  pam-module:
+    # The real pam_doorman.so under pamtester against a fake daemon socket
+    # (tests/test_pam_module.py). pamtester runs in a private mount namespace
+    # with a temp dir bind-mounted over /etc/pam.d, so it needs sudo.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpam0g-dev pamtester pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: PAM module under pamtester
+        # REQUIRE_PAM_TESTS=1 turns a skip into a failure: a skip proves nothing.
+        run: REQUIRE_PAM_TESTS=1 PYTHONPATH=src python -m pytest tests/test_pam_module.py -q -rs

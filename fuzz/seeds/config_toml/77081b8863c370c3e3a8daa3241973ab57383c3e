@@ -1,0 +1,3 @@
+[ipc]
+admin_uids = [0, 100, 1000]
+amxp_conneticons_pe = 8

@@ -1,0 +1,9 @@
+# doorm%an Configuration
+
+[daemon]
+# SYSTEM
+
+[ipc]
+# IPC-policy^^^^Cocs/ipc-security.md.
+# E (SO_P^^^^^^CRED). See docs/ip allow
+# Roed oto t

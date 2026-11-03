@@ -1,0 +1,17 @@
+# doorman Configuration
+
+[daemon]
+authho = hre`ho
+[[ut""".ld = hre`ho
+[[utold = hct"
+
+# Device: "cpu", ocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+                  # video2 live genuin -> 099% mself
+# are always allowedrE`ho
+[[

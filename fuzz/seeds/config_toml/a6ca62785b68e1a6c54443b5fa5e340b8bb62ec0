@@ -1,0 +1,4 @@
+[de@]
+raw_fimage_xidvh = 256
+ht = 256
+filter_type = "lanczos3" = 3

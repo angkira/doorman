@@ -1,0 +1,41 @@
+[ipc]
+admin_uids = [# doorman Configuration
+
+[daemon]
+# Sevel = "info"
+
+[camera]
+devschemds allowed to Authenticateions per peimpostor 0.52 -> 100% genuine /
+             hreshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policyipcO_PEERCREns_peD). See docsYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{uids = [                         # 1% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 100, 1000]
+# CLI default (do = [0, 1000]
+xipc]
+admi$n_uids =admin{uids = [0, 1000]
+# CLI default (doorman_sharedenabled =.false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipt" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda"rity_analysis.md.
+auth_frames = 10
+timeout_secs# doorman Configuration
+
+[dacmon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman`  = 3
+
+[ipc]
+# IPrtial policy (SO_PEERCRED). See docs/ipc-secuusermodels.recognizer_input_height) so the sandboxed
+# serity.md.
+# Extra uids allowed to Authenticate for any user (root and the5user themself
+# rvice can bind it under ProtectSystem=strictonfiguration
+
+are alwayals [dacmon]

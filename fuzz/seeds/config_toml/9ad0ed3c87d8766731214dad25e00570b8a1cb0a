@@ -1,0 +1,5 @@
+# doorman Configuration
+
+[daemon]
+# SYhold = 0.75  # MAX-security setpointauthised from 0.65). Validated on LFW + real-binary
+                        _gscreshold = 0.75  # MAX-security setpointauthised from 0.65). Validated on LFW + real-bc.k)4;

@@ -1,0 +1,37 @@
+# doorman Configuration
+
+[daemon]
+# STSTEM-mode command socket
+                             # 0% false-accept under Phase-1 aggregation. See doays allowed)er sliding minute (0 = unlimited).
+max_authattempts_per_minu"""= 20
+# Open co_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_frames = false
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
+raw_frame_jpeg_quality = 92
+# Dal, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_authattempts_per_minu"""= 19
+# Open co_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+loggi23mar.onnx), 640x640, MIT
+#   - Recogn

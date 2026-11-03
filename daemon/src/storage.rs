@@ -87,7 +87,7 @@ impl Storage {
 
     /// Decode an `embeddings.bin`: the versioned layout, or the legacy
     /// headerless one (read as version 1; the next save upgrades it).
-    fn decode_embeddings(data: &[u8]) -> Result<Vec<UserEmbedding>> {
+    pub fn decode_embeddings(data: &[u8]) -> Result<Vec<UserEmbedding>> {
         match data.strip_prefix(FILE_MAGIC.as_slice()) {
             Some(rest) => {
                 let version_bytes: [u8; 4] = rest
@@ -108,7 +108,7 @@ impl Storage {
         }
     }
 
-    fn encode_embeddings(users: &[UserEmbedding]) -> Result<Vec<u8>> {
+    pub fn encode_embeddings(users: &[UserEmbedding]) -> Result<Vec<u8>> {
         let mut data = Vec::with_capacity(HEADER_LEN);
         data.extend_from_slice(FILE_MAGIC);
         data.extend_from_slice(&FORMAT_VERSION.to_le_bytes());

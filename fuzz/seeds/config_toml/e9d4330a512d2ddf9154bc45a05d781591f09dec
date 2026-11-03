@@ -1,0 +1,131 @@
+[ipc]
+admin_uids = [0, 1000&]
+malogging_enablNNX Runtdefault (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/"in/doorman"
+log_level = "info"dkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For test+ing with video files
+
+[ml]
+models_dipu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg ime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+devtem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/"in/doorman"
+log_level = "info"dkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" CLI default (doorman_shared::SOCKET_PATH). --user  = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dipu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+heiy for ort backend)
+device = "cpu"
+
+cpu_threadads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For test+ing with video files
+
+[ml]
+models_dipu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg ime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+devtem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/"in/doorman"
+log_level = "info"dkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" CLI default (doorman_shared::SOCKET_PATH). --user  = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dipu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+heiy for ort backend)
+device = "cpu"
+
+cs = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-s""""""""""""

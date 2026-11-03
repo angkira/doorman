@@ -1,0 +1,13 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mP4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GP attempts per usd per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Opener bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are cler_type = "lanczos3"  # neae i 3
+rest, triangle,ns.
+#
+# NOTE: the active model parameters live in code (daemon `ml/ld = 0.4

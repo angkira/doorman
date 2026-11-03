@@ -1,0 +1,10 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """"/var/lib/doorman/models"
+
+#cke Backend: "tract" (pure Rust, default) or "oresholion]
+similarity_threshold = 0.75  # MAX-se!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!curity setpoint (raised from 0.65). Validated on LFW + real-binry
+                             # video:pt under P.85-0.88, worst impostor 0.52 -> 100% genui = "done projector/fusion training.
+# Default/off: no files are written and the authentication gall%ry is un
