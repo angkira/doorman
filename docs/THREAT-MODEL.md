@@ -132,7 +132,7 @@ frames: **accepted**.
 | STRIDE | Threat | Existing mitigation | Residual risk | Status |
 |---|---|---|---|---|
 | S/E | Same-uid malware unlocks the screen (fake daemon via `DOORMAN_SOCKET`, or just `pkill gtklock`) | none; a screen locker is not a boundary against code running as the same user | attacker C already holds the session's data; lock screens defend against attacker A | accepted |
-| T | Predictable log/pid files in `/tmp` (`/tmp/doorman-sway-lock.log` in the sway adapter) | the niri adapter keeps its pidfile under `$XDG_RUNTIME_DIR` | `/tmp` log: symlink/overwrite by another local user, minor | open |
+| T | Predictable log/pid files in `/tmp` (formerly `/tmp/doorman-sway-lock.log` in the sway adapter) | sway adapter logs to `$XDG_RUNTIME_DIR/doorman/sway-lock.log` (dir created 0700, must be a non-symlink owned by the user); without a usable runtime dir the log is discarded; `DOORMAN_SWAY_LOG` still overrides explicitly. The niri adapter keeps its pidfile under `$XDG_RUNTIME_DIR`. Tests: `tests/test_sway_lock_log.py`; shellcheck | an explicit `DOORMAN_SWAY_LOG` pointing into `/tmp` is the user's choice | mitigated |
 | E | `doorman-sudo-pam.sh` edits `/etc/pam.d/sudo` | requires an explicit acknowledgement flag and a second root shell; tested in `tests/test_sudo_pam_script.py` | a bad edit can lock out sudo | mitigated |
 
 ### 8. Sudo profile (opt-in)
@@ -187,7 +187,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 5. Models are not integrity-checked at load; no `SystemCallFilter=`; ONNX/image decoding runs inside the daemon that is the root of trust.
 6. Daemon compromise = authentication bypass (design property; sandbox only limits collateral damage).
 7. Release/CI hardening: actions not SHA-pinned, no signed artifacts or SBOM, no `cargo vet`, 9 documented advisory ignores.
-8. Sway adapter writes a log to a predictable `/tmp` path.
+8. ~~Sway adapter writes a log to a predictable `/tmp` path.~~ Closed: logs under `$XDG_RUNTIME_DIR/doorman/`.
 9. Template protection beyond file permissions (next section).
 
 ---
