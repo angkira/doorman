@@ -11,6 +11,8 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["doorman contributors"]
+# Not an SPDX id: the repo is PolyForm Noncommercial 1.0.0 (see LICENSE).
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 
 [workspace.dependencies]
 tokio = { version = "1.42", features = ["full"] }

@@ -1,0 +1,81 @@
+# cargo-deny policy. Run: cargo deny --locked check
+# Checks run in CI (job `supply-chain`) and need network for the advisory DB.
+
+[graph]
+# Resolve the whole lock file, not only the default feature set: optional
+# back-ends (nokhwa/gstreamer, ort, preview) are part of what ships somewhere.
+all-features = true
+# TODO(WS9-A): bench/Cargo.toml has no license field; add
+# `license.workspace = true` there, then drop this exclusion.
+exclude = ["doorman-bench"]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Report unmaintained crates in the whole tree, not only direct dependencies.
+unmaintained = "all"
+# Every ignore needs: reason, why it is not exploitable here, and a review date.
+ignore = [
+    # quick-xml 0.30.0 via zbus_xml <- zbus-lockstep <- atspi-common <-
+    # accesskit_unix <- egui-winit <- eframe (feature `preview`, desktop debug
+    # window only; not in the PAM path). The parsed XML is D-Bus introspection
+    # from the user's own session bus. Fix needs an eframe upgrade past 0.29.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.30 in eframe/accesskit (preview GUI only); trusted local D-Bus input; blocked on eframe upgrade; review 2027-02-01" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.30 in eframe/accesskit (preview GUI only); trusted local D-Bus input; blocked on eframe upgrade; review 2027-02-01" },
+    # bincode 1.3.3 is a direct dependency of doormand. Unmaintained, not
+    # vulnerable. Replace when the frame format is next touched.
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x unmaintained (direct dep of doormand); no known vulnerability; replace when the frame format changes; review 2027-02-01" },
+    # paste (proc-macro, build time only) via pulp/rav1e/image.
+    { id = "RUSTSEC-2024-0436", reason = "paste is a build-time proc-macro via image/rav1e/pulp; no runtime code; review 2027-02-01" },
+    # ttf-parser via egui/ab_glyph: parses egui's bundled fonts only.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained, via egui (preview GUI), parses only bundled fonts; review 2027-02-01" },
+    # zbus 4.x family via accesskit_unix (preview GUI accessibility).
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained, via eframe/accesskit (preview GUI only); review 2027-02-01" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, via eframe/accesskit (preview GUI only); review 2027-02-01" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, via eframe/accesskit (preview GUI only); review 2027-02-01" },
+    # glib 0.19.9 via gstreamer (optional nokhwa gstreamer capture back-end).
+    { id = "RUSTSEC-2024-0429", reason = "glib 0.19 VariantStrIter unsound; only via optional gstreamer back-end, iterator not used by doorman; review 2027-02-01" },
+]
+
+[licenses]
+version = 2
+# Derived from the current Cargo.lock (all features); see `cargo deny list`.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "LicenseRef-PolyForm-Noncommercial-1.0.0", # this repo, see LICENSE
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# Per-crate exceptions: licenses that are acceptable only for the named crate.
+exceptions = [
+    # Bundled fonts of egui (preview GUI): OFL-1.1 and the Ubuntu Font Licence.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "LicenseRef-UFL-1.0"] },
+    # libjpeg-style IJG license (BSD-like, attribution): optional JPEG back-end.
+    { crate = "mozjpeg", allow = ["IJG"] },
+    { crate = "mozjpeg-sys", allow = ["IJG"] },
+    # NCSA (BSD-like) test-harness code; fuzzing glue only.
+    { crate = "libfuzzer-sys", allow = ["NCSA"] },
+]
+
+[bans]
+# Duplicate versions are common in GUI/ML trees: reported, not fatal.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true # path dependencies inside the workspace
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

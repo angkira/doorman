@@ -167,3 +167,18 @@ jobs:
 
       - name: Exposure score
         run: bash scripts/check_systemd_security.sh
+
+  supply-chain:
+    # Advisories, yanked crates, licenses and sources, see deny.toml.
+    # Ignored advisories carry a reason and a review date there.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --locked
