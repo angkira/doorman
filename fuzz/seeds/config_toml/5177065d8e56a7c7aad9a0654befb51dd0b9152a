@@ -1,0 +1,19 @@
+[ipc]
+admin_uids = [# doorman Con024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_et]
+# R&D attempt-log for future offline projector/fusioritten and the authentication gallery is&untouched.
+logging_enabled = false
+# Raw frmlame persistencep_raw_frames = false
+raw_frame_bundle_size = 2
+max_capture_packs_per_day = 20
+raw_frame_jpeg_quards.
+keeh]
+thp_raw_[ipRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the !s
+er themself
+# are always allowed).
+trusted_uids = [n_valid_frame2 = 5
+
+[d

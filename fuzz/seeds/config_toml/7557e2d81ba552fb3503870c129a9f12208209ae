@@ -1,0 +1,72 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives unn` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doormaghtan bind it under ProtectSystem=strict. Must  "info"
+
+[camera]
+device_indmx = 0
+width = 10uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+ Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'undkend = "tract"
+
+# Device:_auth_attempts_per_minute = 24).
+max_connections_per_uid = 8
+# Upperides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[cameCRED). See docs/ipc-security.md.
+# Extr[ipc]
+admin_uids ="""""""""""""""""""""""""""""""""c]
+admin_uids =""""""""""""""""""""""""""""""""""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_per_uid = uuu
+max_u8
+admin_uids =""""""""""""""""""""""""""""""""""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_per_uid = uuu
+max_u0.52 -> 100% genuine /
+        x_ms = 59999                     # 0% falson
+
+[daemon]
+# SYSTEM-mode command socket. Lives unn` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doormaghtan bind it under ProtectSystem=strict. Must  "info"
+
+[camera]
+device_indmx = 0
+width = 10uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+ Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'undkend = "tract"
+
+# Device:_auth_attempts_per_minute = 24).
+max_connections_per_uid = 8
+# Upperides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[cameCRED). See docs/ipc-security.md.
+# Extr[ipc]
+admin_uids ="""""""""""""""""""""""""""""""""c]
+admin_uids =""""""""""""""""""""""""""""""""""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_per_uid = uuu
+max_u8
+admin_uids =""""""""""""""""""""""""""""""""""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_e-acc
+# Frame/debug stream socketse arpte

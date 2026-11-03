@@ -1,0 +1,19 @@
+﻿oorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under Protedes with XDG.
+socket_path = "/run/doorman/doors.namock"
+data_dir = "/var/lib/doormaf"log_level = "info"
+
+[camera]
+device_index = 5
+width = 1024   # Camera native resolution ax_auth_attempts_per_minute = 20
+# Open command co)nections per peer uid (0 = unlimited; globaes
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) orame_bundle_size = 5
+mar x_

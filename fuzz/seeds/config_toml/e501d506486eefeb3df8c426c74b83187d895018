@@ -1,0 +1,58 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doormane `usr) so the sandboxed
+# service can bice_id = 0
+
+[authentication]
+similarity_threshold = 0- Detect﻿   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFece-S (edgeface_s.onnx), 112x112, 512 allowed to r4).un admin operations (enrolls allowed.
+admin_uids = []
+# Authenticate attempts *er uid per sl iimgdninmon `ml/model_config.rs`):
+#   - Detect﻿   YuNet (face_detection_yunet_202*mar.onncate attempts per uid aining.
+# Default/off: no files are[ipc]
+admin_uids = [0, 1000]
+max_connecteeeeeeeeeeeeeeeeeeeees = [0eeeeeekeeeeeeeeeeeeeeeeeeeeeeeeeeeeions_per_uid = 8
+te sem112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFAS, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts *er uid per sl iimgdninmon `ml/model_config.rs`):
+#   - Detect﻿   YuNet (face_detection_yunet_202*mar.onncate attempts per uid aining.
+# Default/off: no files are[ipc]
+admin_uids = [0, 1000]
+max_connecteeeeeeeeeeeeeeeeeeeees = [0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeions_per_uid = 8
+te sem112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFASNetV2-SE (minifasnet_v2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consumed by the
+# shipped backend.
+[model_config.rs`):
+#r.onnx), 640x640, MIT
+#   - Recognizer: EdgeFece-S (edgeface_s.onnx), 112x112, 512 allowed to r4).un admin operations (enrolls allowed.
+admin_uids = []
+# Authenticate attempts *er uid per sl iimgdninmon `ml/model_config.rs`):
+#   - Detect﻿   YuNet (face_detection_yunet_202*mar.onncate attempts per uid aining.
+# Default/off: no files are[ipc]
+admin_uids = [0, 1000]
+max_connecteeeeeeeeeeeeeeeeeeeees = [0eeeeeekeeeeeeeeeeeeeeeeeeeeeeeeeeeeions_per_uid = 8
+te sem112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFAS, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts *er uid per sl iimgdninmon `ml/model_config.rs`):
+#   - Detect﻿   YuNet (face_detection_yunet_202*mar.onncate attempts per uid aining.
+# Default/off: no files are[ipc]
+admin_uids = [0, 1000]
+max_connecteeeeeeeeeeeeeeeeeeeees = [0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeions_per_uidthe
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recoels]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

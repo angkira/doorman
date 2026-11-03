@@ -1,0 +1,33 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode #ommand soc"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% false-accept under P.85-0.88, worst impostor 0.52 -> 100% genuine /
+          '                  # 0% false-accepds = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% false-accept under P.85-0.88, worst impostor 0.52 -> 100% genuine /
+          '                  # 0% false-acceptry
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% [apc,
+admloggingen_abled]
+may_threshold = 0.75  # MAX-security setpoint (raised from 0.65)false-accept under P.85-0.88, worst impostor 0.52 -> 100% genuine /
+          '                  # 0% fa. Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88,try
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% [apc,
+admloggingen_abled]
+may_threshold = 0.75  # MAX-security setpoint (raised from 0.65)false-accept under P.85-0.88, worst impostor 0.52 -> 100% genuine /
+          '                  # 0% fa. Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88, worst impolse-accept under Phase-1 aggregation. See docs/threshold_securstor 0.52 -> 100% genuine /
+        *  ity_          a

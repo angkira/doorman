@@ -1,0 +1,22 @@
+schema_ve # video: live genuine 0.85-0.88, worst impostor 0.52 -> 10tempts_per_minute = 20
+# Opener bound (ms) foce_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binry
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 10tempts_per_minute = 20
+# Opener bound (ms) for [ipc]
+admin_uids = [0, 10connections_pTer_uid = 8
+pt writes.
+lax_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3"  # neae i 3
+rest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in [ode (daemon `ml/ld = 0.4

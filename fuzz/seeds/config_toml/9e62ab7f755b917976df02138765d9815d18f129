@@ -1,0 +1,25 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels.recognizer_input_height) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0d
+ihtw = 1024   # Camera native resolution (verified with FFmpeg test)
+height =2 70
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman
+
+[ipc]
+# IPC peer-credential policy (SO_PEER^^^^^^^olicy (SO_PEERCRED). See docs/ipc-security.md.
+# Extr[ipc]
+adma uidsgging_enabledix_nco

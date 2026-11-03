@@ -1,0 +1,50 @@
+[ipc]
+admin_uids = [0, 1000&]
+malogging_enabledx_connections_per_uid = uuuu# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, dth = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """ar/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_\rame_'undkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credent default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_\rame_'undkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                          ections_per_uid = uuuu# doorman Configuration
+
+[daemon]
+# SYSTEM-mode bommand socket. Lives under /run/doorman/ (systemd
+# RuntimeDiree = 20
+# Opecntory=doo crmomma

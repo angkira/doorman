@@ -1,0 +1,26 @@
+[ipc]
+admin_uids = [# doorman Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.so"kc
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+devschema_versice_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing wion = 1
+[auith video files
+
+[ml]
+mode[ipRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the us
+er themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[d

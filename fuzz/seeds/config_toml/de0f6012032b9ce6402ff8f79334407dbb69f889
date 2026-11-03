@@ -1,0 +1,22 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
+max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3"  # nearest, triangle, cat
+# The values below are retained for forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

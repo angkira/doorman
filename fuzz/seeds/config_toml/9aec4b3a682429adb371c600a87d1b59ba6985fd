@@ -1,0 +1,40 @@
+[ipc]
+LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLadmin_uids = [# doorman Configuration
+
+[daemon]
+# SYSTEservice user themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline puser (root and the us
+er themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+ (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda"rity_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keeh]
+thp_raw_[ipRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the us
+er themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[d

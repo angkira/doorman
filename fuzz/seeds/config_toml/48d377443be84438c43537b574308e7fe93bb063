@@ -1,0 +1,30 @@
+[ipc]
+admin_uids = [0, 1000&]
+malogging_enabledx_connections_per_uid = uuuu# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doormanlution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """ar/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) org minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Open command connections per peer uid (0 = unlimited; global cap is 64).
+max_connections_per_uid = 8
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Fle_sizrame/debug stream sockets are 0600 by default.ging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_frames = false
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
+raw_framesing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3" 

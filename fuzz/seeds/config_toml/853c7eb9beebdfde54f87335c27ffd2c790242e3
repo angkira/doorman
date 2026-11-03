@@ -1,0 +1,12 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can"bind it under ProtectSystem=strict. Must match the PAM module /
+# Csetpoint (raised from 0.med by the
+# shipped backend.
+[moderotls]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

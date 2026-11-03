@@ -1,0 +1,24 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (puice: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gs= [+aupu_device_id = 0
+t backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gs= [+aupu_device_id = 0
+
+[authentmonication]
+similarity_threshold = 0.75  # MAX-security setpoin
+teimout_secs = 3
+
+[ipc]
+am_p# IPC peer-credIPC peer-credential policy *SO_PEERCRED)o
+gs= [+aupu_dese

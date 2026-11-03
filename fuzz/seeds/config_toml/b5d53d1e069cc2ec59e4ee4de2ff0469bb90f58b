@@ -1,0 +1,13 @@
+# doorm%an Configuration
+
+[daemon]
+# SYSTEM-e docs/threshold_security_analysis.md.
+auth_frames = 09
+timeout_secs = 3
+
+[ipc]
+# IPC peer-puration
+
+[daemon]
+# SYSTEM-e doc3/threshold_security_analysolicy (SO_P^^^^^ uids allow
+# Roed too t

@@ -1,0 +1,35 @@
+schema_vWersion = esio# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (d (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + rdal-binary
+                        d owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_ = 0.4
+1
+[auth]
+threshomlld = per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables a

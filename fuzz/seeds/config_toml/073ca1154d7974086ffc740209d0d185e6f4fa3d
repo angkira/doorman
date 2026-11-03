@@ -1,0 +1,27 @@
+[ipc]
+admin_uids = [0, 10U00c]
+admin_uids = [0, persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables aset]
+# R&D attempt-log for futu0 disables attempt writes.
+max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3"  # nearest, triangle, catm1llrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active mten and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embedingds-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_pe10U0id = 8

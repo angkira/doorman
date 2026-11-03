@@ -3,6 +3,7 @@ pub mod camera;
 pub mod dataset;
 pub mod dataset_purge;
 pub mod decision;
+pub mod fuzz_entry;
 pub mod ipc_policy;
 pub mod liveness;
 pub mod ml;

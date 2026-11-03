@@ -1,0 +1,11 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # Foideo files
+
+[ml]
+models_dir = """"/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+rama"""h= "tract"
+
+# Devicared::SOCKET_PATH).,e:c 
