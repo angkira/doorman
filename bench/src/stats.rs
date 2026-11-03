@@ -109,7 +109,7 @@ fn beta_cf(a: f64, b: f64, x: f64) -> Result<f64> {
 }
 
 /// Regularized incomplete beta function `I_x(a, b)` for `a, b > 0`, `x` in `[0, 1]`.
-pub fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> Result<f64> {
+fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> Result<f64> {
     if x <= 0.0 {
         return Ok(0.0);
     }
@@ -200,9 +200,62 @@ pub fn required_trials_with_errors(errors: u64, target: f64, confidence: f64) ->
     Ok(hi)
 }
 
+/// Rates below this (as a fraction) are printed in scientific notation: a
+/// percentage with three decimals would round FMR-sized values to nothing.
+const SCIENTIFIC_BELOW: f64 = 1e-4;
+
+/// A fraction as a percentage with three decimals (`0.0466` -> `4.656%`);
+/// tiny non-zero values are printed as a scientific fraction.
+pub fn format_percent(x: f64) -> String {
+    if x == 0.0 {
+        "0%".to_string()
+    } else if x.abs() < SCIENTIFIC_BELOW {
+        format!("{x:.2e}")
+    } else {
+        format!("{:.3}%", x * 100.0)
+    }
+}
+
+/// A confidence level such as `0.95` as `95.0%`.
+pub fn format_confidence(c: f64) -> String {
+    format!("{:.1}%", c * 100.0)
+}
+
+/// An observed error rate with its one-sided upper confidence bound.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rate {
+    pub errors: u64,
+    pub trials: u64,
+    pub point: f64,
+    pub upper: f64,
+}
+
+impl Rate {
+    /// `None` when there are no trials (a rate is undefined, not zero).
+    pub fn new(errors: u64, trials: u64, confidence: f64) -> Result<Option<Self>> {
+        if trials == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            errors,
+            trials,
+            point: errors as f64 / trials as f64,
+            upper: upper_bound(errors, trials, confidence)?,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_pairs_point_and_bound() {
+        assert_eq!(Rate::new(0, 0, 0.95), Ok(None));
+        let r = Rate::new(1, 100, 0.95).unwrap().unwrap();
+        assert_eq!((r.errors, r.trials, r.point), (1, 100, 0.01));
+        close(r.upper, 0.046_559_811_453_538_755, 1e-9);
+    }
 
     fn close(a: f64, b: f64, rel: f64) {
         assert!(
@@ -272,7 +325,7 @@ mod tests {
             (3, 50, 0.147_837_176_361_954_18),
             (10, 20, 0.698_046_088_713_506_5),
             (1, 2, 0.974_679_434_480_896_3),
-            (0, 10, 0.258_865_550_893_050_89),
+            (0, 10, 0.258_865_550_893_050_9),
         ];
         for (k, n, want) in cases {
             close(upper_bound(k, n, 0.95).unwrap(), want, 1e-9);

@@ -1,6 +1,7 @@
 //! doorman-bench: benchmark and evaluation harness for the doorman daemon.
 //!
-//! Subcommands: `synth`, `accuracy`, `liveness`, `latency`, `record`.
+//! Subcommands: `synth`, `accuracy`, `liveness`, `pad-report`, `match-report`,
+//! `latency`, `record`.
 //! See docs/bench/README.md for dataset layout and command lines.
 
 mod analysis;
@@ -12,11 +13,12 @@ mod dataset;
 mod latency_report;
 mod machine;
 mod metrics;
+mod pad;
 mod record;
 mod scores;
-#[allow(dead_code)]
 mod stats;
 mod synth;
+mod table;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -58,6 +60,8 @@ enum Cmd {
     Accuracy(AccuracyArgs),
     /// APCER/BPCER, ROC and a recommended threshold from a liveness scores CSV.
     Liveness(LivenessArgs),
+    /// ISO/IEC 30107-3 style PAD report: APCER per attack species, BPCER, bounds.
+    PadReport(PadReportArgs),
     /// Per-stage latency (p50/p95/p99), cold start separate; needs models + `ort` feature.
     Latency(LatencyArgs),
     /// Guided capture of a labelled dataset from the camera.
@@ -130,6 +134,24 @@ struct LivenessArgs {
     /// Target BPCER for the recommended threshold.
     #[arg(long, default_value_t = analysis::DEFAULT_TARGET_BPCER)]
     target_bpcer: f64,
+    #[command(flatten)]
+    out: OutArg,
+}
+
+#[derive(Args)]
+struct PadReportArgs {
+    /// Scores CSV: label{bona_fide,attack},species,score[,response,session,subject].
+    #[arg(long)]
+    scores: PathBuf,
+    /// Accept as live iff score >= threshold (liveness relief).
+    #[arg(long)]
+    threshold: f64,
+    /// Name of the attack-species column.
+    #[arg(long, default_value = pad::DEFAULT_SPECIES_COLUMN)]
+    species_column: String,
+    /// APCER the claim is measured against.
+    #[arg(long, default_value_t = pad::DEFAULT_TARGET_APCER)]
+    target_apcer: f64,
     #[command(flatten)]
     out: OutArg,
 }
@@ -297,6 +319,25 @@ fn cmd_liveness(a: LivenessArgs) -> Result<()> {
     write_machine(&dir, &[("scores file", a.scores.display().to_string())])
 }
 
+fn cmd_pad_report(a: PadReportArgs) -> Result<()> {
+    let dir = out_dir(&a.out);
+    let text = std::fs::read_to_string(&a.scores)
+        .with_context(|| format!("cannot read {}", a.scores.display()))?;
+    let input = pad::parse_pad(&text, &a.species_column)?;
+    let rep = pad::analyze_pad(
+        &input,
+        pad::PadParams {
+            threshold: a.threshold,
+            target_apcer: a.target_apcer,
+            confidence: stats::DEFAULT_CONFIDENCE,
+        },
+    )?;
+    write(&dir, "pad_report.md", &rep.markdown())?;
+    write(&dir, "pad_report.csv", &rep.csv())?;
+    print!("{}", rep.markdown());
+    write_machine(&dir, &[("scores file", a.scores.display().to_string())])
+}
+
 #[cfg(feature = "ort")]
 async fn cmd_latency(a: LatencyArgs) -> Result<()> {
     let dir = out_dir(&a.out);
@@ -357,6 +398,7 @@ async fn main() -> Result<()> {
         Cmd::Synth(a) => cmd_synth(a),
         Cmd::Accuracy(a) => cmd_accuracy(a).await,
         Cmd::Liveness(a) => cmd_liveness(a),
+        Cmd::PadReport(a) => cmd_pad_report(a),
         Cmd::Latency(a) => cmd_latency(a).await,
         Cmd::Record(a) => cmd_record(a).await,
     }
