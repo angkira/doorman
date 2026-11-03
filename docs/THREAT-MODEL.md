@@ -191,3 +191,120 @@ the document itself advises FIDO2 or a fingerprint reader.
 9. Template protection beyond file permissions (next section).
 
 ---
+
+## Template protection and ISO/IEC 24745
+
+This section is analysis only. No cryptography is implemented.
+
+### What the standard asks (and what is verified here)
+
+ISO/IEC 24745 ("Biometric information protection") is paywalled and was **not
+read** for this document. The following is from its public descriptions and
+general literature, so treat the wording as unverified until someone with the
+text checks it:
+
+- It addresses the protection of stored biometric references against
+  disclosure, tampering and misuse, and the privacy of the data subject.
+- Properties usually cited from it: **confidentiality** and **integrity** of
+  the stored reference (security), **irreversibility** (the stored form does
+  not allow recovering the biometric sample) and **unlinkability** (references
+  from different applications or databases cannot be linked), and
+  **renewability/revocability** (a compromised reference can be replaced by a
+  new one derived from the same biometric).
+- It describes a reference as split into a pseudonymous identifier and
+  auxiliary data, with protection mechanisms such as encryption and
+  cancelable-biometrics / helper-data schemes. The exact normative
+  requirements and their numbering are not quoted here.
+
+### Current state
+
+| Property | doorman today |
+|---|---|
+| Confidentiality | file permissions only: `embeddings.bin` 0600 in `/var/lib/doorman` 0700, owner `doorman` (`daemon/src/storage.rs`). Plain 512-d `f32` vectors, bincode. No encryption. |
+| Integrity | none beyond atomic replace (tmp file, fsync, rename) and decode errors on malformed files. No MAC; a modified file with valid structure loads. |
+| Irreversibility | no protection: the stored vector is the model's embedding. Whether a face-like image can be reconstructed from an EdgeFace embedding is not assessed here; the literature says it can for some models, so treat templates as sensitive personal data. |
+| Unlinkability | no: the same person enrolled on two hosts with the same model yields comparable vectors. |
+| Renewability | manual only: `doorman remove` + re-enroll. The face itself cannot be renewed; only the stored template. |
+| Format versioning | v1 (headerless) and v2 (magic `DRMNEMB\0` + version) loaders exist and are fuzzed; a v1 file is backed up before upgrade (`embeddings.bin.v1.bak`, same 0600 mode). |
+
+### Who the protections would stop
+
+The attacker with **root on the running host** (E) defeats every option below:
+root can read the daemon's memory, ask systemd for the credential, call
+`Enroll`, or edit the template. The daemon must also hold plaintext vectors in
+memory to match, so attacker D (code execution as `doorman`) sees them too.
+Encryption therefore does not improve security against a live compromised
+host. It does help against:
+
+1. offline disclosure: stolen or discarded disk, cloud snapshot, backup copy,
+   support bundle, `rsync` of `/var/lib`;
+2. copying a template to another machine (host-bound key);
+3. accidental exposure through a wrong mode or a misconfigured share;
+4. offline tampering (an edited or swapped file in a backup being restored).
+
+These are real but narrower than "template protection" suggests.
+
+### Options
+
+**A. AEAD-sealed file with a systemd credential key.** Store the key with
+`systemd-creds encrypt` (host key, optionally TPM2-bound) and hand it to the
+daemon with `LoadCredentialEncrypted=` in `doormand.service`; the daemon
+decrypts at start into `$CREDENTIALS_DIRECTORY` (private tmpfs) and seals
+`embeddings.bin` with AES-256-GCM or ChaCha20-Poly1305 (per-write random
+nonce, header magic/version/key id as associated data). Covers confidentiality
+and integrity (the tag) for threats 1 to 4. Needs systemd with credential
+support (introduced around v250; TPM2 sealing later; **version requirements
+unverified**, check the target distributions). Cost: key lifecycle (lost or
+reset TPM means re-enrolling, acceptable because the password fallback
+exists), a new v3 format, migration from v1/v2 including the `.bak` file,
+a new fuzz target. A TPM2 key bound to PCRs can break after firmware updates;
+bind to a stable PCR set (for example only Secure Boot state) or use the host
+key.
+
+**B. HMAC only.** Authenticates the file with a key from the same credential
+but leaves vectors readable. Gives integrity (threat 4) without
+confidentiality. Strictly dominated by A, because AEAD gives both for the same
+key handling. Only attractive if encryption were rejected for performance or
+debuggability reasons, which does not apply to a few hundred KB.
+
+**C. Per-host salt / random projection (cancelable biometrics).** Multiply
+each vector by a key-seeded random orthogonal matrix before storing, and do the
+same to the probe. Orthogonal maps preserve cosine similarity exactly, so the
+threshold and the N-of-M logic stay unchanged. Gives unlinkability across hosts
+and renewability (a new key yields a new transformed template). Limits:
+the key lives on the same host, so against E and D it adds nothing; as
+confidentiality it is weaker than A (a linear map with a known structure can be
+solved from enough known vector pairs, and it is invertible by anyone with the
+key); renewal still needs the original sample or a re-enrollment, because the
+raw vector is not kept. Its real advantage, matching without ever decrypting,
+is irrelevant when the same process holds the key.
+
+**D. Hardware matching / secure element.** Out of scope for a webcam
+convenience tool; mentioned for completeness.
+
+### Recommendation
+
+1. Do not implement the random projection (C) or a separate HMAC (B).
+2. If the project wants to claim any alignment with 24745, implement **A** as
+   format v3: AEAD with a systemd-credential key, header authenticated as
+   associated data, migration from v1/v2 that also seals or removes
+   `embeddings.bin.v1.bak`, a v3 fuzz seed, and a documented recovery step
+   (`doorman remove` + re-enroll after key loss). Fall back to the current plain
+   v2 (with a warning) only when no credential is configured.
+3. Before that, cheap and independent of crypto: refuse to start when
+   `embeddings.bin` or the state directory is group/world-accessible (the
+   storage code sets modes on creation but does not check existing files), and
+   document that backups of `/var/lib/doorman` must be encrypted or excluded.
+4. Treat the optional raw-frame dataset as a bigger privacy risk than the
+   templates: it stores face images. Keep it off by default (it is), purge on a
+   schedule, and encrypt it with the same mechanism if it is ever used outside
+   a lab machine.
+5. State plainly in user docs that after a template leak the template can be
+   revoked but the face cannot, so a false-accept path based on a stolen
+   template plus a presentation attack remains.
+
+Honest value: A turns "copy the file and use it" into "copy the file and also
+break the host key or the TPM" for offline attackers. It does nothing against
+anyone who already controls the running machine. It is worth doing before any
+claim of template protection, but not before the open items in the summary above
+that affect a live attacker (virtual-camera spoofing, silent config fallback).
