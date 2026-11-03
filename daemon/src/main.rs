@@ -2,6 +2,7 @@
 // GStreamer backend is default (PipeWire-integrated)
 // Falls back to V4L2 if GStreamer not available
 use doormand::camera;
+use doormand::liveness;
 mod dataset;
 mod debug_stream;
 mod frame_stream;
@@ -10,6 +11,7 @@ mod lock_supervisor;
 mod ml;
 mod pipeline;
 mod storage;
+mod timing;
 
 use anyhow::Result;
 use doorman_shared::Config;
@@ -26,7 +28,7 @@ pub struct DaemonState {
     /// solely by that thread and is never shared across threads; consumers
     /// (IPC enroll/auth/status/detect) read frames from this watch channel
     /// instead of touching the camera directly.
-    pub latest_frame: tokio::sync::watch::Receiver<Option<Arc<image::DynamicImage>>>,
+    pub latest_frame: tokio::sync::watch::Receiver<Option<pipeline::RawFrame>>,
     pub ml_pipeline: Arc<ml::MLPipeline>,
     pub storage: Arc<RwLock<storage::Storage>>,
     pub start_time: std::time::Instant,
@@ -35,6 +37,15 @@ pub struct DaemonState {
     pub debug_broadcaster: Arc<debug_stream::DebugStreamBroadcaster>,
     pub frame_broadcaster: Option<Arc<frame_stream::FrameStreamBroadcaster>>,
     pub system_locked: Arc<RwLock<bool>>,
+    /// Lock supervisor gate `locked && !idle`. `None` when the daemon is not
+    /// lock-gated (`--user`/preview/dev mode). `WaitForMatch` only attempts
+    /// recognition while this is `true`.
+    pub armed: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Raw `LockedHint` of the tracked session. `None` when there is no lock
+    /// supervisor or it found no session; the sudo profile then fails closed.
+    pub locked: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Per-user suspension of the sudo profile (`[pam.sudo]`).
+    pub sudo_guard: Arc<doormand::sudo_policy::SudoGuard>,
     /// On-demand camera capture leases. IPC operations that need live frames
     /// (enroll, `test`/PAM auth) increment this; the camera gate keeps the camera ON
     /// while it is > 0, so capture works even when the screen is unlocked and the
@@ -59,11 +70,22 @@ impl CaptureLease {
 }
 impl Drop for CaptureLease {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl DaemonState {
+    /// What the lock supervisor knows about the tracked session.
+    pub fn presence(&self) -> doormand::sudo_policy::Presence {
+        use doormand::sudo_policy::Presence;
+        match &self.locked {
+            None => Presence::Unavailable,
+            Some(rx) if *rx.borrow() => Presence::Locked,
+            Some(_) => Presence::Unlocked,
+        }
+    }
+
     /// Acquire an on-demand capture lease and wait (up to `timeout`) for the camera
     /// to produce a live frame. This turns the camera ON via the gate even when the
     /// screen is unlocked (enroll/preview/test). Returns a guard that releases the
@@ -171,8 +193,10 @@ async fn run_preview_supervisor(
                 let handles =
                     pipeline::start_detection_recognition(&state, detection_rx, unlock_ctx.clone());
                 active = Some((detection_tx, handles));
-                last_detection = Instant::now() - std::time::Duration::from_millis(detection_interval_ms as u64);
-                last_preview = Instant::now() - std::time::Duration::from_millis(preview_interval_ms as u64);
+                last_detection =
+                    Instant::now() - std::time::Duration::from_millis(detection_interval_ms as u64);
+                last_preview =
+                    Instant::now() - std::time::Duration::from_millis(preview_interval_ms as u64);
             }
             // Both gates closed -> tear the ML pipeline down (back to ~0% CPU).
             (false, true) => {
@@ -233,31 +257,20 @@ async fn main() -> Result<()> {
     // precedence over the config's `ml.device`. On Apple Silicon with the
     // `backend-ort-coreml` feature compiled, `auto`/`coreml` selects the CoreML
     // EP (Neural Engine + GPU + CPU fallback); otherwise the daemon stays on CPU.
-    let device_override = std::env::args()
-        .skip_while(|arg| arg != "--device")
-        .nth(1);
+    let device_override = std::env::args().skip_while(|arg| arg != "--device").nth(1);
 
-    // Load configuration from --config, DOORMAN_CONFIG env var, or standard locations
-    let mut config = if let Some(config_path) = config_file {
-        info!("Loading config from --config: {:?}", config_path);
-        Config::load_from(&config_path)
-            .unwrap_or_else(|e| {
-                warn!("Failed to load config from --config: {}", e);
-                Config::default()
-            })
-    } else if let Ok(config_path) = std::env::var("DOORMAN_CONFIG") {
-        info!("Loading config from DOORMAN_CONFIG: {}", config_path);
-        Config::load_from(&std::path::PathBuf::from(config_path))
-            .unwrap_or_else(|e| {
-                warn!("Failed to load config from DOORMAN_CONFIG: {}", e);
-                Config::default()
-            })
-    } else {
-        Config::load().unwrap_or_default()
-    };
+    // Load configuration from --config, DOORMAN_CONFIG env var, or standard
+    // locations (a root process only accepts a trusted file, see config_trust).
+    //
+    // An unreadable, unparsable or invalid config is fatal: running with
+    // built-in defaults would silently drop the administrator's stricter
+    // settings. The PAM module then falls through to the password. Only the
+    // absence of any default-location file means "use defaults".
+    let mut config = Config::load_with(config_file.as_deref())
+        .map_err(|e| anyhow::anyhow!("refusing to start: invalid configuration: {e}"))?;
     if preview_mode {
         config.daemon.preview_mode = true;
-        config.daemon.debug_mode = true;  // Preview mode implies debug mode
+        config.daemon.debug_mode = true; // Preview mode implies debug mode
     }
 
     // Resolve the inference device.
@@ -287,8 +300,7 @@ async fn main() -> Result<()> {
     //
     // Dev/preview: --start-unlocked, or debug/preview mode, keeps the session
     // unlocked so the pipeline streams frames without auto-locking the desktop.
-    let initial_locked =
-        config.daemon.start_locked && !start_unlocked && !config.daemon.debug_mode;
+    let initial_locked = config.daemon.start_locked && !start_unlocked && !config.daemon.debug_mode;
 
     if user_mode {
         config.daemon.user_mode = true;
@@ -296,19 +308,37 @@ async fn main() -> Result<()> {
         // Adjust paths for user mode (use XDG directories)
         if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
             let runtime_path = std::path::PathBuf::from(runtime_dir);
-            config.daemon.socket_path = runtime_path.join("doorman.sock").to_string_lossy().to_string();
-            config.daemon.debug_socket = runtime_path.join("doorman-debug.sock").to_string_lossy().to_string();
-            config.daemon.frame_socket = runtime_path.join("doorman-frames.sock").to_string_lossy().to_string();
+            config.daemon.socket_path = runtime_path
+                .join("doorman.sock")
+                .to_string_lossy()
+                .to_string();
+            config.daemon.debug_socket = runtime_path
+                .join("doorman-debug.sock")
+                .to_string_lossy()
+                .to_string();
+            config.daemon.frame_socket = runtime_path
+                .join("doorman-frames.sock")
+                .to_string_lossy()
+                .to_string();
         }
 
         if let Some(data_dir) = std::env::var_os("XDG_DATA_HOME") {
-            config.daemon.data_dir = std::path::PathBuf::from(data_dir).join("doorman").to_string_lossy().to_string();
+            config.daemon.data_dir = std::path::PathBuf::from(data_dir)
+                .join("doorman")
+                .to_string_lossy()
+                .to_string();
         } else if let Some(home) = std::env::var_os("HOME") {
-            config.daemon.data_dir = std::path::PathBuf::from(home).join(".local/share/doorman").to_string_lossy().to_string();
+            config.daemon.data_dir = std::path::PathBuf::from(home)
+                .join(".local/share/doorman")
+                .to_string_lossy()
+                .to_string();
         }
 
         // Also update models directory for user mode
-        config.ml.models_dir = std::path::PathBuf::from(&config.daemon.data_dir).join("models").to_string_lossy().to_string();
+        config.ml.models_dir = std::path::PathBuf::from(&config.daemon.data_dir)
+            .join("models")
+            .to_string_lossy()
+            .to_string();
     }
 
     // Initialize logging.
@@ -317,8 +347,13 @@ async fn main() -> Result<()> {
     // logs ("Successfully registered ROCMExecutionProvider" / CPU fallback) are
     // visible — otherwise an operator can't tell a GPU run from a silent CPU
     // fallback. Still overridable via RUST_LOG.
-    let log_level = std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| format!("doormand={},ort=info", config.daemon.log_level));
+    let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| {
+        format!(
+            "doormand={},ort=info,{}=info",
+            config.daemon.log_level,
+            doormand::sudo_policy::AUDIT_TARGET
+        )
+    });
 
     tracing_subscriber::registry()
         .with(
@@ -329,9 +364,25 @@ async fn main() -> Result<()> {
         .init();
 
     info!("doorman daemon starting...");
-    info!("Mode: {}", if config.daemon.user_mode { "user service" } else { "system service (root)" });
+    info!(
+        "Mode: {}",
+        if config.daemon.user_mode {
+            "user service"
+        } else {
+            "system service (root)"
+        }
+    );
     info!("Socket: {}", config.daemon.socket_path);
     info!("Data dir: {}", config.daemon.data_dir);
+    info!(
+        "Dataset capture (effective): logging_enabled={} keep_raw_frames={} raw_frame_bundle_size={} max_capture_packs_per_day={} max_attempt_records_per_day={} retention_days={} (retention is advisory: purge manually with `doorman dataset purge`)",
+        config.dataset.logging_enabled,
+        config.dataset.keep_raw_frames,
+        config.dataset.raw_frame_bundle_size,
+        config.dataset.max_capture_packs_per_day,
+        config.dataset.max_attempt_records_per_day,
+        config.dataset.retention_days,
+    );
     info!("ML backend: {}", config.ml.backend);
     info!("Device: {}", config.ml.device);
     if config.daemon.debug_mode {
@@ -358,7 +409,7 @@ async fn main() -> Result<()> {
                 info!("✓ Models warmed up and ready");
             }
             Arc::new(pipeline)
-        },
+        }
         Err(e) => {
             error!("Failed to initialize ML pipeline: {}", e);
             warn!(
@@ -369,7 +420,9 @@ async fn main() -> Result<()> {
     };
 
     info!("Initializing storage...");
-    let storage = Arc::new(RwLock::new(storage::Storage::new_with_dir(&config.daemon.data_dir).await?));
+    let storage = Arc::new(RwLock::new(
+        storage::Storage::new_with_dir(&config.daemon.data_dir).await?,
+    ));
 
     info!("Initializing camera...");
     // The camera is OPENED and OWNED entirely by the producer thread (see
@@ -395,7 +448,7 @@ async fn main() -> Result<()> {
     // frame to `latest_frame_rx` (for IPC consumers) and forwards `RawFrame`s to
     // the pipeline via `camera_rx`.
     let (latest_frame_tx, latest_frame_rx) =
-        tokio::sync::watch::channel::<Option<Arc<image::DynamicImage>>>(None);
+        tokio::sync::watch::channel::<Option<pipeline::RawFrame>>(None);
     let (camera_tx, camera_rx) = tokio::sync::mpsc::channel::<pipeline::RawFrame>(30);
     // Camera capture gate. The producer opens/holds the live camera only while this
     // is `true`. Initial value = `always_track` (super-security: camera on from boot);
@@ -426,7 +479,22 @@ async fn main() -> Result<()> {
     // only while at least one preview client is connected. With nobody watching,
     // these broadcasters sit idle and the daemon stays at ~0% CPU.
     info!("Initializing frame stream broadcaster...");
-    let frame_broadcaster = Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30)));  // Buffer 30 frames
+    let frame_broadcaster = Some(Arc::new(frame_stream::FrameStreamBroadcaster::new(30))); // Buffer 30 frames
+
+    // Lock supervisor (SYSTEM-daemon mode only). Connects to logind on the
+    // system bus, resolves the active graphical seat0 session, and exposes
+    // `armed = LockedHint && !IdleHint` plus a lock-generation counter and an
+    // `Unlocker` handle. Robust by construction: any failure (no bus, no
+    // session) yields `armed=false` and `unlocker=None` without crashing.
+    //
+    // We skip it in `--user`/dev mode: that path targets a developer's own
+    // session and has no need to lock-gate or proactively unlock. Spawned before
+    // the state so `WaitForMatch` can share the `armed` gate.
+    let lock_sup = if config.daemon.preview_mode || config.daemon.user_mode {
+        None
+    } else {
+        Some(lock_supervisor::spawn().await)
+    };
 
     let state = DaemonState {
         latest_frame: latest_frame_rx,
@@ -438,11 +506,20 @@ async fn main() -> Result<()> {
         debug_broadcaster: debug_broadcaster.clone(),
         frame_broadcaster: frame_broadcaster.clone(),
         system_locked: Arc::new(RwLock::new(initial_locked)),
+        armed: lock_sup.as_ref().map(|sup| sup.armed_rx.clone()),
+        locked: lock_sup
+            .as_ref()
+            .filter(|sup| sup.unlocker.is_some())
+            .map(|sup| sup.locked_rx.clone()),
+        sudo_guard: Arc::new(doormand::sudo_policy::SudoGuard::new(
+            config.pam.sudo.max_failures,
+            std::time::Duration::from_secs(config.pam.sudo.suspend_secs),
+        )),
         capture_requests: capture_requests.clone(),
     };
 
     // Setup signal handlers for graceful shutdown
-    let mut signals = signal_hook_tokio::Signals::new(&[
+    let mut signals = signal_hook_tokio::Signals::new([
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGINT,
     ])?;
@@ -474,9 +551,12 @@ async fn main() -> Result<()> {
     let debug_server_task = {
         let debug_socket_path = config.daemon.debug_socket.clone();
         let debug_bcast = debug_broadcaster.clone();
+        let debug_ipc = config.ipc.clone();
         info!("Starting debug stream server on {}", debug_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = debug_stream::run_debug_server(debug_socket_path, debug_bcast).await {
+            if let Err(e) =
+                debug_stream::run_debug_server(debug_socket_path, debug_bcast, debug_ipc).await
+            {
                 error!("Debug stream server error: {}", e);
             }
         }))
@@ -486,9 +566,13 @@ async fn main() -> Result<()> {
     let frame_server_task = if let Some(ref frame_bcast) = frame_broadcaster {
         let frame_socket_path = config.daemon.frame_socket.clone();
         let frame_bcast_clone = frame_bcast.clone();
+        let frame_ipc = config.ipc.clone();
         info!("Starting frame stream server on {}", frame_socket_path);
         Some(tokio::spawn(async move {
-            if let Err(e) = frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone).await {
+            if let Err(e) =
+                frame_stream::run_frame_server(frame_socket_path, frame_bcast_clone, frame_ipc)
+                    .await
+            {
                 error!("Frame stream server error: {}", e);
             }
         }))
@@ -520,39 +604,39 @@ async fn main() -> Result<()> {
     let pipeline_handles = if config.daemon.preview_mode {
         info!("Starting pipeline (preview mode - detection+recognition overlay, always-on)");
         let _ = capture_active_tx.send(true); // preview => camera always capturing
-        let camera_rx = camera_rx.lock().await.take()
+        let camera_rx = camera_rx
+            .lock()
+            .await
+            .take()
             .expect("camera_rx consumed exactly once by the pipeline");
         let handles = pipeline::start_pipeline(state.clone(), camera_rx).await;
         Some(handles)
     } else {
         info!("Detection/recognition pipeline idle (production mode - starts on preview connect, auth runs on-demand detection)");
 
-        // Lock supervisor (SYSTEM-daemon mode only). Connects to logind on the
-        // system bus, resolves the active graphical seat0 session, and exposes
-        // `armed = LockedHint && !IdleHint` plus a lock-generation counter and an
-        // `Unlocker` handle. Robust by construction: any failure (no bus, no
-        // session) yields `armed=false` and `unlocker=None` without crashing.
-        //
-        // We skip it in `--user`/dev mode: that path targets a developer's own
-        // session and has no need to lock-gate or proactively unlock.
-        let (armed_rx, unlock_ctx) = if config.daemon.user_mode {
-            (None, None)
-        } else {
-            let sup = lock_supervisor::spawn().await;
+        let (armed_rx, locked_rx, unlock_ctx) = if let Some(sup) = lock_sup.as_ref() {
             // Build the Stage-B unlock context only when proactive unlock is
             // enabled AND a session was actually resolved (so we have an Unlocker).
             // When disabled, the pipeline is still lock-GATED via `armed_rx`; it
             // just never calls Unlock (PAM remains the unlock path).
             let unlock_ctx = if config.authentication.proactive_unlock {
-                sup.unlocker.clone().map(|unlocker| pipeline::UnlockContext {
-                    unlocker,
-                    armed_rx: sup.armed_rx.clone(),
-                    lock_gen_rx: sup.lock_gen_rx.clone(),
-                })
+                sup.unlocker
+                    .clone()
+                    .map(|unlocker| pipeline::UnlockContext {
+                        unlocker,
+                        armed_rx: sup.armed_rx.clone(),
+                        lock_gen_rx: sup.lock_gen_rx.clone(),
+                    })
             } else {
                 None
             };
-            (Some(sup.armed_rx.clone()), unlock_ctx)
+            (
+                Some(sup.armed_rx.clone()),
+                Some(sup.locked_rx.clone()),
+                unlock_ctx,
+            )
+        } else {
+            (None, None, None)
         };
 
         // Camera capture gate (system mode): drive `capture_active` from armed
@@ -561,26 +645,45 @@ async fn main() -> Result<()> {
         // the camera is OFF (unlike the frame-driven pipeline supervisor), so it can
         // turn the camera back ON when you lock the screen. In --user/dev mode
         // (armed_rx=None) there is no lock gate, so capture stays on.
-        if let Some(gate_armed) = armed_rx.clone() {
+        if let (Some(gate_armed), Some(gate_locked)) = (armed_rx.clone(), locked_rx) {
             let cap_tx = capture_active_tx;
             let fb = frame_broadcaster.clone();
             let db = debug_broadcaster.clone();
             let always = config.camera.always_track;
+            let prearm = config.camera.prearm_on_lock;
+            let prearm_window =
+                std::time::Duration::from_millis(u64::from(config.camera.prearm_window_ms));
             let reqs = capture_requests.clone();
             tokio::spawn(async move {
                 let mut gate_armed = gate_armed;
+                let mut gate_locked = gate_locked;
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(200));
+                let clock = tokio::time::Instant::now();
+                let mut edge = camera::gate::LockEdge::default();
                 loop {
-                    let subs = fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0)
-                        + db.receiver_count();
+                    let subs =
+                        fb.as_ref().map(|b| b.receiver_count()).unwrap_or(0) + db.receiver_count();
                     // On-demand IPC leases (enroll/auth) force the camera on too.
                     let on_demand = reqs.load(std::sync::atomic::Ordering::SeqCst) > 0;
-                    let want = always || *gate_armed.borrow() || subs > 0 || on_demand;
+                    // armed = locked && !idle, so idle follows from the two hints.
+                    let locked = *gate_locked.borrow();
+                    let since_lock_edge = edge.update(locked, clock.elapsed());
+                    let want = camera::gate::camera_wanted(camera::gate::GateInputs {
+                        locked,
+                        idle: locked && !*gate_armed.borrow(),
+                        prearm_on_lock: prearm,
+                        prearm_window,
+                        since_lock_edge,
+                        always_track: always,
+                        stream_subscribers: subs,
+                        capture_leases: usize::from(on_demand),
+                    });
                     if cap_tx.send(want).is_err() {
                         break; // producer gone
                     }
                     tokio::select! {
                         r = gate_armed.changed() => { if r.is_err() { break; } }
+                        r = gate_locked.changed() => { if r.is_err() { break; } }
                         _ = tick.tick() => {}
                     }
                 }

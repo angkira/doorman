@@ -52,13 +52,14 @@ for config in "${CONFIGS[@]}"; do
     
     # Build
     echo "Building..."
+    # shellcheck disable=SC2086 # $features is an intentional word-split list of cargo args
     if ! cargo build --release $features 2>&1 | grep -E "(Compiling|Finished|error)"; then
         echo "Build failed for $name, skipping..."
         continue
     fi
     
     # Update config for this backend
-    backend_type=$(echo $name | cut -d- -f1)
+    backend_type=$(echo "$name" | cut -d- -f1)
     
     cp doorman.toml doorman.toml.backup
     sed -i "s/backend = .*/backend = \"$backend_type\"/" doorman.toml
@@ -93,7 +94,7 @@ for config in "${CONFIGS[@]}"; do
         recognitions=0
         
         # Monitor logs for 30 seconds
-        timeout 30s tail -f "/tmp/doormand_$name.log" 2>/dev/null | while read line; do
+        timeout 30s tail -f "/tmp/doormand_$name.log" 2>/dev/null | while read -r line; do
             if echo "$line" | grep -q "Broadcasting detection"; then
                 ((detections++)) || true
             fi
@@ -101,6 +102,7 @@ for config in "${CONFIGS[@]}"; do
                 ((recognitions++)) || true
             fi
             if echo "$line" | grep -q "Camera capture:.*fps"; then
+                # shellcheck disable=SC2034 # value kept for debugging; not consumed yet
                 frames_processed=$(echo "$line" | grep -oP '\d+\.\d+(?= fps)' || echo "0")
             fi
         done &
@@ -206,6 +208,7 @@ EOF
 done
 
 # Close JSON
+# shellcheck disable=SC2129 # simple sequential report appends
 echo "" >> "$RESULT_FILE"
 echo "  ]" >> "$RESULT_FILE"
 echo "}" >> "$RESULT_FILE"

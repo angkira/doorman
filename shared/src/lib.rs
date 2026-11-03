@@ -2,16 +2,40 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod config;
-pub use config::{Config, DatasetConfig, RecognitionConfig};
+pub mod config_check;
+pub mod config_trust;
+pub use config::{Config, DatasetConfig, IpcConfig, RecognitionConfig};
+
+/// Current IPC protocol major version.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Version assumed for a request without a `protocol_version` field (old PAM
+/// module / CLI that predate the field). Fixed forever at 1: once
+/// `PROTOCOL_VERSION` is greater than this, a missing field is rejected so a
+/// legacy client cannot talk the old protocol by omission (version-downgrade bypass).
+pub const UNVERSIONED_PROTOCOL_VERSION: u32 = 1;
 
 /// IPC protocol messages between PAM module/CLI and daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    /// Authenticate a user with face recognition
-    Authenticate { username: String },
-    /// Enroll a new user
-    Enroll { username: String },
+    /// Authenticate a user with face recognition. `service` and `tty` are the
+    /// PAM_SERVICE / PAM_TTY hints of the PAM module; absent for old clients
+    /// and the CLI (additive: protocol_version stays 1).
+    Authenticate {
+        username: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tty: Option<String>,
+    },
+    /// Enroll a new user. With `add`, the captured templates are appended to the
+    /// user's existing ones without evicting any (absent = false: old clients).
+    Enroll {
+        username: String,
+        #[serde(default)]
+        add: bool,
+    },
     /// List enrolled users
     ListUsers,
     /// Remove a user's enrollment
@@ -24,6 +48,32 @@ pub enum Request {
     DetectAndRecognize,
     /// Get latest cached detection result (fast, no processing)
     GetLatestDetection,
+    /// Hold the connection until `username` is recognized (same decision as
+    /// `Authenticate`), the (capped) timeout expires, or the session is not
+    /// armed. Answered with exactly one terminal `Matched` or `NoMatch`.
+    WaitForMatch { username: String, timeout_ms: u64 },
+}
+
+/// Wire envelope for a request: the `Request` fields stay at the top level of
+/// the JSON object (flattened), with an optional `protocol_version` beside them,
+/// so the old wire format `{"type":"authenticate","username":"x"}` still parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestEnvelope {
+    /// Absent means [`PROTOCOL_VERSION`] 1 (clients that predate the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<u32>,
+    #[serde(flatten)]
+    pub request: Request,
+}
+
+impl RequestEnvelope {
+    /// Wrap a request, stamping the current protocol version.
+    pub fn new(request: Request) -> Self {
+        Self {
+            protocol_version: Some(PROTOCOL_VERSION),
+            request,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +93,43 @@ pub enum Response {
         current: u32,
         total: u32,
     },
+    /// The peer is not authorized for this request (peer-credential policy).
+    Denied {
+        reason: String,
+    },
+    /// Too many authenticate attempts from this peer uid.
+    RateLimited {
+        retry_after_s: u64,
+    },
+    /// The request's `protocol_version` major is not supported by the daemon.
+    UnsupportedProtocol {
+        reason: String,
+        supported_version: u32,
+    },
+    /// Terminal answer to `WaitForMatch`: the user passed the full
+    /// authentication decision (quality gate, liveness, threshold).
+    Matched {
+        username: String,
+        similarity: f32,
+        /// Unix time of the decision, milliseconds.
+        ts_unix_ms: u64,
+    },
+    /// Terminal answer to `WaitForMatch`: no match was made.
+    NoMatch {
+        reason: NoMatchReason,
+    },
+}
+
+/// Why a `WaitForMatch` ended without a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoMatchReason {
+    /// The wait expired while the session was armed (or not lock-gated).
+    Timeout,
+    /// The session was not locked and awake for the whole wait.
+    NotArmed,
+    /// The user has no enrollment; waiting longer cannot help.
+    NotEnrolled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +171,10 @@ pub struct DaemonInfo {
     pub camera_available: bool,
     pub models_loaded: bool,
     pub enrolled_users: usize,
+    /// Loaded ONNX Runtime linkage and version; absent from old daemons and
+    /// from builds without an ORT backend. Additive (protocol_version stays 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ort_runtime: Option<String>,
 }
 
 /// Configuration paths
@@ -169,4 +260,132 @@ pub enum Error {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_daemon_info_without_ort_runtime_parses() {
+        let info: DaemonInfo = serde_json::from_str(
+            r#"{"version":"0.1.0","uptime_secs":1,"camera_available":true,"models_loaded":true,"enrolled_users":2}"#,
+        )
+        .unwrap();
+        assert_eq!(info.ort_runtime, None);
+    }
+
+    #[test]
+    fn legacy_request_without_version_parses() {
+        let env: RequestEnvelope =
+            serde_json::from_str(r#"{"type":"authenticate","username":"bob"}"#).unwrap();
+        assert_eq!(env.protocol_version, None);
+        assert!(
+            matches!(env.request, Request::Authenticate { ref username, service: None, tty: None } if username == "bob")
+        );
+    }
+
+    #[test]
+    fn enroll_add_defaults_to_false_for_old_clients() {
+        let old: Request = serde_json::from_str(r#"{"type":"enroll","username":"bob"}"#).unwrap();
+        assert!(matches!(old, Request::Enroll { add: false, .. }));
+        let new: Request =
+            serde_json::from_str(r#"{"type":"enroll","username":"bob","add":true}"#).unwrap();
+        assert!(matches!(new, Request::Enroll { add: true, .. }));
+    }
+
+    #[test]
+    fn wait_for_match_wire_format() {
+        let env: RequestEnvelope = serde_json::from_str(
+            r#"{"type":"wait_for_match","username":"bob","timeout_ms":5000,"protocol_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            env.request,
+            Request::WaitForMatch { ref username, timeout_ms: 5000 } if username == "bob"
+        ));
+
+        let matched = Response::Matched {
+            username: "bob".into(),
+            similarity: 0.5,
+            ts_unix_ms: 7,
+        };
+        assert_eq!(
+            serde_json::to_string(&matched).unwrap(),
+            r#"{"status":"matched","username":"bob","similarity":0.5,"ts_unix_ms":7}"#
+        );
+        let no_match = Response::NoMatch {
+            reason: NoMatchReason::NotArmed,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_match).unwrap(),
+            r#"{"status":"no_match","reason":"not_armed"}"#
+        );
+        let back: Response =
+            serde_json::from_str(r#"{"status":"no_match","reason":"timeout"}"#).unwrap();
+        assert!(matches!(
+            back,
+            Response::NoMatch {
+                reason: NoMatchReason::Timeout
+            }
+        ));
+    }
+
+    #[test]
+    fn unit_variant_with_version_parses() {
+        let env: RequestEnvelope =
+            serde_json::from_str(r#"{"type":"status","protocol_version":2}"#).unwrap();
+        assert_eq!(env.protocol_version, Some(2));
+        assert!(matches!(env.request, Request::Status));
+    }
+
+    #[test]
+    fn new_envelope_stamps_version_and_keeps_flat_layout() {
+        let json = serde_json::to_string(&RequestEnvelope::new(Request::Authenticate {
+            username: "bob".into(),
+            service: None,
+            tty: None,
+        }))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "authenticate");
+        assert_eq!(v["username"], "bob");
+        assert_eq!(v["protocol_version"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn authenticate_service_and_tty_are_additive() {
+        let env: RequestEnvelope = serde_json::from_str(
+            r#"{"type":"authenticate","username":"bob","service":"sudo","tty":"/dev/pts/3","protocol_version":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            env.request,
+            Request::Authenticate { ref service, ref tty, .. }
+                if service.as_deref() == Some("sudo") && tty.as_deref() == Some("/dev/pts/3")
+        ));
+        // Without hints the serialized form is the old wire format.
+        let json = serde_json::to_string(&Request::Authenticate {
+            username: "bob".into(),
+            service: None,
+            tty: None,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"type":"authenticate","username":"bob"}"#);
+    }
+
+    #[test]
+    fn new_response_variants_roundtrip() {
+        for r in [
+            Response::Denied { reason: "x".into() },
+            Response::RateLimited { retry_after_s: 7 },
+            Response::UnsupportedProtocol {
+                reason: "x".into(),
+                supported_version: PROTOCOL_VERSION,
+            },
+        ] {
+            let back: Response = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+            assert_eq!(format!("{r:?}"), format!("{back:?}"));
+        }
+    }
 }

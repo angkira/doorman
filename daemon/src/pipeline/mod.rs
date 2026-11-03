@@ -1,26 +1,31 @@
 /// Non-blocking producer-consumer pipeline for face recognition
-/// 
+///
 /// Architecture:
 /// Camera Producer → Frame Fanout → Detection Pipeline → Recognition Pipeline
 ///                        ↓
 ///                   Preview Clients
-
 mod aggregate;
 mod camera_producer;
-mod frame_fanout;
 mod detection_pipeline;
+mod enroll_plan;
+mod frame_fanout;
 mod recognition_pipeline;
+mod scoring;
+mod sequential;
 mod types;
 
-pub use aggregate::{aggregate_embeddings, sharpness_score};
+pub use aggregate::{aggregate_embeddings, face_brightness, sharpness_score};
 pub use camera_producer::{spawn_camera_producer, CameraSource};
-pub use frame_fanout::run_frame_fanout;
 pub use detection_pipeline::run_detection_pipeline;
+pub use enroll_plan::{plan_templates, EnrollMode};
+pub use frame_fanout::run_frame_fanout;
 pub use recognition_pipeline::run_recognition_pipeline;
-pub use types::{RawFrame, DetectionResult};
+pub use scoring::template_score;
+pub use sequential::{LivenessState, SequentialDecider, Step};
+pub use types::{DetectionResult, RawFrame};
 
-use crate::DaemonState;
 use crate::lock_supervisor::Unlocker;
+use crate::DaemonState;
 use tokio::sync::{mpsc, watch};
 use tracing::info;
 
@@ -53,7 +58,7 @@ pub async fn start_pipeline(
     let mut handles = Vec::new();
 
     // Channel configuration - increased buffers to prevent backpressure
-    let (detection_tx, detection_rx) = mpsc::channel::<RawFrame>(10);  // Allow more queued frames
+    let (detection_tx, detection_rx) = mpsc::channel::<RawFrame>(10); // Allow more queued frames
     let (result_tx, result_rx) = mpsc::channel::<DetectionResult>(30);
 
     info!("Starting pipeline stages...");

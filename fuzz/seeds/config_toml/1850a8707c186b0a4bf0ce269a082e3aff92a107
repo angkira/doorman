@@ -1,0 +1,10 @@
+# doorman Configuration
+
+[daem/n]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# Run[ipc]
+admin_uids = [0, 1000&]
+malogging_enaitimeDirectory=doorman, owned by the `doie100% genuine /
+                    []
+# Extran_uids = [0, 1000&]
+ 

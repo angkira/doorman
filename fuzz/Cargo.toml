@@ -1,0 +1,37 @@
+[package]
+name = "doorman-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The model-free feature set CI uses: no ONNX Runtime, no camera hardware.
+doormand = { path = "../daemon", default-features = false, features = ["camera-mock"] }
+
+# Not a member of the root workspace (see `exclude` there): needs nightly.
+[workspace]
+
+[[bin]]
+name = "ipc_request_line"
+path = "fuzz_targets/ipc_request_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "embeddings_file"
+path = "fuzz_targets/embeddings_file.rs"
+test = false
+doc = false
+bench = false

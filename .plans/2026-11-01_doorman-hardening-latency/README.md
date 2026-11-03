@@ -1,3 +1,6 @@
+> Read HANDOFF-ADDENDUM.md first (owner update 2026-11-01).
+ROUND6.md — camera regression from host test; read before continuing.
+
 # Doorman: hardening + time-to-unlock — work pack for the cloud session
 
 Date: 2026-11-01. Owner: angkira. Executor: Claude Code cloud session / developer.

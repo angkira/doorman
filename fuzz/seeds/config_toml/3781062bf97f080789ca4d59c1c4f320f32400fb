@@ -1,0 +1,19 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """"/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[data= false
+# Raw frmlame persistence stays off; M1 writes embeddings-only records.
+keep_raw_frames = false
+raw_frame_bundle_size = liveions.
+#
+# NOTE: the active model paramports GPU)
+bac[data= false
+# Raw frmlame persistence stays off; M1 writes embeddings-only records.
+keep_raw_frames = false
+raw_frame_bundle_size = liveions.
+#
+# NOTE: the active model parameters live in codeeters live in code (daemon `ml/ld = 0.4

@@ -2,6 +2,8 @@
 name = "doormand"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [[bin]]
 name = "doormand"
@@ -56,7 +58,7 @@ clap = { workspace = true }
 #   - backend-ort-cuda  -> ort/cuda + download-binaries
 # This keeps `download-binaries` and `load-dynamic` from being enabled together
 # (which would download a CPU dylib that the ROCm dynamic-load path then ignores).
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
 
 # ROCm pre-flight only: dlopen libamdhip64 to ask hipGetDeviceCount whether HIP
 # sees a usable GPU BEFORE registering the ROCm EP (ORT's ROCm init does an
@@ -94,7 +96,7 @@ signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
 futures = "0.3"
 
 # Permissions
-nix = { version = "0.31", features = ["user", "fs"] }
+nix = { version = "0.31", features = ["user", "fs", "signal"] }
 
 # Timestamps
 chrono = "0.4"

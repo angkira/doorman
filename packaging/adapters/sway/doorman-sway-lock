@@ -9,7 +9,19 @@ swaylock_bin="${SWAYLOCK:-swaylock}"
 gtklock_config="${DOORMAN_GTKLOCK_CONFIG:-$HOME/.config/gtklock/config.ini}"
 swaylock_config="${DOORMAN_SWAYLOCK_CONFIG:-$HOME/.config/swaylock/config}"
 backend="${DOORMAN_LOCK_BACKEND:-auto}"
-log="${DOORMAN_SWAY_LOG:-/tmp/doorman-sway-lock.log}"
+
+# Log under $XDG_RUNTIME_DIR/doorman (a 0700 directory owned by us), never a
+# predictable path in /tmp. Without a safe directory, discard the log: locking
+# the screen must not depend on it. DOORMAN_SWAY_LOG overrides explicitly.
+log="${DOORMAN_SWAY_LOG:-/dev/null}"
+if [ -z "${DOORMAN_SWAY_LOG:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    log_dir="$XDG_RUNTIME_DIR/doorman"
+    (umask 077 && mkdir -p "$log_dir") 2>/dev/null || true
+    if [ -d "$log_dir" ] && [ ! -L "$log_dir" ] && [ -O "$log_dir" ]; then
+        chmod 700 "$log_dir" 2>/dev/null || true
+        log="$log_dir/sway-lock.log"
+    fi
+fi
 
 printf '%s lock user=%s socket=%s\n' "$(date -Is)" "$user" "$socket" >> "$log"
 

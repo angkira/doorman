@@ -32,7 +32,8 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use doorman_shared::{
-    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage, UserInfo,
+    DaemonInfo, EnrollmentPhase, Request, RequestEnvelope, Response, ResponseData, StreamMessage,
+    UserInfo,
 };
 
 // Self-contained installer (doctor / install / uninstall). Kept in a sibling
@@ -41,6 +42,10 @@ use doorman_shared::{
 #[path = "../install.rs"]
 mod install;
 use install::{DesktopChoice, EpChoice, InstallOpts, PamScope, UninstallOpts};
+
+// Event-driven unlock helper for screen lockers (`doorman unlock-watch`).
+#[path = "../unlock_watch.rs"]
+mod unlock_watch;
 
 /// Default runtime directory when neither `--socket`/`--runtime-dir` nor
 /// `$XDG_RUNTIME_DIR` is set. Matches how the daemon is run on this Mac.
@@ -80,11 +85,46 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigAction {
+    /// Parse and validate the config and report unknown or deprecated keys.
+    /// Exit codes: 0 ok, 1 invalid, 2 valid but unknown/deprecated keys.
+    Check {
+        /// Config file to check (default: the file the daemon would load).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Print every config key with its default as Markdown (docs/CONFIG.md).
+    DumpDefaults,
+}
+
+#[derive(Subcommand)]
+enum DatasetAction {
+    /// Delete dataset files (attempt/label shards, capture packs) older than N days.
+    /// Root only; never run automatically.
+    Purge {
+        /// Delete entries whose UTC day is more than this many days old
+        /// (default: `[dataset] retention_days`).
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u32>,
+        /// List what would be deleted and delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Data directory containing dataset/ (default: `[daemon] data_dir`).
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Enroll a new user (records from the daemon's current camera source).
     Enroll {
         /// Username to enroll.
         username: String,
+        /// Add templates (for example another lighting condition) to the
+        /// existing ones without evicting any.
+        #[arg(long)]
+        add: bool,
     },
     /// List all enrolled users.
     List,
@@ -96,7 +136,8 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// Authenticate a user against the live camera (alias: auth).
+    /// Authenticate a user against the live camera (alias: auth). Exit code: 0
+    /// recognized, 2 not recognized (output starts with `!recognized:`), 1 error.
     #[command(alias = "auth")]
     Test {
         /// Username to authenticate.
@@ -104,6 +145,26 @@ enum Command {
     },
     /// Show daemon status (version, uptime, camera, models, enrolled users).
     Status,
+    /// Unlock a screen locker on face match: waits on the daemon (WaitForMatch)
+    /// and SIGTERMs the given locker PID. Exit codes: see docs/unlock-path.md.
+    UnlockWatch {
+        /// User whose face unlocks the session.
+        #[arg(long)]
+        user: String,
+        /// PID of the locker process the lock script started.
+        #[arg(long, value_name = "PID")]
+        locker_pid: i32,
+        /// Expected process name of the locker (/proc/<pid>/comm); nothing is
+        /// signalled if the PID now belongs to another process.
+        #[arg(long, value_name = "NAME")]
+        locker_name: Option<String>,
+        /// Length of one WaitForMatch call; calls are re-issued while the locker lives.
+        #[arg(long, value_name = "MS", default_value_t = unlock_watch::DEFAULT_WAIT_TIMEOUT_MS)]
+        timeout_ms: u64,
+        /// Time the locker gets to exit after SIGTERM before SIGKILL.
+        #[arg(long, value_name = "MS", default_value_t = unlock_watch::DEFAULT_TERM_GRACE_MS)]
+        term_grace_ms: u64,
+    },
     /// Build an offline self-improvement candidate from the attempt-log dataset.
     Train {
         /// Data directory containing dataset/attempts-*.jsonl and labels-*.jsonl.
@@ -143,9 +204,21 @@ enum Command {
         #[arg(long, default_value_t = 0.01)]
         max_frr_regression: f32,
     },
+    /// Manage stored dataset files (see docs/datasets.md).
+    Dataset {
+        #[command(subcommand)]
+        action: DatasetAction,
+    },
+    /// Validate or document the daemon config (see docs/CONFIG.md).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
-    /// Install doorman: daemon service, models, config, and (opt-in) PAM integration.
+    /// From-source developer installer (rebuilds from a checkout; daemon service,
+    /// models, config, opt-in PAM). Not for upgrading a packaged (.deb) install:
+    /// use the package for that.
     Install {
         /// Print every planned action and mutate nothing.
         #[arg(long)]
@@ -153,19 +226,23 @@ enum Command {
         /// Skip the confirmation prompt.
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Auto-detect the execution provider (default).
-        #[arg(long, conflicts_with_all = ["cpu", "rocm", "ncnn"])]
+        /// Default: CPU on Linux (CoreML on macOS). A GPU is never picked
+        /// automatically; use --rocm, --cuda or --ncnn to opt in.
+        #[arg(long, conflicts_with_all = ["cpu", "rocm", "cuda", "ncnn"])]
         auto: bool,
         /// Force the CPU backend.
-        #[arg(long, conflicts_with_all = ["auto", "rocm", "ncnn"])]
+        #[arg(long, conflicts_with_all = ["auto", "rocm", "cuda", "ncnn"])]
         cpu: bool,
-        /// Force the AMD ROCm backend (iGPU).
-        #[arg(long, conflicts_with_all = ["auto", "cpu", "ncnn"])]
+        /// Opt in to the AMD ROCm backend (iGPU).
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "cuda", "ncnn"])]
         rocm: bool,
+        /// Opt in to the NVIDIA CUDA backend.
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm", "ncnn"])]
+        cuda: bool,
         /// Force the ncnn-Vulkan hybrid: depth-liveness on the iGPU via Vulkan,
         /// detection + recognition on the CPU (ORT). Builds libncnn + converts the
         /// depth model at install time.
-        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm"])]
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm", "cuda"])]
         ncnn: bool,
         /// Integrate with screen unlock only (default, safest).
         #[arg(long, conflicts_with_all = ["login", "sudo", "no_pam"])]
@@ -263,16 +340,42 @@ fn main() {
     let sockets = Sockets::resolve(cli.socket.clone(), cli.runtime_dir.clone());
 
     let result = match &cli.command {
-        Command::Enroll { username } => cmd_enroll(&sockets, username, cli.json),
+        Command::Enroll { username, add } => cmd_enroll(&sockets, username, *add, cli.json),
         Command::List => cmd_list(&sockets, cli.json),
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
-        Command::Test { username } => cmd_test(&sockets, username, cli.json),
+        Command::Test { username } => cmd_test(&sockets, username, cli.json).map(|code| {
+            if code != TEST_EXIT_RECOGNIZED {
+                std::process::exit(code);
+            }
+        }),
         Command::Status => cmd_status(&sockets, cli.json),
+        Command::UnlockWatch {
+            user,
+            locker_pid,
+            locker_name,
+            timeout_ms,
+            term_grace_ms,
+        } => std::process::exit(
+            unlock_watch::run(&unlock_watch::WatchArgs {
+                socket: sockets.command.clone(),
+                user: user.clone(),
+                locker_pid: *locker_pid,
+                locker_name: locker_name.clone(),
+                timeout_ms: *timeout_ms,
+                term_grace: Duration::from_millis(*term_grace_ms),
+            })
+            .code(),
+        ),
         Command::Train {
             data_dir,
             models_dir,
             min_confirmed,
-        } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
+        } => cmd_train(
+            data_dir.as_deref(),
+            models_dir.as_deref(),
+            *min_confirmed,
+            cli.json,
+        ),
         Command::DatasetReport { data_dir } => cmd_dataset_report(data_dir.as_deref(), cli.json),
         Command::Promote {
             candidate_dir,
@@ -290,6 +393,25 @@ fn main() {
             *max_frr_regression,
             cli.json,
         ),
+        Command::Dataset { action } => match action {
+            DatasetAction::Purge {
+                older_than,
+                dry_run,
+                data_dir,
+            } => cmd_dataset_purge(*older_than, *dry_run, data_dir.as_deref()),
+        },
+        Command::Config { action } => match action {
+            ConfigAction::Check { config } => {
+                std::process::exit(cmd_config_check(config.as_deref()))
+            }
+            ConfigAction::DumpDefaults => {
+                print!(
+                    "{}",
+                    doorman_shared::config_check::render_reference_markdown()
+                );
+                Ok(())
+            }
+        },
         Command::Doctor => cmd_doctor(),
         Command::Install {
             dry_run,
@@ -297,6 +419,7 @@ fn main() {
             auto: _,
             cpu,
             rocm,
+            cuda,
             ncnn,
             screen_unlock: _,
             login,
@@ -304,7 +427,19 @@ fn main() {
             no_pam,
             desktop,
             auto_unlock,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, desktop, *auto_unlock),
+        } => cmd_install(
+            *dry_run,
+            *yes,
+            *cpu,
+            *rocm,
+            *cuda,
+            *ncnn,
+            *login,
+            *sudo,
+            *no_pam,
+            desktop,
+            *auto_unlock,
+        ),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
         Command::Preview { args } => cmd_preview(args),
     };
@@ -360,6 +495,55 @@ fn cmd_train(
     Ok(())
 }
 
+fn cmd_dataset_purge(
+    older_than: Option<u32>,
+    dry_run: bool,
+    data_dir: Option<&Path>,
+) -> Result<(), CliError> {
+    // Dataset files are root-owned 0700; refuse early with a clear message
+    // instead of failing half way through a deletion.
+    if !nix::unistd::geteuid().is_root() {
+        return Err(CliError::new(
+            "dataset purge must run as root (the dataset directory is private to the daemon); try: sudo doorman dataset purge ...",
+        ));
+    }
+    let config = doorman_shared::Config::load()
+        .map_err(|e| CliError::new(format!("cannot load config: {e}")))?;
+    let days = older_than.unwrap_or(config.dataset.retention_days);
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.daemon.data_dir));
+    let dataset_dir = data_dir.join("dataset");
+    let today = chrono::Utc::now().date_naive();
+    let entries = doormand::dataset_purge::purge_candidates(&dataset_dir, today, days)
+        .map_err(|e| CliError::new(format!("cannot scan {}: {e}", dataset_dir.display())))?;
+    for path in &entries {
+        println!(
+            "{}{}",
+            if dry_run {
+                "would delete "
+            } else {
+                "deleting "
+            },
+            path.display()
+        );
+    }
+    if dry_run {
+        println!(
+            "{} entries older than {days} days (dry run, nothing deleted)",
+            entries.len()
+        );
+        return Ok(());
+    }
+    let removed = doormand::dataset_purge::delete_entries(&dataset_dir, &entries)
+        .map_err(|e| CliError::new(format!("delete failed: {e}")))?;
+    println!(
+        "deleted {removed} entries older than {days} days from {}",
+        dataset_dir.display()
+    );
+    Ok(())
+}
+
 fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliError> {
     let data_dir = data_dir
         .map(PathBuf::from)
@@ -382,7 +566,10 @@ fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliErro
         println!("  false negative attempts: {}", report.false_negative);
         println!("  rejected attempts: {}", report.rejected);
         println!("  suspected spoof attempts: {}", report.suspected_spoof);
-        println!("  proactive unlocked attempts: {}", report.proactive_unlocked);
+        println!(
+            "  proactive unlocked attempts: {}",
+            report.proactive_unlocked
+        );
         println!("  unknown attempts: {}", report.unknown);
         println!("  matched attempts: {}", report.matched_attempts);
         println!("  unlabeled attempts: {}", report.unlabeled_attempts);
@@ -447,6 +634,7 @@ fn cmd_install(
     yes: bool,
     cpu: bool,
     rocm: bool,
+    cuda: bool,
     ncnn: bool,
     login: bool,
     sudo: bool,
@@ -458,6 +646,8 @@ fn cmd_install(
         EpChoice::Cpu
     } else if rocm {
         EpChoice::Rocm
+    } else if cuda {
+        EpChoice::Cuda
     } else if ncnn {
         EpChoice::Ncnn
     } else {
@@ -549,7 +739,7 @@ fn send_request(
         .map_err(|e| CliError::new(format!("failed to set write timeout: {e}")))?;
 
     let mut writer = stream;
-    let request_json = serde_json::to_string(request)
+    let request_json = serde_json::to_string(&RequestEnvelope::new(request.clone()))
         .map_err(|e| CliError::new(format!("failed to serialize request: {e}")))?;
     writeln!(writer, "{request_json}")
         .map_err(|e| CliError::new(format!("failed to send request: {e}")))?;
@@ -572,8 +762,25 @@ fn send_request(
         ));
     }
 
-    serde_json::from_str(line.trim())
-        .map_err(|e| CliError::new(format!("failed to parse daemon response: {e} (raw: {})", line.trim())))
+    let response: Response = serde_json::from_str(line.trim()).map_err(|e| {
+        CliError::new(format!(
+            "failed to parse daemon response: {e} (raw: {})",
+            line.trim()
+        ))
+    })?;
+    match response {
+        Response::Denied { reason } => Err(CliError::new(format!("denied by daemon: {reason}"))),
+        Response::RateLimited { retry_after_s } => Err(CliError::new(format!(
+            "rate limited by daemon: retry in {retry_after_s}s"
+        ))),
+        Response::UnsupportedProtocol {
+            reason,
+            supported_version,
+        } => Err(CliError::new(format!(
+            "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
+        ))),
+        other => Ok(other),
+    }
 }
 
 fn print_raw(response: &Response) -> Result<(), CliError> {
@@ -581,6 +788,60 @@ fn print_raw(response: &Response) -> Result<(), CliError> {
         .map_err(|e| CliError::new(format!("failed to serialize response: {e}")))?;
     println!("{json}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// config check
+// ---------------------------------------------------------------------------
+
+/// Exit code: config valid, no unknown or deprecated keys.
+const CONFIG_EXIT_OK: i32 = 0;
+/// Exit code: config unreadable, unparsable or failing validation.
+const CONFIG_EXIT_INVALID: i32 = 1;
+/// Exit code: config valid but has unknown or deprecated keys.
+const CONFIG_EXIT_UNKNOWN_KEYS: i32 = 2;
+
+fn cmd_config_check(explicit: Option<&Path>) -> i32 {
+    let path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => match doorman_shared::Config::find_config_path() {
+            Some(p) => p,
+            None => {
+                println!("no config file found in the standard locations; built-in defaults apply");
+                return CONFIG_EXIT_OK;
+            }
+        },
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("invalid: cannot read {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    let report = match doorman_shared::config_check::check_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("invalid: {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    println!(
+        "{}: valid (schema_version {})",
+        path.display(),
+        report.config.schema_version
+    );
+    for key in &report.unknown_keys {
+        println!("unknown key: {key}");
+    }
+    for (key, hint) in &report.deprecated_keys {
+        println!("deprecated key: {key} ({hint})");
+    }
+    if report.unknown_keys.is_empty() && report.deprecated_keys.is_empty() {
+        CONFIG_EXIT_OK
+    } else {
+        CONFIG_EXIT_UNKNOWN_KEYS
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,13 +873,20 @@ fn print_status(info: &DaemonInfo) {
     println!("  uptime         : {uptime}");
     println!(
         "  camera         : {}",
-        if info.camera_available { "available" } else { "unavailable" }
+        if info.camera_available {
+            "available"
+        } else {
+            "unavailable"
+        }
     );
     println!(
         "  models loaded  : {}",
         if info.models_loaded { "yes" } else { "no" }
     );
     println!("  enrolled users : {}", info.enrolled_users);
+    if let Some(ort) = &info.ort_runtime {
+        println!("  onnx runtime   : {ort}");
+    }
 }
 
 fn format_uptime(secs: u64) -> String {
@@ -699,12 +967,7 @@ fn print_user_table(users: &[UserInfo]) {
 // remove
 // ---------------------------------------------------------------------------
 
-fn cmd_remove(
-    sockets: &Sockets,
-    username: &str,
-    yes: bool,
-    json: bool,
-) -> Result<(), CliError> {
+fn cmd_remove(sockets: &Sockets, username: &str, yes: bool, json: bool) -> Result<(), CliError> {
     if !yes && !json {
         print!("Remove enrollment for '{username}'? [y/N] ");
         std::io::stdout()
@@ -733,7 +996,10 @@ fn cmd_remove(
     }
     match response {
         Response::Success { message, .. } => {
-            println!("{}", message.unwrap_or_else(|| format!("Removed user: {username}")));
+            println!(
+                "{}",
+                message.unwrap_or_else(|| format!("Removed user: {username}"))
+            );
             Ok(())
         }
         Response::Failure { reason } => Err(CliError::new(reason)),
@@ -745,17 +1011,40 @@ fn cmd_remove(
 // test / auth
 // ---------------------------------------------------------------------------
 
-fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliError> {
+/// `doorman test` exit code: the face was recognized.
+const TEST_EXIT_RECOGNIZED: i32 = 0;
+/// `doorman test` exit code: CLI error (daemon unreachable, denied or unexpected
+/// response); the same code `error:` exits with.
+const TEST_EXIT_ERROR: i32 = 1;
+/// `doorman test` exit code: the daemon answered but did not authenticate the
+/// user (`Response::Failure`, e.g. no match or camera unavailable). Distinct
+/// from `TEST_EXIT_ERROR` so scripts can tell "not recognized" from "daemon
+/// unreachable".
+const TEST_EXIT_NOT_RECOGNIZED: i32 = 2;
+
+/// Exit code for the daemon's answer to `doorman test`; stdout is unaffected.
+fn test_exit_code(response: &Response) -> i32 {
+    match response {
+        Response::Success { .. } => TEST_EXIT_RECOGNIZED,
+        Response::Failure { .. } => TEST_EXIT_NOT_RECOGNIZED,
+        _ => TEST_EXIT_ERROR,
+    }
+}
+
+fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<i32, CliError> {
     let response = send_request(
         &sockets.command,
         &Request::Authenticate {
             username: username.to_string(),
+            service: None,
+            tty: None,
         },
         // Daemon captures AUTH_FRAMES frames; allow a little headroom over DEFAULT.
         Duration::from_secs(15),
     )?;
     if json {
-        return print_raw(&response);
+        print_raw(&response)?;
+        return Ok(test_exit_code(&response));
     }
     match response {
         Response::Success { message, .. } => {
@@ -765,14 +1054,14 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
             } else {
                 println!("recognized: {username} ({detail})");
             }
-            Ok(())
+            Ok(TEST_EXIT_RECOGNIZED)
         }
-        // Authentication failure is a normal, expected outcome — report it but do
-        // not treat it as a CLI error (exit 0) so scripts can distinguish "not
-        // recognized" from "daemon unreachable".
+        // Authentication failure is a normal, expected outcome: the line is not an
+        // `error:`, but the exit code is non-zero so exit-code-only consumers are
+        // not fooled by a rejected or camera-less attempt.
         Response::Failure { reason } => {
             println!("!recognized: {username} ({reason})");
-            Ok(())
+            Ok(TEST_EXIT_NOT_RECOGNIZED)
         }
         other => Err(CliError::new(format!("unexpected response: {other:?}"))),
     }
@@ -782,7 +1071,7 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
 // enroll
 // ---------------------------------------------------------------------------
 
-fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliError> {
+fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Result<(), CliError> {
     // Start a background progress watcher on the debug socket. Enrollment
     // progress is published there as StreamMessage::Enrollment frames while the
     // command connection below blocks waiting for the final reply.
@@ -799,12 +1088,14 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
 
     if !json {
         println!("Enrolling '{username}' — look at the camera...");
+        println!("Hint: slowly turn your head a little and vary the lighting; use --add for another lighting condition.");
     }
 
     let response = send_request(
         &sockets.command,
         &Request::Enroll {
             username: username.to_string(),
+            add,
         },
         ENROLL_TIMEOUT,
     );
@@ -821,20 +1112,27 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
     }
     match response {
         Response::Success { message, .. } => {
-            println!(
-                "\n✓ Enrolled '{username}'. {}",
-                message.unwrap_or_default()
-            );
+            println!("\n✓ Enrolled '{username}'. {}", message.unwrap_or_default());
             Ok(())
         }
-        Response::Failure { reason } => Err(CliError::new(format!(
-            "enrollment failed: {reason}"
-        ))),
+        Response::Failure { reason } => Err(CliError::new(format!("enrollment failed: {reason}"))),
         // The daemon never streams Progress on the command socket, but handle it
         // defensively so an unexpected frame doesn't crash the CLI.
-        Response::Progress { message, current, total } => Err(CliError::new(format!(
+        Response::Progress {
+            message,
+            current,
+            total,
+        } => Err(CliError::new(format!(
             "unexpected progress on command socket: {message} ({current}/{total})"
         ))),
+        // send_request already turns these into errors; arm kept for exhaustiveness.
+        Response::Denied { .. }
+        | Response::RateLimited { .. }
+        | Response::UnsupportedProtocol { .. }
+        | Response::Matched { .. }
+        | Response::NoMatch { .. } => {
+            Err(CliError::new(format!("unexpected response: {response:?}")))
+        }
     }
 }
 
@@ -900,4 +1198,45 @@ fn render_progress(phase: &EnrollmentPhase, current: usize, total: usize) {
     // \r keeps the bar on one line; stdout flush so it updates live.
     print!("\r  {label} [{bar}] {current}/{total}");
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use doorman_shared::NoMatchReason;
+
+    #[test]
+    fn test_exit_code_is_zero_only_for_a_recognized_face() {
+        let table = [
+            (
+                Response::Success {
+                    message: None,
+                    data: None,
+                },
+                TEST_EXIT_RECOGNIZED,
+            ),
+            (
+                Response::Failure {
+                    reason: "Camera not available (no frames)".into(),
+                },
+                TEST_EXIT_NOT_RECOGNIZED,
+            ),
+            (
+                Response::Denied {
+                    reason: "peer uid".into(),
+                },
+                TEST_EXIT_ERROR,
+            ),
+            (Response::RateLimited { retry_after_s: 1 }, TEST_EXIT_ERROR),
+            (
+                Response::NoMatch {
+                    reason: NoMatchReason::Timeout,
+                },
+                TEST_EXIT_ERROR,
+            ),
+        ];
+        for (response, want) in table {
+            assert_eq!(test_exit_code(&response), want, "{response:?}");
+        }
+    }
 }

@@ -1,0 +1,8 @@
+[ipc]
+admin_!!!!!!!!!!!!!!!!!!!5
+
+[ipc]
+# IPC peer-credeminute (0 = unlimited).
+max_autw_frame_bundle_size = 5
+max_capture_packs_preprocessing56
+filter_type = "lanczos3" 

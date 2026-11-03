@@ -1,0 +1,25 @@
+
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Open command connections per peer uid (0 = unlimited; global cap is 64).
+max_connections_per_uid = 8
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Frame/debug stream sockets are 0600 by default. Set a group to make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_framls = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are wri
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   -[#ee

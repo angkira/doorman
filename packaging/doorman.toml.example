@@ -19,9 +19,17 @@ debug_mode   = false
 # V4L2 device index (/dev/video0 -> 0). The lean Linux build uses the
 # camera-v4l2 or camera-gstreamer backend selected at compile time.
 device_index = 0
+# Pin the physical camera by a stable node instead of the index, e.g.
+# device_path = "/dev/v4l/by-id/usb-Vendor_Camera-video-index0"
+# Virtual devices (v4l2loopback, vivid) are refused unless this is true;
+# keep it false in production.
+allow_virtual_devices = false
 width  = 1280
 height = 720
 fps    = 30
+# "auto" = native V4L2 (accepted only after a real first frame), then ffmpeg.
+# "ffmpeg" skips the native backend; "native" disables the ffmpeg fallback.
+backend = "auto"
 
 [ml]
 backend    = "ort"
@@ -50,7 +58,9 @@ min_face_area_frac   = 0.005
 # persist detector-positive raw face frames before recognition, capped here.
 logging_enabled = false
 keep_raw_frames = false
-raw_frame_bundle_size = 10
-max_capture_packs_per_day = 500
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
 raw_frame_jpeg_quality = 92
 max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14

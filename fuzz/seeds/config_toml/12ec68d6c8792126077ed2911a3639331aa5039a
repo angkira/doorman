@@ -1,0 +1,11 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command sockght = 256
+filter_type = "lanczos3"  # nearest, nifasnet_v2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consumed% by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

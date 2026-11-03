@@ -1,0 +1,10 @@
+schema_vWersion = esio# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socke match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorma).sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[carecognition.min_face_a% false-accept under Phas# doorman Configuratei-

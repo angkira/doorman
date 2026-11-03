@@ -87,21 +87,73 @@ pub fn sharpness_score(image: &DynamicImage) -> f32 {
     values.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / values.len() as f32
 }
 
+/// Mean luma (0..=255) of the face region `bbox` = (x, y, w, h), all normalized
+/// to the image. Samples every `BRIGHTNESS_STRIDE`-th pixel in both axes; a
+/// degenerate box falls back to the whole image. Used by the optional
+/// `[recognition] min_brightness` gate and logged for liveness calibration.
+pub fn face_brightness(image: &DynamicImage, bbox: (f32, f32, f32, f32)) -> f32 {
+    const BRIGHTNESS_STRIDE: usize = 4;
+    let (iw, ih) = (image.width(), image.height());
+    let to_px = |v: f32, max: u32| (v.clamp(0.0, 1.0) * max as f32) as u32;
+    let (x0, y0) = (to_px(bbox.0, iw), to_px(bbox.1, ih));
+    let (x1, y1) = (to_px(bbox.0 + bbox.2, iw), to_px(bbox.1 + bbox.3, ih));
+    let (x0, y0, w, h) = if x1 > x0 && y1 > y0 {
+        (x0, y0, x1 - x0, y1 - y0)
+    } else {
+        (0, 0, iw, ih)
+    };
+    let gray = image.crop_imm(x0, y0, w, h).to_luma8();
+    let (sum, count) = gray
+        .rows()
+        .step_by(BRIGHTNESS_STRIDE)
+        .flat_map(|row| row.step_by(BRIGHTNESS_STRIDE))
+        .fold((0.0f64, 0u64), |(s, c), px| (s + px[0] as f64, c + 1));
+    if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64) as f32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_brightness_measures_only_the_face_box() {
+        use image::{DynamicImage, GrayImage, Luma};
+        // Left half dark (20), right half bright (200).
+        let mut img = GrayImage::new(40, 40);
+        for (x, _, px) in img.enumerate_pixels_mut() {
+            *px = Luma([if x < 20 { 20u8 } else { 200u8 }]);
+        }
+        let img = DynamicImage::ImageLuma8(img);
+        let dark = face_brightness(&img, (0.0, 0.0, 0.5, 1.0));
+        let bright = face_brightness(&img, (0.5, 0.0, 0.5, 1.0));
+        assert!((dark - 20.0).abs() < 1e-3, "{dark}");
+        assert!((bright - 200.0).abs() < 1e-3, "{bright}");
+        // Degenerate box: whole image mean.
+        let whole = face_brightness(&img, (0.5, 0.5, 0.0, 0.0));
+        assert!((whole - 110.0).abs() < 1.0, "{whole}");
+    }
 
     fn cosine(a: &[f32], b: &[f32]) -> f32 {
         let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
         let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+        if na == 0.0 || nb == 0.0 {
+            0.0
+        } else {
+            dot / (na * nb)
+        }
     }
 
     fn normalize(mut v: Vec<f32>) -> Vec<f32> {
         let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if n > 0.0 {
-            for x in v.iter_mut() { *x /= n; }
+            for x in v.iter_mut() {
+                *x /= n;
+            }
         }
         v
     }
@@ -116,7 +168,10 @@ mod tests {
         let v = normalize(vec![1.0, 2.0, 3.0, 4.0]);
         let agg = aggregate_embeddings(std::slice::from_ref(&v)).unwrap();
         let norm: f32 = agg.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "result must be unit-norm, got {norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "result must be unit-norm, got {norm}"
+        );
         for (a, b) in agg.iter().zip(v.iter()) {
             assert!((a - b).abs() < 1e-5);
         }
@@ -129,7 +184,10 @@ mod tests {
         let b = normalize(vec![0.95, 0.05, 0.12, 0.04]);
         let agg = aggregate_embeddings(&[a, b]).unwrap();
         let norm: f32 = agg.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "aggregated vector must be unit-norm, got {norm}");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "aggregated vector must be unit-norm, got {norm}"
+        );
     }
 
     #[test]

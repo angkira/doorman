@@ -1,5 +1,5 @@
-/// Unit tests for coordinate transformations in the pipeline
-/// Tests the flow: BlazeFace output -> pixel coords -> preview display
+//! Unit tests for coordinate transformations in the pipeline.
+//! Tests the flow: BlazeFace output -> pixel coords -> preview display
 
 #[cfg(test)]
 mod tests {
@@ -12,18 +12,18 @@ mod tests {
         // BlazeFace detects face at center of 512x512 space
         let blazeface_bbox = (200.0, 150.0, 100.0, 100.0); // (x, y, w, h) in 512x512
         let camera_res = (1024, 720);
-        
+
         // Scale from 512x512 to camera resolution
         let scale_x = camera_res.0 as f32 / 512.0;
         let scale_y = camera_res.1 as f32 / 512.0;
-        
+
         let camera_bbox = (
             blazeface_bbox.0 * scale_x,
             blazeface_bbox.1 * scale_y,
             blazeface_bbox.2 * scale_x,
             blazeface_bbox.3 * scale_y,
         );
-        
+
         // Expected: (400, 210, 200, 140) approximately
         assert_relative_eq!(camera_bbox.0, 400.0, epsilon = 1.0);
         assert_relative_eq!(camera_bbox.1, 210.9375, epsilon = 1.0);
@@ -35,14 +35,14 @@ mod tests {
     fn test_shrink_bbox_for_tight_fit() {
         let bbox = (400.0, 210.0, 200.0, 140.0);
         let shrink = 0.25;
-        
+
         let tight_bbox = (
             bbox.0 + bbox.2 * shrink,      // x + w * 0.25
             bbox.1 + bbox.3 * shrink,      // y + h * 0.25
             bbox.2 * (1.0 - 2.0 * shrink), // w * 0.5
             bbox.3 * (1.0 - 2.0 * shrink), // h * 0.5
         );
-        
+
         assert_relative_eq!(tight_bbox.0, 450.0, epsilon = 0.1);
         assert_relative_eq!(tight_bbox.1, 245.0, epsilon = 0.1);
         assert_relative_eq!(tight_bbox.2, 100.0, epsilon = 0.1);
@@ -54,18 +54,18 @@ mod tests {
         // Simulate full pipeline: BlazeFace -> Camera coords -> Preview
         let blazeface_bbox = (256.0, 256.0, 100.0, 100.0); // Center of 512x512
         let camera_res = (1024, 720);
-        
+
         // Step 1: Scale from BlazeFace space (512x512) to camera resolution
         let scale_x = camera_res.0 as f32 / 512.0;
         let scale_y = camera_res.1 as f32 / 512.0;
-        
+
         let camera_bbox = (
             blazeface_bbox.0 * scale_x,
             blazeface_bbox.1 * scale_y,
             blazeface_bbox.2 * scale_x,
             blazeface_bbox.3 * scale_y,
         );
-        
+
         // Step 2: Shrink bbox for tight fit (no padding)
         let shrink = 0.25;
         let tight_bbox = (
@@ -74,7 +74,7 @@ mod tests {
             camera_bbox.2 * (1.0 - 2.0 * shrink),
             camera_bbox.3 * (1.0 - 2.0 * shrink),
         );
-        
+
         // Result should be approximately center of 1024x720 with 100x70 size
         // Derivation: camera_bbox.0 = 256*2 = 512, camera_bbox.2 = 100*2 = 200
         //   tight_bbox.0 = 512 + 200*0.25 = 512 + 50 = 562

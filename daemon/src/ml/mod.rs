@@ -5,6 +5,9 @@ mod model_config;
 /// routing and the `doorman-depthd` sidecar binary). Public so the bin can use it.
 pub mod depth_ipc;
 
+/// Locate the ONNX Runtime shared library mapped into this process.
+pub mod ort_probe;
+
 #[cfg(feature = "_ort")]
 mod align;
 
@@ -26,12 +29,17 @@ pub mod ncnn_backend;
 #[cfg(all(feature = "_ort", feature = "backend-ncnn"))]
 pub mod ncnn_hybrid;
 
+mod tta;
+
 #[cfg(test)]
 mod tests;
 
 #[allow(unused_imports)]
-pub use model_config::{DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig};
+pub use model_config::{
+    DepthPadConfig, DetectorConfig, LivenessConfig, ModelSet, RecognizerConfig,
+};
 
+use crate::liveness::LivenessOutcome;
 use anyhow::Result;
 #[allow(dead_code)]
 pub use backend::Face;
@@ -49,6 +57,9 @@ pub struct MLPipeline {
 }
 
 impl MLPipeline {
+    // Without an ORT feature the only backend arm returns early with an error,
+    // so the code after the match (and the match binding) is intentionally dead.
+    #[cfg_attr(not(feature = "_ort"), allow(unreachable_code, unused_variables))]
     pub async fn new(config: &Config) -> Result<Self> {
         let models_dir = PathBuf::from(&config.ml.models_dir);
 
@@ -115,10 +126,82 @@ impl MLPipeline {
         }
     }
 
+    /// Build a pipeline around an arbitrary backend (tests with a mock backend).
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: Arc<dyn MLBackend>, config: &Config) -> Self {
+        Self {
+            backend,
+            config: config.clone(),
+        }
+    }
+
+    /// Run one backend call on tokio's blocking pool instead of an async worker.
+    ///
+    /// ONNX inference is CPU-bound and the backend takes a std `Mutex` on its
+    /// session pool, so calling it directly from an async task can park a
+    /// runtime worker for the whole inference (and stall `Status` and every
+    /// other connection when several attempts overlap). The backend futures
+    /// never await real I/O, so `block_on` on the blocking thread is safe (same
+    /// reasoning as `detect_face_sync`). The image is cloned: the blocking task
+    /// must be `'static`.
+    async fn run_blocking<T, F>(&self, image: &DynamicImage, call: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn MLBackend, &DynamicImage) -> Result<T> + Send + 'static,
+    {
+        let backend = self.backend.clone();
+        let image = image.clone();
+        tokio::task::spawn_blocking(move || call(backend.as_ref(), &image))
+            .await
+            .map_err(|e| anyhow::anyhow!("inference task failed: {e}"))?
+    }
+
+    async fn detect_blocking(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
+        self.run_blocking(image, |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.detect_face(image))
+        })
+        .await
+    }
+
+    async fn depth_relief_blocking(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<Option<f32>> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.depth_relief(image, &face))
+        })
+        .await
+    }
+
+    async fn embed_blocking(&self, image: &DynamicImage, face: &backend::Face) -> Result<Vec<f32>> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.extract_embedding(image, &face))
+        })
+        .await
+    }
+
+    async fn check_liveness_blocking(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<bool> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.check_liveness(image, &face))
+        })
+        .await
+    }
+
     /// Full processing: detection + liveness + embedding (for recognition)
-    pub async fn process_frame(&self, image: &DynamicImage) -> Result<Option<(backend::Face, Vec<f32>)>> {
+    pub async fn process_frame(
+        &self,
+        image: &DynamicImage,
+    ) -> Result<Option<(backend::Face, Vec<f32>)>> {
         // Stage 1: Detect (on full-size image, detector will resize internally)
-        let face = match self.backend.detect_face(image).await? {
+        let face = match self.detect_blocking(image).await? {
             Some(f) => f,
             None => return Ok(None),
         };
@@ -136,7 +219,7 @@ impl MLPipeline {
         // rejected genuine faces and was non-fatal. The depth-relief gate is the
         // real anti-spoofing check.
         if self.config.authentication.liveness_enabled {
-            match self.backend.depth_relief(image, &face).await {
+            match self.depth_relief_blocking(image, &face).await {
                 Ok(Some(relief)) => {
                     let threshold = self.config.authentication.liveness_depth_threshold;
                     if relief < threshold {
@@ -148,7 +231,8 @@ impl MLPipeline {
                     }
                     tracing::debug!(
                         "Liveness passed (depth gate): relief={:.4} >= threshold={:.4}",
-                        relief, threshold
+                        relief,
+                        threshold
                     );
                 }
                 Ok(None) => {
@@ -163,7 +247,10 @@ impl MLPipeline {
                 }
                 Err(e) => {
                     // An inference error must not become a silent bypass.
-                    tracing::error!("Liveness depth check errored — rejecting frame (fail-safe): {}", e);
+                    tracing::error!(
+                        "Liveness depth check errored — rejecting frame (fail-safe): {}",
+                        e
+                    );
                     return Ok(None);
                 }
             }
@@ -172,22 +259,27 @@ impl MLPipeline {
         }
 
         // Stage 3: Embedding — aligns via landmarks, then ArcFace 512-d.
-        let embedding = self.backend.extract_embedding(image, &face).await?;
+        let embedding = self.embed_blocking(image, &face).await?;
 
         Ok(Some((face, embedding)))
     }
 
-    /// Run ONLY the FATAL depth-liveness gate on an already-detected face.
-    /// Returns Ok(true) = live, Ok(false) = spoof / rejected / model-missing
-    /// (same fail-safe semantics as `process_frame`). The auth path calls this
-    /// ONCE per attempt instead of per-frame: depth is the slow stage on CPU
-    /// (~0.5s), and running it on every one of the ~10 auth frames overran the
-    /// PAM screen-unlock deadline even though the face authenticated fine.
-    pub async fn liveness_gate(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
+    /// Run ONLY the FATAL depth-liveness gate on an already-detected face and
+    /// return the typed outcome (with the relief value). `None` = liveness is
+    /// disabled by config. A missing model or inference error is
+    /// [`LivenessOutcome::Unavailable`] (fail closed, never a silent pass).
+    /// The auth path calls this ONCE per attempt instead of per-frame: depth is
+    /// the slow stage on CPU (~0.5s), and running it on every one of the ~10
+    /// auth frames overran the PAM screen-unlock deadline.
+    pub async fn liveness_check(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Option<LivenessOutcome> {
         if !self.config.authentication.liveness_enabled {
-            return Ok(true);
+            return None;
         }
-        match self.backend.depth_relief(image, face).await {
+        Some(match self.depth_relief_blocking(image, face).await {
             Ok(Some(relief)) => {
                 let t = self.config.authentication.liveness_depth_threshold;
                 if relief < t {
@@ -195,27 +287,46 @@ impl MLPipeline {
                         "Liveness REJECTED (depth gate): relief={:.4} < threshold={:.4} — treating as spoof",
                         relief, t
                     );
-                    Ok(false)
+                    LivenessOutcome::Fail { relief }
                 } else {
-                    tracing::debug!("Liveness passed (depth gate): relief={:.4} >= {:.4}", relief, t);
-                    Ok(true)
+                    tracing::debug!(
+                        "Liveness passed (depth gate): relief={:.4} >= {:.4}",
+                        relief,
+                        t
+                    );
+                    LivenessOutcome::Pass { relief }
                 }
             }
             Ok(None) => {
-                tracing::error!("Liveness ENABLED but depth-PAD model not loaded — reject (fail-safe)");
-                Ok(false)
+                tracing::error!(
+                    "Liveness ENABLED but depth-PAD model not loaded — reject (fail-safe)"
+                );
+                LivenessOutcome::Unavailable {
+                    reason: "depth model not loaded".to_string(),
+                }
             }
             Err(e) => {
                 tracing::error!("Liveness depth check errored — reject (fail-safe): {}", e);
-                Ok(false)
+                LivenessOutcome::Unavailable {
+                    reason: format!("depth inference error: {e}"),
+                }
             }
-        }
+        })
+    }
+
+    /// Boolean view of [`Self::liveness_check`]: `Ok(true)` = live or liveness
+    /// disabled, `Ok(false)` = spoof / rejected / model missing.
+    pub async fn liveness_gate(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
+        Ok(self
+            .liveness_check(image, face)
+            .await
+            .is_none_or(|outcome| outcome.is_pass()))
     }
 
     /// Fast detection only - no embedding extraction (for real-time preview)
     /// Returns face bounding box without embedding (~2x faster)
     pub async fn detect_only(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
-        self.backend.detect_face(image).await
+        self.detect_blocking(image).await
     }
 
     pub fn models_loaded(&self) -> bool {
@@ -228,7 +339,7 @@ impl MLPipeline {
 
     /// Detect face in image (for preview/debugging)
     pub async fn detect_face(&self, image: &DynamicImage) -> Result<Option<backend::Face>> {
-        self.backend.detect_face(image).await
+        self.detect_blocking(image).await
     }
 
     /// Extract embedding from detected face (for preview/debugging)
@@ -237,31 +348,27 @@ impl MLPipeline {
         image: &DynamicImage,
         face: &backend::Face,
     ) -> Result<Vec<f32>> {
-        self.backend.extract_embedding(image, face).await
+        self.embed_blocking(image, face).await
     }
 
     /// Run the liveness check on a detected face (for preview/debugging/tests).
     /// Returns `true` if the face is considered real (or if liveness is skipped).
-    pub async fn check_liveness(
-        &self,
-        image: &DynamicImage,
-        face: &backend::Face,
-    ) -> Result<bool> {
-        self.backend.check_liveness(image, face).await
+    pub async fn check_liveness(&self, image: &DynamicImage, face: &backend::Face) -> Result<bool> {
+        self.check_liveness_blocking(image, face).await
     }
 
     /// Warmup models by running dummy inference
     /// This preloads and compiles models before processing real frames
     pub async fn warmup(&self) -> Result<()> {
         info!("Warming up models (preloading/compiling)...");
-        
+
         // Create a dummy 640x480 black image (typical camera resolution)
         let dummy_img = DynamicImage::new_rgb8(640, 480);
-        
+
         // Run detection warmup
         info!("  Warming up detector...");
         let _ = self.backend.detect_face(&dummy_img).await;
-        
+
         // Create dummy face for subsequent stages
         let dummy_face = backend::Face {
             bbox: (0.2, 0.2, 0.4, 0.5), // Normalized coords (x, y, w, h)
@@ -269,7 +376,7 @@ impl MLPipeline {
             frame_dimensions: (640, 480),
             landmarks: None,
         };
-        
+
         // Run liveness warmup
         info!("  Warming up liveness detector...");
         let _ = self.backend.check_liveness(&dummy_img, &dummy_face).await;
@@ -277,11 +384,14 @@ impl MLPipeline {
         // Run depth-PAD warmup (JIT-compiles the depth model on the GPU EP).
         info!("  Warming up depth-PAD model...");
         let _ = self.backend.depth_relief(&dummy_img, &dummy_face).await;
-        
+
         // Run embedding warmup
         info!("  Warming up face recognizer...");
-        let _ = self.backend.extract_embedding(&dummy_img, &dummy_face).await;
-        
+        let _ = self
+            .backend
+            .extract_embedding(&dummy_img, &dummy_face)
+            .await;
+
         info!("✓ Model warmup complete");
         Ok(())
     }

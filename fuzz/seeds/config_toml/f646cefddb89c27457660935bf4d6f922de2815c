@@ -1,0 +1,4 @@
+[ipc]
+log_leveladmin_uids = [0, 1000]
+maxp_connectionog_leveladmin_uids = [0, 1000]
+maxp_connections_per_s_per_uid = 8

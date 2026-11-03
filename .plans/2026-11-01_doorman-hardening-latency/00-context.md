@@ -42,7 +42,7 @@ At 11:03 an earlier run recognised the user 1.65 s after arming; that run predat
 
 ## Other findings
 - Installed `doormand` (built 2026-06-24 from ~`5f78657`) is **older than HEAD**: it lacks commits `210776c` ("Capture auth face frames before recognition") and `7c511d9` ("Decouple auth decision frames from raw capture") which change `ipc.rs`, `shared/src/config.rs`. dpkg marks `/etc/doorman/doorman.toml` as an *obsolete conffile* → check the config schema before any reinstall.
-- Dataset logging defaults are privacy-heavy: `keep_raw_frames=true`, `raw_face_frame_bundle_size=120`, `max_capture_packs_per_day=500` → face frames stored under `/var/lib/doorman/dataset`.
+- Dataset logging defaults are privacy-heavy: `keep_raw_frames` has defaulted to false since commit 5f78657 (the host config sets `keep_raw_frames=true` explicitly, so existing behaviour is retained), `raw_face_frame_bundle_size=120`, `max_capture_packs_per_day=500` → face frames stored under `/var/lib/doorman/dataset`.
 - Stale `/usr/local/bin/doormand` (Nov 2025) and ~20 `/etc/doorman/*.bak*` files on the host.
 - Depth model is not shipped in `/usr/share/doorman/models` (only in an unreadable `/var/lib/doorman/models`); MiniFASNet files shipped but unused.
 - Nothing tests the watcher script, the lock/unlock flow, socket permissions, latency, or spoofing.

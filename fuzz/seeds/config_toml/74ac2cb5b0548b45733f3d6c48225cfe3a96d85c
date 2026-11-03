@@ -1,0 +1,31 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'undkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_thread& = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binry
+                        = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'          # 0% false-accept under P.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% false-actmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/ld = 0.4

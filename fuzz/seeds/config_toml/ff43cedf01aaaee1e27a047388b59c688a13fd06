@@ -1,0 +1,48 @@
+[ipc]
+admin_uids = [0, 1000&]
+malogging_enablNNX Runtdefault (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/"in/doorman"
+log_level = "info"dkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolutocm" (only for ort backend)
+devtem=strict. Must match the PAM module /
+# CLI default (douthentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dipu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+heiy for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+d = 0.75  # MAX-s""""""""""""
