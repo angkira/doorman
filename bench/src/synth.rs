@@ -21,6 +21,22 @@ const BONA_FIDE_STD: f64 = 0.05;
 const ATTACK_MEAN: f64 = 0.02;
 const ATTACK_STD: f64 = 0.015;
 
+/// (attack species, accepted-relief mean). `screen_replay` is deliberately the
+/// weakest so the worst-species logic has something to find. Species of the
+/// protocol that are absent here (e.g. `paper_mask`) stay "untested".
+const PAD_SPECIES: [(&str, f64); 4] = [
+    ("print_matte", 0.01),
+    ("print_glossy", 0.02),
+    ("phone_replay", 0.04),
+    ("screen_replay", 0.06),
+];
+/// Sessions the synthetic PAD rows are spread over.
+const PAD_SESSIONS: usize = 3;
+/// Every n-th synthetic PAD/match row is a non-response / failure to acquire.
+const NON_RESPONSE_EVERY: usize = 50;
+/// Subject id of the synthetic enrolled person.
+const OWNER_SUBJECT: &str = "owner";
+
 /// Image side lengths for synthetic textures.
 pub const IMAGE_WIDTH: u32 = 320;
 pub const IMAGE_HEIGHT: u32 = 240;
@@ -33,6 +49,8 @@ pub struct SynthParams {
     pub bona_fide: usize,
     pub attack: usize,
     pub images: usize,
+    /// Distinct impostor subjects in `match_scores.csv`.
+    pub subjects: usize,
 }
 
 impl Default for SynthParams {
@@ -45,6 +63,7 @@ impl Default for SynthParams {
             bona_fide: 400,
             attack: 400,
             images: 4,
+            subjects: 50,
         }
     }
 }
@@ -102,6 +121,60 @@ pub fn liveness_csv(p: &SynthParams) -> String {
     for _ in 0..p.attack {
         let v = (ATTACK_MEAN + ATTACK_STD * rng.normal()).max(0.0);
         let _ = writeln!(s, "attack,{v:.6}");
+    }
+    s
+}
+
+/// `label,species,score,response,session,subject` PAD scores: bona fide rows
+/// (species `none`) and attacks cycling over [`PAD_SPECIES`]. Non-responses
+/// have an empty score.
+pub fn pad_csv(p: &SynthParams) -> String {
+    let mut rng = Rng::new(p.seed ^ 0x1357_9BDF_1357_9BDF);
+    let mut s = String::from("label,species,score,response,session,subject\n");
+    for i in 0..p.bona_fide {
+        let session = i % PAD_SESSIONS;
+        if i % NON_RESPONSE_EVERY == NON_RESPONSE_EVERY - 1 {
+            let _ = writeln!(s, "bona_fide,none,,no_face,s{session},{OWNER_SUBJECT}");
+            continue;
+        }
+        let v = (BONA_FIDE_MEAN + BONA_FIDE_STD * rng.normal()).max(0.0);
+        let _ = writeln!(s, "bona_fide,none,{v:.6},ok,s{session},{OWNER_SUBJECT}");
+    }
+    for i in 0..p.attack {
+        let (species, mean) = PAD_SPECIES[i % PAD_SPECIES.len()];
+        let session = i % PAD_SESSIONS;
+        if i % NON_RESPONSE_EVERY == NON_RESPONSE_EVERY - 1 {
+            let _ = writeln!(s, "attack,{species},,timeout,s{session},{OWNER_SUBJECT}");
+            continue;
+        }
+        let v = (mean + ATTACK_STD * rng.normal()).max(0.0);
+        let _ = writeln!(s, "attack,{species},{v:.6},ok,s{session},{OWNER_SUBJECT}");
+    }
+    s
+}
+
+/// `label,score,subject,response` comparison scores: genuine rows for the owner
+/// and impostor rows spread round-robin over `p.subjects` impostor subjects.
+pub fn match_csv(p: &SynthParams) -> String {
+    let mut rng = Rng::new(p.seed ^ 0x2468_ACE0_2468_ACE0);
+    let mut s = String::from("label,score,subject,response\n");
+    for i in 0..p.genuine {
+        if i % (NON_RESPONSE_EVERY * 4) == NON_RESPONSE_EVERY * 4 - 1 {
+            let _ = writeln!(s, "genuine,,{OWNER_SUBJECT},fta");
+            continue;
+        }
+        let (_, mean) = GENUINE_CONDITIONS[i % GENUINE_CONDITIONS.len()];
+        let v = (mean + GENUINE_STD * rng.normal()).clamp(-1.0, 1.0);
+        let _ = writeln!(s, "genuine,{v:.6},{OWNER_SUBJECT},ok");
+    }
+    for i in 0..p.impostor {
+        let subject = i % p.subjects;
+        if i % (NON_RESPONSE_EVERY * 4) == NON_RESPONSE_EVERY * 4 - 1 {
+            let _ = writeln!(s, "impostor,,imp{subject:03},fta");
+            continue;
+        }
+        let v = (IMPOSTOR_MEAN + IMPOSTOR_STD * rng.normal()).clamp(-1.0, 1.0);
+        let _ = writeln!(s, "impostor,{v:.6},imp{subject:03},ok");
     }
     s
 }
@@ -176,11 +249,49 @@ mod tests {
         };
         assert_eq!(accuracy_csv(&p), accuracy_csv(&p));
         assert_eq!(liveness_csv(&p), liveness_csv(&p));
+        assert_eq!(pad_csv(&p), pad_csv(&p));
+        assert_eq!(match_csv(&p), match_csv(&p));
         let q = SynthParams {
             seed: 8,
             ..SynthParams::default()
         };
         assert_ne!(accuracy_csv(&p), accuracy_csv(&q));
+        assert_ne!(pad_csv(&p), pad_csv(&q));
+        assert_ne!(match_csv(&p), match_csv(&q));
+    }
+
+    #[test]
+    fn pad_and_match_csv_shape() {
+        let p = SynthParams {
+            bona_fide: 100,
+            attack: 200,
+            genuine: 400,
+            impostor: 1000,
+            subjects: 7,
+            ..SynthParams::default()
+        };
+        let pad = pad_csv(&p);
+        assert_eq!(pad.lines().count(), 1 + 100 + 200);
+        // Rows 49 and 99 of each block are non-responses.
+        assert_eq!(pad.lines().filter(|l| l.contains(",no_face,")).count(), 2);
+        assert_eq!(pad.lines().filter(|l| l.contains(",timeout,")).count(), 4);
+        // 200 attacks over 4 species: 50 each.
+        assert_eq!(
+            pad.lines()
+                .filter(|l| l.starts_with("attack,screen_replay,"))
+                .count(),
+            50
+        );
+        let m = match_csv(&p);
+        assert_eq!(m.lines().count(), 1 + 400 + 1000);
+        let subjects: std::collections::BTreeSet<&str> = m
+            .lines()
+            .filter(|l| l.starts_with("impostor,"))
+            .map(|l| l.split(',').nth(2).unwrap())
+            .collect();
+        assert_eq!(subjects.len(), 7);
+        // Rows 199 of the genuine block, and 199/399/.../999 of impostors: fta.
+        assert_eq!(m.lines().filter(|l| l.ends_with(",fta")).count(), 2 + 5);
     }
 
     #[test]

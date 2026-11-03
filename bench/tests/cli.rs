@@ -157,6 +157,222 @@ fn reports_are_deterministic_for_a_seed() {
     );
 }
 
+fn read(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap()
+}
+
+#[test]
+fn pad_report_end_to_end_on_synthetic_data() {
+    let d = tempfile::tempdir().unwrap();
+    synth(d.path(), "5");
+    let rep = d.path().join("pad");
+    let out = ok(&[
+        "pad-report",
+        "--scores",
+        s(&d.path().join("pad_scores.csv")),
+        "--threshold",
+        "0.05",
+        "--out",
+        s(&rep),
+    ]);
+    for f in ["pad_report.md", "pad_report.csv", "machine.md"] {
+        assert!(rep.join(f).is_file(), "{f}");
+    }
+    let md = read(&rep.join("pad_report.md"));
+    assert!(out.contains(&md));
+    // Synthetic data: 4 species, screen_replay is the weakest, paper_mask never tested.
+    assert!(md.contains("screen_replay (worst)"), "{md}");
+    assert!(md.contains("untested species:"), "{md}");
+    assert!(md.contains("paper_mask"), "{md}");
+    assert!(md.contains("not a certification"), "{md}");
+    assert!(md.contains("Distinct subjects: 1"), "{md}");
+    assert!(md.contains("Distinct sessions: 3"), "{md}");
+    assert!(md.contains("One subject"), "{md}");
+
+    let csv = read(&rep.join("pad_report.csv"));
+    let rows: Vec<Vec<&str>> = csv
+        .lines()
+        .skip(1)
+        .map(|l| l.split(',').collect())
+        .collect();
+    // 4 species rows + bpcer. 400 attacks over 4 species, 100 each; the 8
+    // non-responses (i = 49, 99, ..., 399) fall on the two odd species, 4 each.
+    assert_eq!(rows.len(), 5);
+    for r in &rows[..4] {
+        assert_eq!((r[0], r[2]), ("apcer", "100"), "{r:?}");
+    }
+    let nr: Vec<&str> = rows[..4].iter().map(|r| r[3]).collect();
+    assert_eq!(nr.iter().map(|v| v.parse::<u32>().unwrap()).sum::<u32>(), 8);
+    // BPCER row: 400 bona fide, 8 non-responses (i = 49, 99, ..., 399).
+    assert_eq!(&rows[4][..5], ["bpcer", "none", "400", "8", "392"]);
+    // Upper bound is never below the point estimate, and print_matte (mean 0.01,
+    // std 0.015, threshold 0.05: ~2.7 sigma) is stronger than screen_replay.
+    let rate = |name: &str, col: usize| -> f64 {
+        rows.iter().find(|r| r[1] == name).unwrap()[col]
+            .parse()
+            .unwrap()
+    };
+    assert!(rate("print_matte", 7) >= rate("print_matte", 6));
+    assert!(rate("screen_replay", 6) > rate("print_matte", 6));
+
+    // Deterministic bytes for identical input.
+    let rep2 = d.path().join("pad2");
+    ok(&[
+        "pad-report",
+        "--scores",
+        s(&d.path().join("pad_scores.csv")),
+        "--threshold",
+        "0.05",
+        "--out",
+        s(&rep2),
+    ]);
+    assert_eq!(deterministic_files(&rep), deterministic_files(&rep2));
+}
+
+#[test]
+fn pad_report_target_and_species_column_options() {
+    let d = tempfile::tempdir().unwrap();
+    synth(d.path(), "5");
+    let renamed = d.path().join("renamed.csv");
+    std::fs::write(
+        &renamed,
+        read(&d.path().join("pad_scores.csv")).replacen("label,species,", "label,instrument,", 1),
+    )
+    .unwrap();
+    let out = ok(&[
+        "pad-report",
+        "--scores",
+        s(&renamed),
+        "--species-column",
+        "instrument",
+        "--threshold",
+        "0.05",
+        "--target-apcer",
+        "0.07",
+        "--out",
+        s(&d.path().join("r")),
+    ]);
+    assert!(out.contains("Target APCER: 7.000%"), "{out}");
+    // Without the option the renamed column is not found: pooled, with a warning.
+    let out = ok(&[
+        "pad-report",
+        "--scores",
+        s(&renamed),
+        "--threshold",
+        "0.05",
+        "--out",
+        s(&d.path().join("r2")),
+    ]);
+    assert!(out.contains("No species column"), "{out}");
+}
+
+#[test]
+fn match_report_end_to_end_on_synthetic_data() {
+    let d = tempfile::tempdir().unwrap();
+    synth(d.path(), "9");
+    let rep = d.path().join("match");
+    let out = ok(&[
+        "match-report",
+        "--scores",
+        s(&d.path().join("match_scores.csv")),
+        "--threshold",
+        "0.4",
+        "--out",
+        s(&rep),
+    ]);
+    for f in ["match_report.md", "match_report.csv", "machine.md"] {
+        assert!(rep.join(f).is_file(), "{f}");
+    }
+    assert!(out.contains(&read(&rep.join("match_report.md"))));
+    // 20000 impostor comparisons, every 200th (i = 199, ...) is an FTA: 100.
+    // 2000 genuine, every 200th an FTA: 10.
+    let csv = read(&rep.join("match_report.csv"));
+    let line = |k: &str| -> Vec<String> {
+        csv.lines()
+            .find(|l| l.starts_with(&format!("{k},")))
+            .unwrap()
+            .split(',')
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(&line("fmr")[1..4], ["20000", "100", "19900"]);
+    assert_eq!(&line("fnmr")[1..4], ["2000", "10", "1990"]);
+    // Impostor mean 0.05, std 0.10: threshold 0.4 is 3.5 sigma, a handful of false matches at most.
+    let fmr_upper: f64 = line("fmr")[6].parse().unwrap();
+    assert!(fmr_upper < 1e-2, "{fmr_upper}");
+    assert!(line("n_subjects")[1] == "50", "{csv}");
+    assert!(
+        out.contains("n_subjects (distinct impostor subjects): 50"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Comparisons needed at zero false matches"),
+        "{out}"
+    );
+    assert!(out.contains("29956"), "{out}");
+    assert!(out.contains("149786"), "{out}");
+    // 19900 scored comparisons with 4 false matches cannot show 1e-4.
+    assert!(
+        out.contains("19900 scored impostor comparisons are fewer than"),
+        "{out}"
+    );
+    assert!(out.contains("NOT demonstrated"), "{out}");
+
+    // Identical input gives identical report bytes.
+    let rep2 = d.path().join("match2");
+    ok(&[
+        "match-report",
+        "--scores",
+        s(&d.path().join("match_scores.csv")),
+        "--threshold",
+        "0.4",
+        "--out",
+        s(&rep2),
+    ]);
+    assert_eq!(deterministic_files(&rep), deterministic_files(&rep2));
+}
+
+#[test]
+fn pad_and_match_report_reject_wrong_csv_explicitly() {
+    let d = tempfile::tempdir().unwrap();
+    synth(d.path(), "1");
+    // Accuracy labels are not PAD labels and vice versa.
+    let o = bench(&[
+        "pad-report",
+        "--scores",
+        s(&d.path().join("accuracy_scores.csv")),
+        "--threshold",
+        "0.05",
+        "--out",
+        s(&d.path().join("o")),
+    ]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unknown label"));
+    let o = bench(&[
+        "match-report",
+        "--scores",
+        s(&d.path().join("pad_scores.csv")),
+        "--threshold",
+        "0.4",
+        "--out",
+        s(&d.path().join("o")),
+    ]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unknown label"));
+    let o = bench(&[
+        "pad-report",
+        "--scores",
+        "/nonexistent/x.csv",
+        "--threshold",
+        "0.1",
+    ]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot read"));
+    let o = bench(&["synth", "--out", s(d.path()), "--subjects", "0"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--subjects"));
+}
+
 #[test]
 fn bad_inputs_give_explicit_errors() {
     let d = tempfile::tempdir().unwrap();

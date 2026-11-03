@@ -95,6 +95,9 @@ struct SynthArgs {
     /// Number of random textured PNGs written to <out>/images/.
     #[arg(long, default_value_t = synth::SynthParams::default().images)]
     images: usize,
+    /// Distinct impostor subjects in match_scores.csv.
+    #[arg(long, default_value_t = synth::SynthParams::default().subjects)]
+    subjects: usize,
 }
 
 #[derive(Args)]
@@ -242,6 +245,9 @@ fn write_machine(dir: &Path, extra: &[(&str, String)]) -> Result<()> {
 }
 
 fn cmd_synth(a: SynthArgs) -> Result<()> {
+    if a.subjects == 0 {
+        bail!("--subjects must be at least 1");
+    }
     let p = synth::SynthParams {
         seed: a.seed,
         genuine: a.genuine,
@@ -249,9 +255,12 @@ fn cmd_synth(a: SynthArgs) -> Result<()> {
         bona_fide: a.bona_fide,
         attack: a.attack,
         images: a.images,
+        subjects: a.subjects,
     };
     write(&a.out, "accuracy_scores.csv", &synth::accuracy_csv(&p))?;
     write(&a.out, "liveness_scores.csv", &synth::liveness_csv(&p))?;
+    write(&a.out, "pad_scores.csv", &synth::pad_csv(&p))?;
+    write(&a.out, "match_scores.csv", &synth::match_csv(&p))?;
     if p.images > 0 {
         let names = synth::write_images(&a.out.join("images"), &p)?;
         println!(
