@@ -261,10 +261,13 @@ async fn main() -> Result<()> {
 
     // Load configuration from --config, DOORMAN_CONFIG env var, or standard
     // locations (a root process only accepts a trusted file, see config_trust).
-    let mut config = Config::load_with(config_file.as_deref()).unwrap_or_else(|e| {
-        warn!("Failed to load config: {}", e);
-        Config::default()
-    });
+    //
+    // An unreadable, unparsable or invalid config is fatal: running with
+    // built-in defaults would silently drop the administrator's stricter
+    // settings. The PAM module then falls through to the password. Only the
+    // absence of any default-location file means "use defaults".
+    let mut config = Config::load_with(config_file.as_deref())
+        .map_err(|e| anyhow::anyhow!("refusing to start: invalid configuration: {e}"))?;
     if preview_mode {
         config.daemon.preview_mode = true;
         config.daemon.debug_mode = true; // Preview mode implies debug mode

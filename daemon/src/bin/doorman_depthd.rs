@@ -70,10 +70,8 @@ fn main() -> Result<()> {
     let config_file = arg_value("--config").map(PathBuf::from);
 
     // Load config (same precedence and root trust rules as the daemon).
-    let mut config = Config::load_with(config_file.as_deref()).unwrap_or_else(|e| {
-        tracing::warn!("Failed to load config: {} — using defaults", e);
-        Config::default()
-    });
+    let mut config = Config::load_with(config_file.as_deref())
+        .map_err(|e| anyhow::anyhow!("refusing to start: invalid configuration: {e}"))?;
 
     // Mirror the daemon's --user path rewriting so the sidecar's socket + models
     // dir land in the SAME place the daemon expects.

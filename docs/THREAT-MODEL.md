@@ -102,7 +102,7 @@ frames: **accepted**.
 |---|---|---|---|---|
 | T | Edit threshold, sudo settings, `admin_uids` | file is root-owned; `Config::validate` rejects out-of-range values and sudo-without-liveness; `doorman config check` diffs unknown keys; parser fuzzed (no panic, deep nesting handled) | needs root to edit | mitigated |
 | T | Typo in a security key is ignored | `doorman config check` reports unknown keys | the daemon itself does not reject unknown keys (no `deny_unknown_fields`) | partial |
-| T | **A bad config silently weakens the daemon**: with `--config` or `DOORMAN_CONFIG`, a parse or validation error logs a warning and runs with `Config::default()` (`daemon/src/main.rs` lines ~263-277) | defaults are not insecure (sudo off), but a stricter threshold set by the admin is lost without the daemon stopping | silent fallback to default threshold 0.4 and default `admin_uids` | open |
+| T | A bad config silently weakens the daemon (formerly: parse/validation error with `--config`/`DOORMAN_CONFIG` logged a warning and ran with `Config::default()`) | `doormand` and `doorman-depthd` now exit non-zero with `refusing to start: invalid configuration: ...` (also for a missing explicit file). The PAM module then finds no daemon and falls through to the password. Tests: `daemon/tests/config_fail_closed.rs`. Only a missing file in the default locations still means built-in defaults (the packaged unit passes `--config /etc/doorman/doorman.toml`, which the deb postinst creates) | a daemon that will not start means no face unlock until the admin fixes the file (password still works) | mitigated |
 | E | A root-run CLI reads an attacker-chosen config (formerly `./doorman.toml` for `sudo doorman dataset purge`) | `Config::load_with` (`shared/src/config.rs`, `shared/src/config_trust.rs`): with euid 0 the working directory and user config dir are never read; only `--config`, `DOORMAN_CONFIG` or `/etc/doorman/doorman.toml`, and the file and its directory must be root-owned and not group/world-writable, else an explicit error. Tests: `config_trust::tests::*` (injectable metadata provider). The purge also refuses symlinks and paths outside the dataset directory | the check is on the final path component and its directory only (parent directories further up are not walked); TOCTOU between check and read needs a root-owned writable location, i.e. root | mitigated |
 | I | Config is world-readable (0644) | contains no secrets | reveals uids and thresholds | accepted |
 
@@ -182,7 +182,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 
 1. Virtual-camera (v4l2loopback) and USB camera spoofing: no detection; device chosen by index.
 2. Presentation-attack resistance and FAR at threshold 0.4 not measured.
-3. Daemon silently falls back to default config on a bad `--config`/`DOORMAN_CONFIG`.
+3. ~~Daemon silently falls back to default config on a bad config.~~ Closed: it exits non-zero.
 4. ~~Root-run CLI loads `./doorman.toml` from the working directory (`dataset purge`).~~ Closed: root only accepts a trusted config path.
 5. Models are not integrity-checked at load; no `SystemCallFilter=`; ONNX/image decoding runs inside the daemon that is the root of trust.
 6. Daemon compromise = authentication bypass (design property; sandbox only limits collateral damage).
