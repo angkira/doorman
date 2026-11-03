@@ -10,6 +10,8 @@ mod backend;
 #[cfg_attr(not(feature = "ort"), allow(dead_code))]
 mod dataset;
 #[cfg_attr(not(feature = "ort"), allow(dead_code))]
+mod dirscores;
+#[cfg_attr(not(feature = "ort"), allow(dead_code))]
 mod latency_report;
 mod machine;
 mod matching;
@@ -103,11 +105,18 @@ struct SynthArgs {
 #[derive(Args)]
 struct AccuracyArgs {
     /// Scores CSV: label{genuine,impostor},score[,condition].
-    #[arg(long, conflicts_with_all = ["enroll", "genuine", "impostor"])]
+    #[arg(long, conflicts_with_all = ["enroll", "enroll_store", "genuine", "impostor"])]
     scores: Option<PathBuf>,
     /// Directory mode: enrolment images.
-    #[arg(long, requires_all = ["genuine", "impostor"])]
+    #[arg(long, conflicts_with = "enroll_store", requires_all = ["genuine", "impostor"])]
     enroll: Option<PathBuf>,
+    /// Directory mode: directory holding a COPY of the daemon's `embeddings.bin`
+    /// (the loader tightens the directory mode). Needs --enroll-user.
+    #[arg(long, requires_all = ["enroll_user", "genuine", "impostor"])]
+    enroll_store: Option<PathBuf>,
+    /// Directory mode: user whose templates in --enroll-store are the gallery.
+    #[arg(long, requires = "enroll_store")]
+    enroll_user: Option<String>,
     /// Directory mode: genuine probe images (`<condition>/*.jpg` or flat).
     #[arg(long)]
     genuine: Option<PathBuf>,
@@ -302,12 +311,19 @@ fn rows_to_csv(rows: &[scores::ScoreRow]) -> String {
 
 #[cfg(feature = "ort")]
 async fn cmd_accuracy_dirs(a: &AccuracyArgs, dir: &Path) -> Result<()> {
-    let (Some(enroll), Some(genuine), Some(impostor)) = (&a.enroll, &a.genuine, &a.impostor) else {
-        bail!("directory mode needs --enroll, --genuine and --impostor");
+    let (Some(genuine), Some(impostor)) = (&a.genuine, &a.impostor) else {
+        bail!("directory mode needs --genuine and --impostor");
+    };
+    let enrol = match (&a.enroll, &a.enroll_store, &a.enroll_user) {
+        (Some(images), None, None) => backend::EnrolSource::Images(images),
+        (None, Some(store), Some(user)) => backend::EnrolSource::Store { dir: store, user },
+        _ => bail!("directory mode needs --enroll, or --enroll-store with --enroll-user"),
     };
     let config = backend::load_config(a.profile.as_deref(), a.models_dir.as_deref())?;
-    let (rows, st) = backend::score_directories(&config, enroll, genuine, impostor).await?;
+    let (probes, st) = backend::score_directories(&config, enrol, genuine, impostor).await?;
+    let rows = dirscores::to_score_rows(&probes);
     write(dir, "scores.csv", &rows_to_csv(&rows))?;
+    write(dir, "match_scores.csv", &dirscores::match_csv(&probes))?;
     let mut notes = String::from("# Dataset notes\n\n");
     let _ = writeln!(notes, "{st:#?}");
     write(dir, "dataset_notes.md", &notes)?;
@@ -328,11 +344,11 @@ async fn cmd_accuracy(a: AccuracyArgs) -> Result<()> {
         let rows = scores::read_scores(csv, LABEL_GENUINE, LABEL_IMPOSTOR)?;
         report_accuracy(&rows, &a, &dir)?;
         write_machine(&dir, &[("scores file", csv.display().to_string())])
-    } else if a.enroll.is_some() {
+    } else if a.enroll.is_some() || a.enroll_store.is_some() {
         cmd_accuracy_dirs(&a, &dir).await?;
         write_machine(&dir, &[("mode", "directories".to_string())])
     } else {
-        bail!("give either --scores <csv> or --enroll/--genuine/--impostor directories")
+        bail!("give either --scores <csv> or --enroll (or --enroll-store/--enroll-user) with --genuine/--impostor directories")
     }
 }
 

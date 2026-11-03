@@ -6,8 +6,8 @@
 //! "align" cannot be timed separately and is reported as part of `embed`.
 
 use crate::dataset;
+use crate::dirscores::{self, ProbeScore};
 use crate::latency_report::{summarize, ColdStart, LatencyReport, SteadyRow};
-use crate::scores::ScoreRow;
 use anyhow::{bail, Context, Result};
 use doorman_shared::Config;
 use doormand::ml::{DepthPadConfig, DetectorConfig, MLPipeline, RecognizerConfig};
@@ -221,16 +221,28 @@ async fn embed_image(pipeline: &MLPipeline, path: &Path) -> Result<Option<Vec<f3
     }
 }
 
+/// Where the enrolled templates come from.
+pub enum EnrolSource<'a> {
+    /// Embed every face image under this directory.
+    Images(&'a Path),
+    /// Read the templates of `user` from the `embeddings.bin` in `dir`. The
+    /// daemon's storage loader creates the directory and tightens its mode to
+    /// 0700, so pass a COPY of the state directory, never `/var/lib/doorman`.
+    Store { dir: &'a Path, user: &'a str },
+}
+
 /// Embed enrolment, genuine and impostor images with the daemon backend and
 /// score each probe as the maximum cosine similarity against the enrolment
 /// embeddings (the gallery rule of the daemon's auth path). Images without a
-/// detected face are skipped and counted.
+/// detected face are kept as failures to acquire (no score) and counted.
+/// Genuine probes get the subject [`dirscores::OWNER_SUBJECT`], impostor probes
+/// the identity from [`dirscores::impostor_subject`].
 pub async fn score_directories(
     config: &Config,
-    enroll: &Path,
+    enrol: EnrolSource<'_>,
     genuine: &Path,
     impostor: &Path,
-) -> Result<(Vec<ScoreRow>, EmbedStats)> {
+) -> Result<(Vec<ProbeScore>, EmbedStats)> {
     check_models(config, false)?;
     let pipeline = MLPipeline::new(config)
         .await
@@ -240,20 +252,33 @@ pub async fn score_directories(
     }
     let mut stats = EmbedStats::default();
 
-    let enroll_paths = dataset::list_images(enroll)?;
-    stats.enroll_images = enroll_paths.len();
     let mut gallery = Vec::new();
-    for p in &enroll_paths {
-        if let Some(e) = embed_image(&pipeline, p).await? {
-            gallery.push(e);
+    match enrol {
+        EnrolSource::Images(dir) => {
+            let enroll_paths = dataset::list_images(dir)?;
+            stats.enroll_images = enroll_paths.len();
+            for p in &enroll_paths {
+                if let Some(e) = embed_image(&pipeline, p).await? {
+                    gallery.push(e);
+                }
+            }
+        }
+        EnrolSource::Store { dir, user } => {
+            let storage = doormand::storage::Storage::new_with_dir(dir)
+                .await
+                .with_context(|| format!("cannot open the template store in {}", dir.display()))?;
+            let templates = storage
+                .get_embeddings(user)
+                .with_context(|| format!("no templates for user `{user}` in {}", dir.display()))?;
+            stats.enroll_images = templates.len();
+            gallery.extend(templates.iter().cloned());
         }
     }
     stats.enroll_used = gallery.len();
     if gallery.is_empty() {
         bail!(
-            "no usable enrolment embeddings: {} images under {}, none with a detected face",
-            stats.enroll_images,
-            enroll.display()
+            "no usable enrolment embeddings: {} images or templates, none usable",
+            stats.enroll_images
         );
     }
     let score = |e: &[f32]| -> f64 {
@@ -263,30 +288,30 @@ pub async fn score_directories(
             .fold(f64::NEG_INFINITY, f64::max)
     };
 
-    let mut rows = Vec::new();
+    let mut probes = Vec::new();
     for (cond, paths) in dataset::list_images_by_condition(genuine)? {
         for p in paths {
             stats.genuine_images += 1;
-            match embed_image(&pipeline, &p).await? {
-                Some(e) => rows.push(ScoreRow {
-                    positive: true,
-                    score: score(&e),
-                    condition: Some(cond.clone()),
-                }),
-                None => stats.genuine_no_face += 1,
-            }
+            let emb = embed_image(&pipeline, &p).await?;
+            stats.genuine_no_face += usize::from(emb.is_none());
+            probes.push(ProbeScore {
+                genuine: true,
+                score: emb.map(|e| score(&e)),
+                condition: Some(cond.clone()),
+                subject: Some(dirscores::OWNER_SUBJECT.to_string()),
+            });
         }
     }
     for p in dataset::list_images(impostor)? {
         stats.impostor_images += 1;
-        match embed_image(&pipeline, &p).await? {
-            Some(e) => rows.push(ScoreRow {
-                positive: false,
-                score: score(&e),
-                condition: None,
-            }),
-            None => stats.impostor_no_face += 1,
-        }
+        let emb = embed_image(&pipeline, &p).await?;
+        stats.impostor_no_face += usize::from(emb.is_none());
+        probes.push(ProbeScore {
+            genuine: false,
+            score: emb.map(|e| score(&e)),
+            condition: None,
+            subject: Some(dirscores::impostor_subject(impostor, &p)),
+        });
     }
-    Ok((rows, stats))
+    Ok((probes, stats))
 }

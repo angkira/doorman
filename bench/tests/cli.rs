@@ -394,6 +394,40 @@ fn bad_inputs_give_explicit_errors() {
 }
 
 #[test]
+fn accuracy_enrol_source_flags_are_validated() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = s(d.path());
+    // --enroll-store needs --enroll-user.
+    let o = bench(&[
+        "accuracy",
+        "--enroll-store",
+        dir,
+        "--genuine",
+        dir,
+        "--impostor",
+        dir,
+    ]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--enroll-user"));
+    // --enroll and --enroll-store are alternatives.
+    let o = bench(&[
+        "accuracy",
+        "--enroll",
+        dir,
+        "--enroll-store",
+        dir,
+        "--enroll-user",
+        "me",
+        "--genuine",
+        dir,
+        "--impostor",
+        dir,
+    ]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot be used with"));
+}
+
+#[test]
 fn record_refuses_inside_git_repo_before_touching_camera() {
     let repo = tempfile::tempdir().unwrap();
     std::fs::create_dir(repo.path().join(".git")).unwrap();
