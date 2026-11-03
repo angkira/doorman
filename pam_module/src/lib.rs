@@ -15,6 +15,7 @@
 //! `AUTH_TIMEOUT_SECS`.
 //!
 //! Recommended PAM line (see INSTALL.md) — `auth sufficient pam_doorman.so`.
+//! The only module argument is `socket=/abs/path` (tests; see `SOCKET_ARG_PREFIX`).
 //! "sufficient" means: success here is enough to authenticate, but anything
 //! else (face not matched, daemon down, timeout) falls through to the next
 //! module (normally `pam_unix.so` password). This module therefore MUST NEVER
@@ -48,7 +49,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -68,6 +69,45 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// PAM service names (`PAM_SERVICE`) that get the longer sudo wait: `sudo`,
 /// and `sudo-i` where a distribution configures it.
 const SUDO_SERVICE_PREFIX: &str = "sudo";
+
+/// PAM module argument that overrides the daemon socket path
+/// (`auth sufficient pam_doorman.so socket=/run/x/doorman.sock`). It exists for
+/// the pamtester integration test (`tests/test_pam_module.py`). PAM arguments
+/// come from the service file under `/etc/pam.d`, which only root can write, so
+/// an unprivileged user cannot redirect the module. There is deliberately no
+/// environment variable: PAM runs inside setuid programs (sudo, su) whose
+/// environment the caller controls.
+const SOCKET_ARG_PREFIX: &str = "socket=";
+
+/// The socket path from the module arguments, else the system default. Only an
+/// absolute path is accepted; anything else is ignored.
+fn socket_from_args<'a>(args: impl IntoIterator<Item = &'a str>) -> PathBuf {
+    args.into_iter()
+        .filter_map(|a| a.strip_prefix(SOCKET_ARG_PREFIX))
+        .map(PathBuf::from)
+        .find(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(SOCKET_PATH))
+}
+
+/// The module arguments as UTF-8 strings (non-UTF-8 entries are skipped).
+///
+/// # Safety
+/// `argv` must point to `argc` valid C strings, as libpam passes them.
+unsafe fn module_args<'a>(argc: libc::c_int, argv: *const *const libc::c_char) -> Vec<&'a str> {
+    if argv.is_null() || argc <= 0 {
+        return Vec::new();
+    }
+    (0..argc as usize)
+        .filter_map(|i| {
+            let p = *argv.add(i);
+            if p.is_null() {
+                None
+            } else {
+                CStr::from_ptr(p).to_str().ok()
+            }
+        })
+        .collect()
+}
 
 /// What is sent to the daemon for one attempt.
 struct AuthTarget<'a> {
@@ -294,8 +334,8 @@ unsafe fn pam_item_string(
 pub extern "C" fn pam_sm_authenticate(
     pamh: *mut pam_sys::PamHandle,
     _flags: libc::c_int,
-    _argc: libc::c_int,
-    _argv: *const *const libc::c_char,
+    argc: libc::c_int,
+    argv: *const *const libc::c_char,
 ) -> libc::c_int {
     guarded(|| unsafe {
         let mut user: *const libc::c_char = std::ptr::null();
@@ -324,7 +364,8 @@ pub extern "C" fn pam_sm_authenticate(
             service: service.as_deref(),
             tty: tty.as_deref(),
         };
-        outcome_to_pam(authenticate_with_deadline(Path::new(SOCKET_PATH), &target))
+        let socket = socket_from_args(module_args(argc, argv));
+        outcome_to_pam(authenticate_with_deadline(&socket, &target))
     })
 }
 
@@ -514,6 +555,19 @@ mod tests {
     fn overlong_socket_path_is_an_error_not_a_panic() {
         let long = std::path::PathBuf::from("/".to_string() + &"a".repeat(300));
         assert!(connect_nonblocking(&long).is_err());
+    }
+
+    #[test]
+    fn socket_argument_overrides_only_with_an_absolute_path() {
+        let default = PathBuf::from(SOCKET_PATH);
+        assert_eq!(socket_from_args([]), default);
+        assert_eq!(socket_from_args(["debug", "use_first_pass"]), default);
+        assert_eq!(
+            socket_from_args(["socket=/tmp/t/d.sock"]),
+            PathBuf::from("/tmp/t/d.sock")
+        );
+        assert_eq!(socket_from_args(["socket=relative.sock"]), default);
+        assert_eq!(socket_from_args(["socket="]), default);
     }
 
     #[test]

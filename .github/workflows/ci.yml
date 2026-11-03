@@ -212,3 +212,33 @@ jobs:
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
+
+  pam-module:
+    # The real pam_doorman.so under pamtester against a fake daemon socket
+    # (tests/test_pam_module.py). pamtester runs in a private mount namespace
+    # with a temp dir bind-mounted over /etc/pam.d, so it needs sudo.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpam0g-dev pamtester pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: PAM module under pamtester
+        # REQUIRE_PAM_TESTS=1 turns a skip into a failure: a skip proves nothing.
+        run: REQUIRE_PAM_TESTS=1 PYTHONPATH=src python -m pytest tests/test_pam_module.py -q -rs
