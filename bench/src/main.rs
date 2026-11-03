@@ -14,6 +14,8 @@ mod machine;
 mod metrics;
 mod record;
 mod scores;
+#[allow(dead_code)]
+mod stats;
 mod synth;
 
 use anyhow::{bail, Context, Result};
