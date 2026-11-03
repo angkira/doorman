@@ -5,9 +5,6 @@
 # Resolve the whole lock file, not only the default feature set: optional
 # back-ends (nokhwa/gstreamer, ort, preview) are part of what ships somewhere.
 all-features = true
-# TODO(WS9-A): bench/Cargo.toml has no license field; add
-# `license.workspace = true` there, then drop this exclusion.
-exclude = ["doorman-bench"]
 
 [advisories]
 version = 2
