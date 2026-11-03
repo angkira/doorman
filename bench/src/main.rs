@@ -12,6 +12,7 @@ mod dataset;
 #[cfg_attr(not(feature = "ort"), allow(dead_code))]
 mod latency_report;
 mod machine;
+mod matching;
 mod metrics;
 mod pad;
 mod record;
@@ -62,6 +63,8 @@ enum Cmd {
     Liveness(LivenessArgs),
     /// ISO/IEC 30107-3 style PAD report: APCER per attack species, BPCER, bounds.
     PadReport(PadReportArgs),
+    /// ISO/IEC 19795-1 style FMR/FNMR/FTA report with exact bounds from comparison scores.
+    MatchReport(MatchReportArgs),
     /// Per-stage latency (p50/p95/p99), cold start separate; needs models + `ort` feature.
     Latency(LatencyArgs),
     /// Guided capture of a labelled dataset from the camera.
@@ -152,6 +155,21 @@ struct PadReportArgs {
     /// APCER the claim is measured against.
     #[arg(long, default_value_t = pad::DEFAULT_TARGET_APCER)]
     target_apcer: f64,
+    #[command(flatten)]
+    out: OutArg,
+}
+
+#[derive(Args)]
+struct MatchReportArgs {
+    /// Scores CSV: label{genuine,impostor},score[,subject,response].
+    #[arg(long)]
+    scores: PathBuf,
+    /// Accept iff score > threshold (cosine similarity).
+    #[arg(long)]
+    threshold: f64,
+    /// FMR the claim is measured against.
+    #[arg(long, default_value_t = matching::DEFAULT_TARGET_FMR)]
+    target_fmr: f64,
     #[command(flatten)]
     out: OutArg,
 }
@@ -338,6 +356,25 @@ fn cmd_pad_report(a: PadReportArgs) -> Result<()> {
     write_machine(&dir, &[("scores file", a.scores.display().to_string())])
 }
 
+fn cmd_match_report(a: MatchReportArgs) -> Result<()> {
+    let dir = out_dir(&a.out);
+    let text = std::fs::read_to_string(&a.scores)
+        .with_context(|| format!("cannot read {}", a.scores.display()))?;
+    let input = matching::parse_match(&text)?;
+    let rep = matching::analyze_match(
+        &input,
+        matching::MatchParams {
+            threshold: a.threshold,
+            target_fmr: a.target_fmr,
+            confidence: stats::DEFAULT_CONFIDENCE,
+        },
+    )?;
+    write(&dir, "match_report.md", &rep.markdown())?;
+    write(&dir, "match_report.csv", &rep.csv())?;
+    print!("{}", rep.markdown());
+    write_machine(&dir, &[("scores file", a.scores.display().to_string())])
+}
+
 #[cfg(feature = "ort")]
 async fn cmd_latency(a: LatencyArgs) -> Result<()> {
     let dir = out_dir(&a.out);
@@ -399,6 +436,7 @@ async fn main() -> Result<()> {
         Cmd::Accuracy(a) => cmd_accuracy(a).await,
         Cmd::Liveness(a) => cmd_liveness(a),
         Cmd::PadReport(a) => cmd_pad_report(a),
+        Cmd::MatchReport(a) => cmd_match_report(a),
         Cmd::Latency(a) => cmd_latency(a).await,
         Cmd::Record(a) => cmd_record(a).await,
     }
