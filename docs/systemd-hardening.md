@@ -1,7 +1,8 @@
 # systemd hardening review: `doormand.service`
 
 Unit: `packaging/systemd/doormand.service` (system service, user `doorman`).
-This is a static review; nothing here was run against a live systemd.
+The directive review is static (not run against a live systemd). The exposure score
+below is computed offline and gated in CI.
 
 ## Directive checklist
 
@@ -65,5 +66,21 @@ Do not do this for a discrete GPU reserved for other work.
     systemd-analyze verify /lib/systemd/system/doormand.service
     systemctl show doormand -p DeviceAllow -p DevicePolicy -p MemoryMax
 
-Record the resulting score here after the first run on the host:
-`systemd-analyze security doormand`: **[not yet measured]**.
+## Exposure score (CI-gated)
+
+`systemd-analyze security --offline=true packaging/systemd/doormand.service`
+(systemd 255.4, Ubuntu 24.04): **5.2 MEDIUM**. Lower is better.
+
+`scripts/check_systemd_security.sh` runs that command and fails when the score is
+higher than the number in `packaging/systemd/security-exposure.max` (currently
+`5.2`); the CI job `systemd-security` runs it. Hardening the unit should lower the
+file in the same change; raising it needs a stated reason in the commit.
+The score depends on the systemd version of the runner (needs >= 252 for `--offline`);
+a systemd upgrade that adds checks can move it without any unit change.
+
+Largest remaining items (each is a candidate, none applied): no `SystemCallFilter=`
+(about 2.5 in total), `PrivateNetwork=true` (0.5; the daemon uses only
+filesystem UNIX sockets, which work inside a private network namespace; untested), no empty
+`CapabilityBoundingSet=`, `PrivateUsers=`, `ProtectProc=invisible`,
+`ProcSubset=pid`, `UMask=0077`. A syscall filter must be tested with the ORT and
+camera back-ends before it is added.
