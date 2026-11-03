@@ -129,6 +129,9 @@ whole procedure.
    `auth sufficient pam_doorman.so` before the first `auth` line or `@include`,
    refuses if no password path would remain or the module is not installed, and
    prints the recovery command. Set `PAM_DIR` to try it on a copy first.
+   The module only talks to a daemon running as root or as the `doorman`
+   system user (checked with `SO_PEERCRED`); if you run `doormand` under another
+   uid, add `server_uid=<uid>` to the PAM line, otherwise face login is ignored.
 4. In another terminal: `sudo -k; sudo true`. Test with your face, then with
    sunglasses or a dark room (it must fall through to the password), then with
    a photo of yourself on a phone (record honestly whether it is rejected).

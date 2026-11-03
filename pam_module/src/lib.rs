@@ -15,7 +15,10 @@
 //! `AUTH_TIMEOUT_SECS`.
 //!
 //! Recommended PAM line (see INSTALL.md) — `auth sufficient pam_doorman.so`.
-//! The only module argument is `socket=/abs/path` (tests; see `SOCKET_ARG_PREFIX`).
+//! Module arguments: `socket=/abs/path` (tests; see `SOCKET_ARG_PREFIX`) and
+//! `server_uid=N` (extra daemon uids to trust; see `SERVER_UID_ARG_PREFIX`).
+//! The daemon's identity is checked with `SO_PEERCRED` before any request is
+//! sent: only uid 0, the `doorman` system user, or a `server_uid=` are accepted.
 //! "sufficient" means: success here is enough to authenticate, but anything
 //! else (face not matched, daemon down, timeout) falls through to the next
 //! module (normally `pam_unix.so` password). This module therefore MUST NEVER
@@ -87,6 +90,78 @@ fn socket_from_args<'a>(args: impl IntoIterator<Item = &'a str>) -> PathBuf {
         .map(PathBuf::from)
         .find(|p| p.is_absolute())
         .unwrap_or_else(|| PathBuf::from(SOCKET_PATH))
+}
+
+/// PAM module argument naming an additional uid the daemon may run as
+/// (`server_uid=1234`, repeatable). Without it only uid 0 and the `doorman`
+/// system user are accepted as the server. Like `socket=` it comes from
+/// `/etc/pam.d` and is therefore root-controlled.
+const SERVER_UID_ARG_PREFIX: &str = "server_uid=";
+
+/// Name of the system user the packaged `doormand.service` runs as.
+const DAEMON_USER: &str = "doorman";
+
+/// Scratch buffer for `getpwnam_r`.
+const PASSWD_BUF_LEN: usize = 4096;
+
+/// Extra trusted server uids from the module arguments; unparsable values are
+/// ignored (stricter, never wider).
+fn server_uids_from_args<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<u32> {
+    args.into_iter()
+        .filter_map(|a| a.strip_prefix(SERVER_UID_ARG_PREFIX))
+        .filter_map(|v| v.parse().ok())
+        .collect()
+}
+
+/// Is `peer_uid` an acceptable daemon identity? `doorman_uid` is only called
+/// when uid 0 and the explicit list did not already decide.
+fn peer_trusted(peer_uid: u32, extra: &[u32], doorman_uid: impl FnOnce() -> Option<u32>) -> bool {
+    peer_uid == 0 || extra.contains(&peer_uid) || doorman_uid() == Some(peer_uid)
+}
+
+/// The uid of the `doorman` system user, if it exists.
+fn lookup_daemon_uid() -> Option<u32> {
+    let name = std::ffi::CString::new(DAEMON_USER).ok()?;
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buf = vec![0u8; PASSWD_BUF_LEN];
+    // SAFETY: all pointers refer to live locals; getpwnam_r is thread safe.
+    let rc = unsafe {
+        libc::getpwnam_r(
+            name.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    (rc == 0 && !result.is_null()).then_some(pwd.pw_uid)
+}
+
+/// The uid of the process that listens on the connected socket (`SO_PEERCRED`).
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are valid for the call.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 {
+        Ok(cred.uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// The module arguments as UTF-8 strings (non-UTF-8 entries are skipped).
@@ -212,7 +287,12 @@ fn connect_nonblocking(path: &Path) -> std::io::Result<UnixStream> {
 /// Returns `Matched` / `NotMatched` only when the daemon actually answered;
 /// any connection or protocol failure yields `Unavailable` so PAM falls through
 /// to the password prompt instead of hard-failing.
-fn authenticate_ipc(socket: &Path, target: &AuthTarget, read_timeout: Duration) -> AuthOutcome {
+fn authenticate_ipc(
+    socket: &Path,
+    target: &AuthTarget,
+    read_timeout: Duration,
+    server_uids: &[u32],
+) -> AuthOutcome {
     // System-mode socket path. PAM runs as root at the greeter, so the daemon
     // (a system service) owns /run/doorman/doorman.sock. The user-mode XDG socket is
     // only used by the dev preview/CLI, never by the greeter.
@@ -220,6 +300,23 @@ fn authenticate_ipc(socket: &Path, target: &AuthTarget, read_timeout: Duration) 
         Ok(s) => s,
         Err(_) => return AuthOutcome::Unavailable, // daemon not running -> fall through
     };
+
+    // Verify who is listening before sending anything. An unknown or
+    // unreadable identity is "daemon unavailable": fall through to the password.
+    match peer_uid(&stream) {
+        Ok(uid) if peer_trusted(uid, server_uids, lookup_daemon_uid) => {}
+        Ok(uid) => {
+            log_syslog(&format!(
+                "pam_doorman: ignoring daemon socket {}: server uid {uid} is not root, `{DAEMON_USER}` or a server_uid= argument",
+                socket.display()
+            ));
+            return AuthOutcome::Unavailable;
+        }
+        Err(e) => {
+            log_syslog(&format!("pam_doorman: cannot read daemon credentials: {e}"));
+            return AuthOutcome::Unavailable;
+        }
+    }
 
     // Bound every blocking syscall. The hard-deadline thread below is the
     // backstop; these keep individual reads/writes from blocking forever.
@@ -271,9 +368,19 @@ fn authenticate_ipc(socket: &Path, target: &AuthTarget, read_timeout: Duration) 
 
 /// Run `authenticate_ipc` on a worker thread with a hard wall-clock deadline so
 /// the greeter can never be frozen by a stuck daemon or socket.
-fn authenticate_with_deadline(socket: &Path, target: &AuthTarget) -> AuthOutcome {
+fn authenticate_with_deadline(
+    socket: &Path,
+    target: &AuthTarget,
+    server_uids: &[u32],
+) -> AuthOutcome {
     let read_timeout = read_timeout(target.service);
-    authenticate_with_timeouts(socket, target, read_timeout, read_timeout + DEADLINE_SLACK)
+    authenticate_with_timeouts(
+        socket,
+        target,
+        read_timeout,
+        read_timeout + DEADLINE_SLACK,
+        server_uids,
+    )
 }
 
 fn authenticate_with_timeouts(
@@ -281,9 +388,11 @@ fn authenticate_with_timeouts(
     target: &AuthTarget,
     read_timeout: Duration,
     deadline: Duration,
+    server_uids: &[u32],
 ) -> AuthOutcome {
     let (tx, rx) = mpsc::channel();
     let socket = socket.to_path_buf();
+    let server_uids = server_uids.to_vec();
     let username = target.username.to_string();
     let service = target.service.map(str::to_string);
     let tty = target.tty.map(str::to_string);
@@ -295,7 +404,12 @@ fn authenticate_with_timeouts(
             service: service.as_deref(),
             tty: tty.as_deref(),
         };
-        let _ = tx.send(authenticate_ipc(&socket, &target, read_timeout));
+        let _ = tx.send(authenticate_ipc(
+            &socket,
+            &target,
+            read_timeout,
+            &server_uids,
+        ));
     });
 
     match rx.recv_timeout(deadline) {
@@ -364,8 +478,10 @@ pub extern "C" fn pam_sm_authenticate(
             service: service.as_deref(),
             tty: tty.as_deref(),
         };
-        let socket = socket_from_args(module_args(argc, argv));
-        outcome_to_pam(authenticate_with_deadline(&socket, &target))
+        let args = module_args(argc, argv);
+        let socket = socket_from_args(args.iter().copied());
+        let server_uids = server_uids_from_args(args.iter().copied());
+        outcome_to_pam(authenticate_with_deadline(&socket, &target, &server_uids))
     })
 }
 
@@ -391,6 +507,11 @@ mod tests {
     const FAST: Duration = Duration::from_millis(100);
     const TEST_READ_TIMEOUT: Duration = Duration::from_millis(300);
     const TEST_DEADLINE: Duration = Duration::from_millis(600);
+
+    /// The mock daemon runs as the test user, so tests trust that uid explicitly.
+    fn own_uid() -> u32 {
+        unsafe { libc::geteuid() }
+    }
 
     static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -439,6 +560,7 @@ mod tests {
             &target,
             TEST_READ_TIMEOUT,
             TEST_DEADLINE,
+            &[own_uid()],
         ))
     }
 
@@ -504,7 +626,13 @@ mod tests {
             service: None,
             tty: None,
         };
-        authenticate_with_timeouts(&path, &target, TEST_READ_TIMEOUT, TEST_DEADLINE);
+        authenticate_with_timeouts(
+            &path,
+            &target,
+            TEST_READ_TIMEOUT,
+            TEST_DEADLINE,
+            &[own_uid()],
+        );
         let v: serde_json::Value = serde_json::from_str(daemon.join().unwrap().trim()).unwrap();
         assert!(v.get("service").is_none() && v.get("tty").is_none());
     }
@@ -574,5 +702,66 @@ mod tests {
     fn a_panic_never_crosses_the_ffi_boundary() {
         assert_eq!(guarded(|| panic!("boom")), PAM_AUTHINFO_UNAVAIL);
         assert_eq!(guarded(|| PAM_SUCCESS), PAM_SUCCESS);
+    }
+
+    const DOORMAN_TEST_UID: u32 = 991;
+    const OTHER_UID: u32 = 1000;
+
+    #[test]
+    fn peer_trust_table() {
+        let none = || None;
+        assert!(peer_trusted(0, &[], none));
+        assert!(!peer_trusted(OTHER_UID, &[], none));
+        assert!(peer_trusted(OTHER_UID, &[OTHER_UID], none));
+        assert!(peer_trusted(DOORMAN_TEST_UID, &[], || Some(
+            DOORMAN_TEST_UID
+        )));
+        assert!(!peer_trusted(OTHER_UID, &[], || Some(DOORMAN_TEST_UID)));
+        // The default is strict: no doorman user and no argument means root only.
+        assert!(!peer_trusted(DOORMAN_TEST_UID, &[], none));
+    }
+
+    #[test]
+    fn server_uid_arguments_parse_strictly() {
+        assert_eq!(
+            server_uids_from_args([
+                "server_uid=12",
+                "socket=/x",
+                "server_uid=abc",
+                "server_uid=-1",
+                "server_uid=7"
+            ]),
+            vec![12, 7]
+        );
+        assert!(server_uids_from_args(["server_uid="]).is_empty());
+    }
+
+    #[test]
+    fn untrusted_server_is_ignored_without_sending_the_request() {
+        if own_uid() == 0 {
+            return; // root peers are always trusted; covered by tests/test_pam_module.py
+        }
+        let path = temp_socket();
+        let listener = UnixListener::bind(&path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            conn.set_read_timeout(Some(TEST_READ_TIMEOUT)).unwrap();
+            let mut buf = Vec::new();
+            let _ = conn.read_to_end(&mut buf);
+            buf
+        });
+        let target = AuthTarget {
+            username: "alice",
+            service: None,
+            tty: None,
+        };
+        // No server_uid=: the test user is neither root nor `doorman`.
+        let outcome =
+            authenticate_with_timeouts(&path, &target, TEST_READ_TIMEOUT, TEST_DEADLINE, &[]);
+        assert!(matches!(outcome, AuthOutcome::Unavailable));
+        assert!(
+            handle.join().unwrap().is_empty(),
+            "request must not be sent"
+        );
     }
 }

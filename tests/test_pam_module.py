@@ -170,8 +170,13 @@ class Env:
         (self.pam_d / name).write_text(stack + "\n")
         return name
 
-    def doorman_line(self, control="required"):
-        return f"auth {control} {self.module} socket={self.sock}"
+    def doorman_line(self, control="required", extra=None):
+        """The module line. The in-process fake daemon runs as the test user, so
+        unless that is root (always trusted) its uid is passed as server_uid=.
+        `extra` replaces that default argument (None keeps it, "" drops it)."""
+        if extra is None:
+            extra = f"server_uid={os.geteuid()}" if os.geteuid() != 0 else ""
+        return f"auth {control} {self.module} socket={self.sock} {extra}".rstrip()
 
     def run(self, service):
         cmd = self.tools["prefix"] + [
@@ -307,3 +312,80 @@ def test_root_never_uses_the_daemon(env, daemon):
     assert proc.returncode != 0
     assert MSG_AUTHINFO_UNAVAIL in output(proc)
     assert d.requests == []
+
+
+# --- server identity (SO_PEERCRED) -------------------------------------------
+
+# An unprivileged uid that is neither root nor the `doorman` system user.
+STRANGER_UID = 65534
+
+STRANGER_SERVER = """
+import json, os, socket, sys
+path, reply = sys.argv[1], sys.argv[2]
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(path)
+os.chmod(path, 0o666)
+srv.listen(8)
+print("ready", flush=True)
+while True:
+    conn, _ = srv.accept()
+    buf = b""
+    while not buf.endswith(b"\\n"):
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    if buf:
+        open(path + ".requests", "a").write(buf.decode())
+        try:
+            conn.sendall(reply.encode() + b"\\n")
+        except OSError:
+            pass
+    conn.close()
+"""
+
+
+@pytest.fixture()
+def stranger_daemon(env):
+    """A success-replying daemon running as an unprivileged, non-doorman uid."""
+    if os.geteuid() != 0:
+        pytest.skip("needs root to start a daemon under another uid")
+    os.chmod(env.root, 0o777)
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-c", STRANGER_SERVER, str(env.sock),
+         json.dumps({"status": "success"})],
+        user=STRANGER_UID,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout.readline().strip() == "ready"
+    yield Path(str(env.sock) + ".requests")
+    proc.kill()
+    proc.wait()
+
+
+def test_server_with_untrusted_uid_is_ignored_by_default(env, stranger_daemon):
+    stack = env.doorman_line("sufficient", extra="") + "\nauth required pam_deny.so"
+    proc, _ = env.run(env.service(stack))
+    assert proc.returncode != 0, output(proc)  # success was NOT honoured
+    assert not stranger_daemon.exists(), "request must not reach an untrusted server"
+
+
+def test_server_uid_argument_trusts_that_uid(env, stranger_daemon):
+    line = env.doorman_line("sufficient", extra=f"server_uid={STRANGER_UID}")
+    proc, _ = env.run(env.service(line + "\nauth required pam_deny.so"))
+    assert proc.returncode == 0, output(proc)
+    assert stranger_daemon.exists()
+
+
+def test_server_uid_argument_for_another_uid_does_not_trust_the_stranger(env, stranger_daemon):
+    line = env.doorman_line("sufficient", extra="server_uid=4242")
+    proc, _ = env.run(env.service(line + "\nauth required pam_deny.so"))
+    assert proc.returncode != 0, output(proc)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="root daemon needs root")
+def test_root_server_is_trusted_by_default(env, daemon):
+    daemon({"status": "success"})
+    proc, _ = env.run(env.service(env.doorman_line("required", extra="")))
+    assert proc.returncode == 0, output(proc)
