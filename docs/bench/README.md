@@ -69,6 +69,23 @@ Lines starting with `#` are ignored; errors report the line number.
   recommended threshold is the highest one with `BPCER <= --target-bpcer`
   (default 1%).
 
+## Self-assessment reports (PAD and matching)
+
+`pad-report` (APCER per attack species, BPCER, non-response rates) and
+`match-report` (FMR, FNMR, FTA) add exact one-sided 95% Clopper-Pearson upper
+bounds, the sample size still needed for a target, and an honest claim line.
+Both are model-free. Inputs, owner protocol, dataset recommendation and wording
+rules: [SELF-ASSESSMENT.md](SELF-ASSESSMENT.md).
+
+```sh
+doorman-bench synth --out /tmp/bench-synth --seed 1     # also writes pad_scores.csv, match_scores.csv
+doorman-bench pad-report --scores /tmp/bench-synth/pad_scores.csv --threshold 0.05 [--species-column species] [--target-apcer 0.01]
+doorman-bench match-report --scores /tmp/bench-synth/match_scores.csv --threshold 0.4 [--target-fmr 1e-4]
+```
+
+`accuracy` directory mode also writes `match_scores.csv` and accepts
+`--enroll-store <copy of state dir> --enroll-user <name>` instead of `--enroll`.
+
 ## Commands per experiment-matrix item
 
 Model-free (work anywhere):

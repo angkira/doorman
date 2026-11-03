@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn required_trials_with_errors_is_minimal() {
         assert_eq!(required_trials_with_errors(0, 0.01, 0.95).unwrap(), 299);
-        // One error: the 95% bound is -ln-ish 4.74/n, so about 474 trials.
+        // One error: the 95% bound is -ln-ish 4.74/n, so about 473 trials.
         let n = required_trials_with_errors(1, 0.01, 0.95).unwrap();
         assert!(upper_bound(1, n, 0.95).unwrap() <= 0.01);
         assert!(upper_bound(1, n - 1, 0.95).unwrap() > 0.01);
