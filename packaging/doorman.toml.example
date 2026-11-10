@@ -109,3 +109,14 @@ retention_days = 14
 # [models]
 # allow_unverified_models = false  # true accepts model files that differ from the manifest
 # manifest_path = "/etc/doorman/models.sha256"  # extra hashes, root-owned (doorman models verify --print-manifest)
+
+# Shadow PAD logging (Round 9b-1; docs/PAD-PROTOCOL.md). Calibration data only:
+# when on, every attempt appends ONE JSON line of aggregates (similarity and depth
+# relief distribution, frame counters, quality metrics, a MiniFASNet score) to the
+# path below. No frames, embeddings or names. It never influences the decision; the
+# record and the extra MiniFASNet pass run after the decision. Turn off again by
+# setting false (or deleting the key) and restarting doormand.
+# [liveness]
+# shadow_pad_logging = false
+# [telemetry]
+# shadow_pad_log_path = "/run/doorman/shadow-pad.jsonl"   # mode 0640, rotated at timing_log_max_bytes

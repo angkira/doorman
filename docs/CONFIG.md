@@ -144,6 +144,7 @@ or directory is group/world-writable.
 | `frames` | `1` |
 | `mean_mode_depth_samples` | `0` |
 | `relief_stat` | `"minmax"` |
+| `shadow_pad_logging` | `false` |
 | `signals` | `[]` |
 
 ## `[ml]`
@@ -220,6 +221,7 @@ or directory is group/world-writable.
 
 | Key | Default |
 |---|---|
+| `shadow_pad_log_path` | `"/run/doorman/shadow-pad.jsonl"` |
 | `timing_log` | `false` |
 | `timing_log_max_bytes` | `1048576` |
 | `timing_log_path` | `"/run/doorman/timing.jsonl"` |

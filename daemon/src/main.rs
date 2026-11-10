@@ -10,6 +10,7 @@ mod ipc;
 mod lock_supervisor;
 mod ml;
 mod pipeline;
+mod shadow_pad;
 mod storage;
 mod timing;
 

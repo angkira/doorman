@@ -47,6 +47,19 @@ pub trait MLBackend: Send + Sync {
         Ok(None)
     }
 
+    /// MiniFASNetV2-SE real-minus-spoof logit difference for the face, for
+    /// SHADOW logging only (positive = judged real). Returns `Ok(None)` when the
+    /// model is not loaded. Unlike [`MLBackend::check_liveness`] this never
+    /// answers "pass" for a missing model, and nothing in the decision path may
+    /// call it.
+    async fn minifasnet_logit_diff(
+        &self,
+        _image: &DynamicImage,
+        _face: &Face,
+    ) -> Result<Option<f32>> {
+        Ok(None)
+    }
+
     /// Extract face embedding (512-d vector)
     async fn extract_embedding(&self, image: &DynamicImage, face: &Face) -> Result<Vec<f32>>;
 

@@ -183,6 +183,20 @@ impl MLPipeline {
         .await
     }
 
+    /// Shadow-only MiniFASNet score (`real - spoof` logit) for one face; `None`
+    /// when the model is not loaded. Only the shadow PAD logger calls this.
+    pub async fn shadow_minifasnet_logit_diff(
+        &self,
+        image: &DynamicImage,
+        face: &backend::Face,
+    ) -> Result<Option<f32>> {
+        let face = face.clone();
+        self.run_blocking(image, move |backend, image| {
+            tokio::runtime::Handle::current().block_on(backend.minifasnet_logit_diff(image, &face))
+        })
+        .await
+    }
+
     async fn check_liveness_blocking(
         &self,
         image: &DynamicImage,

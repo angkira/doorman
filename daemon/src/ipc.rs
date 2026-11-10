@@ -429,9 +429,26 @@ async fn decide(
     strict: Option<(&StrictProfile, std::time::Instant)>,
     wait: Option<&unlock_wait::WaitTiming>,
 ) -> AuthDecision {
+    // Shadow PAD logging (default off): observes the attempt, never steers it.
+    // Its record is built and written after the decision exists.
+    let mut shadow = crate::shadow_pad::ShadowPad::new(&state.config, &state.ml_pipeline);
+    let decision = decide_core(state, username, strict, wait, &mut shadow).await;
+    let _ = shadow.finish(&decision);
+    decision
+}
+
+async fn decide_core(
+    state: &DaemonState,
+    username: &str,
+    strict: Option<(&StrictProfile, std::time::Instant)>,
+    wait: Option<&unlock_wait::WaitTiming>,
+    shadow: &mut crate::shadow_pad::ShadowPad,
+) -> AuthDecision {
+    use crate::shadow_pad::FrameEvent;
     info!("Authentication request for user: {}", username);
     // Emits one timing record (debug log + optional JSONL file) when dropped.
     let mut timing = crate::timing::AttemptTiming::start(&state.config.telemetry);
+    shadow.attempt_id(&timing.attempt_id);
     // Frames older than this are never used (strict arrival or WaitForMatch request).
     let fresh_floor = strict
         .map(|(_, arrival)| arrival)
@@ -509,6 +526,7 @@ async fn decide(
         None => (dec.mode == DecisionMode::NOfM).then_some((dec.accept_n, dec.window_m)),
     };
     let mut sequential = n_of_m.map(|(n, m)| SequentialDecider::new(threshold, n, m, auth_frames));
+    shadow.context(threshold, n_of_m.is_some());
     let mut sequential_step = Step::Continue;
     let mut raw_face_frames: Vec<dataset::CaptureFrameImage> = Vec::new();
     let mut first_quality_face_area_frac = None;
@@ -556,6 +574,7 @@ async fn decide(
         if let Some(floor) = fresh_floor {
             if !sudo_policy::is_fresh(frame.timestamp, floor) {
                 debug!("Skipping a frame captured before the request arrived");
+                shadow.frame_event(FrameEvent::SkippedPreRequest);
                 continue; // `maybe_frame` is empty: waits for the next frame
             }
         }
@@ -566,8 +585,10 @@ async fn decide(
         ) {
             debug!("Skipping a frame older than camera.max_frame_age_ms");
             stale_dropped += 1;
+            shadow.frame_event(FrameEvent::SkippedStale);
             continue;
         }
+        let shadow_image = frame.image.clone();
         let frame = (*frame.image).clone();
         let i = frames_seen;
         frames_seen += 1;
@@ -581,11 +602,13 @@ async fn decide(
             Ok(Some(f)) => f,
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
+                shadow.frame_event(FrameEvent::NoFace);
                 maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
                 continue;
             }
             Err(e) => {
                 warn!("Frame {}: Detection error: {}", i, e);
+                shadow.frame_event(FrameEvent::DetectorError);
                 maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
                 continue;
             }
@@ -622,16 +645,19 @@ async fn decide(
                     i
                 );
                 multi_face_dropped += 1;
+                shadow.frame_event(FrameEvent::Ambiguous);
                 maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
                 continue;
             }
         }
 
         if !frame_passes_quality_gate(&frame, &face, rec, i, "auth") {
+            shadow.frame_event(FrameEvent::QualityRejected);
             maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
             continue;
         }
         timing.mark_first_valid_frame();
+        shadow.quality_frame(&shadow_image, &face);
         if first_quality_face_area_frac.is_none() {
             first_quality_face_area_frac = face_area_frac(&face);
         }
@@ -660,6 +686,7 @@ async fn decide(
                 );
             }
             if let Some(outcome) = frame_result {
+                shadow.depth_relief(outcome.relief());
                 if let LivenessProgress::Decided(verdict) = agg.push(outcome) {
                     timing.liveness_passed = Some(verdict.is_pass());
                     timing.liveness_relief = verdict.relief();
@@ -693,6 +720,8 @@ async fn decide(
                         &embedding,
                         &stored_embeddings,
                     );
+                    shadow.similarity(frame_score);
+                    shadow.frame_event(FrameEvent::Judged);
                     if doormand::frame_policy::below_identity_floor(
                         frame_score,
                         dec.frame_identity_floor,
@@ -720,6 +749,8 @@ async fn decide(
                         &stored_embeddings,
                     );
                     debug!("Frame {}: template score {:.4}", i, score);
+                    shadow.similarity(score);
+                    shadow.frame_event(FrameEvent::Judged);
                     sequential_step =
                         decider.push(score, liveness_state(liveness_agg.is_some(), &liveness));
                 }
@@ -732,7 +763,10 @@ async fn decide(
                 }
                 deciding_frame = Some((frame, face, checked_this_frame));
             }
-            Err(e) => warn!("Frame {}: Embedding error: {}", i, e),
+            Err(e) => {
+                warn!("Frame {}: Embedding error: {}", i, e);
+                shadow.frame_event(FrameEvent::EmbeddingError);
+            }
         }
         if passed_embeddings.len() >= auth_frames || sequential_step != Step::Continue {
             break;
@@ -916,8 +950,10 @@ async fn decide(
     if matched && liveness_agg.is_some() {
         if let Some((frame, face, checked)) = deciding_frame.take() {
             let recheck_started = std::time::Instant::now();
-            let confirmed = doormand::liveness::confirm_on_deciding_frame(checked, || {
-                state.ml_pipeline.liveness_check(&frame, &face)
+            let confirmed = doormand::liveness::confirm_on_deciding_frame(checked, || async {
+                let outcome = state.ml_pipeline.liveness_check(&frame, &face).await;
+                shadow.depth_relief(outcome.as_ref().and_then(LivenessOutcome::relief));
+                outcome
             })
             .await;
             if !checked {
@@ -946,15 +982,27 @@ async fn decide(
     // cannot be averaged in unseen.
     if matched && mean_depth_samples > 0 {
         let sampled_started = std::time::Instant::now();
+        let sampled_reliefs = std::sync::Mutex::new(Vec::new());
         let sampled = doormand::liveness::confirm_sampled_frames(
             &scored_checked,
             mean_depth_samples,
             |index| {
                 let (frame, face) = &scored_frames[index];
-                state.ml_pipeline.liveness_check(frame, face)
+                let check = state.ml_pipeline.liveness_check(frame, face);
+                let seen_reliefs = &sampled_reliefs;
+                async move {
+                    let outcome = check.await;
+                    if let Ok(mut seen) = seen_reliefs.lock() {
+                        seen.push(outcome.as_ref().and_then(LivenessOutcome::relief));
+                    }
+                    outcome
+                }
             },
         )
         .await;
+        for relief in sampled_reliefs.into_inner().unwrap_or_default() {
+            shadow.depth_relief(relief);
+        }
         let performed = match &sampled {
             Ok(n) => *n,
             // The failing check ran too; the exact count is not needed for timing.

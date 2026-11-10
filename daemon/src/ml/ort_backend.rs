@@ -1073,6 +1073,50 @@ impl MLBackend for OrtBackend {
         Ok(is_real)
     }
 
+    /// Shadow-only MiniFASNetV2-SE score: the same crop and preprocessing as
+    /// `check_liveness`, returning `real_logit - spoof_logit` instead of a
+    /// verdict. A missing model or session is `Ok(None)`, never a pass.
+    async fn minifasnet_logit_diff(
+        &self,
+        image: &DynamicImage,
+        face: &Face,
+    ) -> Result<Option<f32>> {
+        use super::model_config::LivenessConfig;
+
+        if self.liveness_pool.is_empty() {
+            return Ok(None);
+        }
+        let cfg = LivenessConfig::MINIFASNET;
+        let size = cfg.input_size;
+        let Some(session) = self.get_next_session(&self.liveness_pool) else {
+            return Ok(None);
+        };
+        let crop = Self::antispoof_square_crop(image, face, cfg.bbox_expansion_factor, size);
+        let n = (size * size) as usize;
+        let mut input = vec![0.0f32; 3 * n];
+        let (r_off, g_off, b_off) = (0, n, 2 * n);
+        for (i, px) in crop.pixels().enumerate() {
+            input[r_off + i] = px[0] as f32 / 255.0;
+            input[g_off + i] = px[1] as f32 / 255.0;
+            input[b_off + i] = px[2] as f32 / 255.0;
+        }
+        let input_tensor = ort_try!(Value::from_array((
+            [1usize, 3, size as usize, size as usize],
+            input
+        )));
+        let mut lock = session
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MiniFASNet session lock poisoned"))?;
+        let outputs = ort_try!(lock.run(ort::inputs![input_tensor]));
+        let (_, logits) = ort_try!(outputs[0].try_extract_tensor::<f32>());
+        if logits.len() <= cfg.real_class_index || logits.len() <= cfg.spoof_class_index {
+            anyhow::bail!("unexpected MiniFASNetV2-SE output length {}", logits.len());
+        }
+        Ok(Some(
+            logits[cfg.real_class_index] - logits[cfg.spoof_class_index],
+        ))
+    }
+
     /// Monocular-depth face relief PAD score (Depth-Anything-V2).
     ///
     /// Preprocessing (must match `DepthPadConfig::DEPTH_ANYTHING_V2`):

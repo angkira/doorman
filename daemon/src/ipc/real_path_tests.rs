@@ -102,7 +102,19 @@ fn frame_index(image: &DynamicImage) -> usize {
     usize::from(image.get_pixel(0, 0).0[0])
 }
 
+/// State of the (shadow-only) MiniFASNet model in the scripted backend.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MiniMode {
+    /// Loaded: real (+8) for live scenes, spoof (-8) for photos.
+    Loaded,
+    /// Not loaded: the backend answers `Ok(None)`.
+    Missing,
+    /// Loaded but the inference errors.
+    Failing,
+}
+
 struct ScriptedBackend {
+    mini: MiniMode,
     script: Vec<Scene>,
     camera: watch::Sender<Option<RawFrame>>,
     depth_calls: Arc<AtomicUsize>,
@@ -141,6 +153,21 @@ impl MLBackend for ScriptedBackend {
 
     async fn check_liveness(&self, _image: &DynamicImage, _face: &Face) -> anyhow::Result<bool> {
         Ok(true)
+    }
+
+    async fn minifasnet_logit_diff(
+        &self,
+        image: &DynamicImage,
+        _face: &Face,
+    ) -> anyhow::Result<Option<f32>> {
+        match self.mini {
+            MiniMode::Missing => Ok(None),
+            MiniMode::Failing => Err(anyhow::anyhow!("scripted MiniFASNet failure")),
+            MiniMode::Loaded => Ok(Some(match self.script[frame_index(image)] {
+                Scene::Photo => -8.0,
+                _ => 8.0,
+            })),
+        }
     }
 
     async fn depth_relief(
@@ -214,6 +241,28 @@ async fn build_state_cfg(
     watch::Sender<Option<RawFrame>>,
     tempfile::TempDir,
 ) {
+    build_state_mini(
+        script,
+        auth_frames,
+        mean_mode_depth_samples,
+        tweak,
+        MiniMode::Loaded,
+    )
+    .await
+}
+
+async fn build_state_mini(
+    script: &[Scene],
+    auth_frames: usize,
+    mean_mode_depth_samples: u32,
+    tweak: impl FnOnce(&mut Config),
+    mini: MiniMode,
+) -> (
+    DaemonState,
+    Arc<AtomicUsize>,
+    watch::Sender<Option<RawFrame>>,
+    tempfile::TempDir,
+) {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let mut config = Config::default();
     config.daemon.data_dir = data_dir.path().to_string_lossy().into_owned();
@@ -236,6 +285,7 @@ async fn build_state_cfg(
     let (camera_tx, camera_rx) = watch::channel(Some(frame(0)));
     let depth_calls = Arc::new(AtomicUsize::new(0));
     let backend = Arc::new(ScriptedBackend {
+        mini,
         script: script.to_vec(),
         camera: camera_tx.clone(),
         depth_calls: depth_calls.clone(),
@@ -657,4 +707,290 @@ async fn a_successful_unlock_stores_raw_frames_only_when_enabled() {
 #[tokio::test]
 async fn a_rejected_attempt_is_still_captured_by_default() {
     assert_eq!(captures_after(&[LiveImpostor; 5], false).await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Round 9b-1: shadow PAD logging observes the attempt and never steers it
+// ---------------------------------------------------------------------------
+
+use crate::shadow_pad::{Fault, FAULT};
+
+/// Clears the injected fault when the test ends, pass or fail.
+struct FaultGuard;
+impl FaultGuard {
+    fn set(fault: Fault) -> Self {
+        FAULT.with(|f| f.set(Some(fault)));
+        FaultGuard
+    }
+}
+impl Drop for FaultGuard {
+    fn drop(&mut self) {
+        FAULT.with(|f| f.set(None));
+    }
+}
+
+/// What the decision exposes: outcome, similarity, frames, liveness verdict,
+/// plus the depth inferences the attempt ran.
+type Observed = (AuthDecision, usize);
+
+/// One attempt with the shadow flag as given; returns the decision and the
+/// shadow log lines written (after letting the detached task finish).
+async fn shadow_attempt(
+    script: &[Scene],
+    samples: u32,
+    n_of_m: bool,
+    shadow: bool,
+    mini: MiniMode,
+) -> (Observed, Vec<serde_json::Value>) {
+    let log_dir = tempfile::tempdir().expect("log dir");
+    let log = log_dir.path().join("shadow.jsonl");
+    let log_str = log.to_string_lossy().into_owned();
+    let (state, depth_calls, _camera, _dir) = build_state_mini(
+        script,
+        script.len(),
+        samples,
+        |c| {
+            c.decision.frame_identity_floor = 0.0;
+            if n_of_m {
+                c.decision.mode = DecisionMode::NOfM;
+                c.decision.accept_n = 3;
+                c.decision.window_m = 5;
+            }
+            c.liveness.shadow_pad_logging = shadow;
+            c.telemetry.shadow_pad_log_path = log_str.clone();
+        },
+        mini,
+    )
+    .await;
+    let decision = run_authenticate(&state, USER, None, None).await;
+    // The record is written by a detached task: give it time, bounded.
+    for _ in 0..100 {
+        if log.exists()
+            && std::fs::metadata(&log)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            break;
+        }
+        if !shadow {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let lines = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+        .collect();
+    ((decision, depth_calls.load(Ordering::SeqCst)), lines)
+}
+
+fn sequences() -> Vec<(&'static str, Vec<Scene>)> {
+    vec![
+        ("genuine", vec![LiveOwner; 5]),
+        ("photo", vec![Photo; 5]),
+        ("impostor", vec![LiveImpostor; 5]),
+        (
+            "live-photo-live",
+            vec![LiveImpostor, Photo, Photo, Photo, LiveImpostor],
+        ),
+        ("weak-owner", vec![WeakOwner; 5]),
+        ("too-weak", vec![TooWeak; 5]),
+        ("phone-next-to-face", vec![OwnerWithPhoneFace; 5]),
+        ("background-face", vec![OwnerWithBackgroundFace; 5]),
+        (
+            "mixed",
+            vec![LiveOwner, LiveOwner, WeakOwner, LiveOwner, LiveOwner],
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn shadow_logging_leaves_every_decision_unchanged() {
+    for (name, script) in sequences() {
+        for (samples, n_of_m) in [(0, false), (3, false), (0, true)] {
+            let (off, off_lines) =
+                shadow_attempt(&script, samples, n_of_m, false, MiniMode::Loaded).await;
+            assert!(off_lines.is_empty(), "{name}: flag off writes nothing");
+            let (on, on_lines) =
+                shadow_attempt(&script, samples, n_of_m, true, MiniMode::Loaded).await;
+            assert_eq!(on, off, "{name} samples={samples} n_of_m={n_of_m}");
+            assert_eq!(on_lines.len(), 1, "{name}: exactly one record per attempt");
+            let rec = &on_lines[0];
+            assert_eq!(rec["schema_version"], 1);
+            assert_eq!(rec["frames_used"], on.0.frames_used as u64);
+            assert_eq!(rec["frames"]["seen"], on.0.frames_seen as u64);
+        }
+    }
+}
+
+#[tokio::test]
+async fn decisions_survive_shadow_faults_and_a_broken_minifasnet() {
+    // Accept, spoof-reject, swap-reject and identity-reject paths; the full
+    // sequence list is covered by the on/off comparison above.
+    let names = [
+        "genuine",
+        "photo",
+        "live-photo-live",
+        "impostor",
+        "weak-owner",
+    ];
+    let combos = [
+        (MiniMode::Loaded, None),
+        (MiniMode::Loaded, Some(Fault::Hook)),
+        (MiniMode::Loaded, Some(Fault::Finish)),
+        (MiniMode::Loaded, Some(Fault::Emit)),
+        (MiniMode::Missing, None),
+        (MiniMode::Failing, None),
+    ];
+    for (name, script) in sequences().into_iter().filter(|(n, _)| names.contains(n)) {
+        let (baseline, _) = shadow_attempt(&script, 3, false, false, MiniMode::Loaded).await;
+        for (mini, fault) in combos {
+            let _guard = fault.map(FaultGuard::set);
+            let (observed, _lines) = shadow_attempt(&script, 3, false, true, mini).await;
+            assert_eq!(
+                observed, baseline,
+                "{name}: mini={mini:?} fault={fault:?} changed the decision"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_shadow_fault_leaves_no_record_but_the_decision_stands() {
+    for fault in [Fault::Hook, Fault::Finish, Fault::Emit] {
+        let _guard = FaultGuard::set(fault);
+        let ((decision, _), lines) =
+            shadow_attempt(&[LiveOwner; 5], 0, false, true, MiniMode::Loaded).await;
+        assert_eq!(decision.outcome, AuthOutcome::Matched, "{fault:?}");
+        assert!(lines.is_empty(), "{fault:?}: no partial record");
+    }
+}
+
+#[tokio::test]
+async fn the_record_of_a_genuine_attempt_carries_the_calibration_aggregates() {
+    let ((decision, _), lines) =
+        shadow_attempt(&[LiveOwner; 5], 0, false, true, MiniMode::Loaded).await;
+    assert_eq!(decision.outcome, AuthOutcome::Matched);
+    let rec = &lines[0];
+    assert_eq!(rec["decision"], "recognized");
+    assert_eq!(rec["reason_code"], "matched");
+    assert_eq!(rec["decision_mode"], "mean");
+    assert_eq!(rec["frames"]["judged"], 5);
+    assert_eq!(rec["frames"]["quality_rejected"], 0);
+    let sim = &rec["similarity"]["per_frame"];
+    assert_eq!(sim["n"], 5);
+    assert_eq!(sim["min"].as_f64().unwrap(), 1.0);
+    assert!((rec["similarity"]["margin"].as_f64().unwrap() - 0.6).abs() < 1e-5);
+    // First frame + deciding frame were depth-checked, both at LIVE_RELIEF.
+    let depth = &rec["depth"];
+    assert_eq!(depth["relief"]["n"], 2);
+    let margin = depth["margin_min"].as_f64().unwrap();
+    assert!((margin - f64::from(LIVE_RELIEF - RELIEF_THRESHOLD)).abs() < 1e-5);
+    assert_eq!(rec["minifasnet"]["state"], "scored");
+    assert_eq!(rec["minifasnet"]["logit_diff"].as_f64().unwrap(), 8.0);
+    let q = &rec["quality"];
+    assert!((q["face_area_frac"].as_f64().unwrap() - 0.25).abs() < 1e-6);
+    assert!(q["yaw_proxy"].is_null(), "the mock has no landmarks");
+    assert!(q["sharpness"].is_number() && q["brightness"].is_number());
+}
+
+#[tokio::test]
+async fn a_photo_is_recorded_with_its_flat_relief_and_spoof_score() {
+    let ((decision, _), lines) =
+        shadow_attempt(&[Photo; 5], 0, false, true, MiniMode::Loaded).await;
+    assert_eq!(decision.outcome, AuthOutcome::LivenessRejected);
+    let rec = &lines[0];
+    assert_eq!(rec["reason_code"], "liveness_rejected");
+    let margin = rec["depth"]["margin_min"].as_f64().unwrap();
+    assert!(margin < 0.0, "below the threshold: {margin}");
+    assert_eq!(rec["minifasnet"]["logit_diff"].as_f64().unwrap(), -8.0);
+}
+
+#[tokio::test]
+async fn missing_and_failing_minifasnet_are_recorded_as_such() {
+    for (mini, state) in [
+        (MiniMode::Missing, "model_not_loaded"),
+        (MiniMode::Failing, "error"),
+    ] {
+        let ((decision, _), lines) = shadow_attempt(&[LiveOwner; 5], 0, false, true, mini).await;
+        assert_eq!(decision.outcome, AuthOutcome::Matched, "{mini:?}");
+        assert_eq!(lines[0]["minifasnet"]["state"], state);
+        assert!(lines[0]["minifasnet"]["logit_diff"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn the_record_has_no_names_frames_or_embeddings() {
+    fn keys(value: &serde_json::Value, out: &mut Vec<String>) {
+        if let Some(map) = value.as_object() {
+            for (k, v) in map {
+                out.push(k.clone());
+                keys(v, out);
+            }
+        }
+    }
+    let (_, lines) = shadow_attempt(&[LiveOwner; 5], 0, false, true, MiniMode::Loaded).await;
+    let mut names = Vec::new();
+    keys(&lines[0], &mut names);
+    for key in &names {
+        // `embedding_error` is a frame counter, not data.
+        let k = key.replace("embedding_error", "");
+        for forbidden in [
+            "embedding",
+            "image",
+            "pixel",
+            "user",
+            "uid",
+            "name",
+            "path",
+            "frame_data",
+        ] {
+            assert!(!k.contains(forbidden), "key {key} looks like {forbidden}");
+        }
+    }
+    let values = serde_json::to_string(&lines[0]).unwrap();
+    assert!(
+        !values.contains(USER),
+        "the user name is not in the record: {values}"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_frames_and_their_reason_are_counted() {
+    let ((decision, _), lines) =
+        shadow_attempt(&[OwnerWithPhoneFace; 5], 0, false, true, MiniMode::Loaded).await;
+    assert_eq!(decision.outcome, AuthOutcome::AmbiguousFaces);
+    assert_eq!(lines[0]["reason_code"], "ambiguous_faces");
+    assert_eq!(lines[0]["frames"]["ambiguous_faces"], 5);
+    assert_eq!(lines[0]["frames"]["judged"], 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_shadow_log_is_not_world_readable() {
+    use std::os::unix::fs::PermissionsExt;
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_dir.path().join("shadow.jsonl");
+    let log_str = log.to_string_lossy().into_owned();
+    let (state, _d, _c, _dir) = build_state_mini(
+        &[LiveOwner; 5],
+        5,
+        0,
+        |c| {
+            c.liveness.shadow_pad_logging = true;
+            c.telemetry.shadow_pad_log_path = log_str.clone();
+        },
+        MiniMode::Loaded,
+    )
+    .await;
+    run_authenticate(&state, USER, None, None).await;
+    for _ in 0..100 {
+        if log.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode & 0o007, 0, "no access for others: {mode:o}");
 }

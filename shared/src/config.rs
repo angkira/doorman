@@ -769,6 +769,18 @@ pub struct LivenessConfig {
     #[serde(default)]
     pub mean_mode_depth_samples: u32,
 
+    /// Shadow PAD logging (calibration data only; never part of a decision).
+    /// When `true`, every authentication attempt appends ONE JSON line of
+    /// per-attempt aggregates (similarity and depth-relief distribution,
+    /// frame counters and rejection reasons, quality metrics of the deciding
+    /// frame, and the MiniFASNet score of that frame if its model loads) to
+    /// `[telemetry] shadow_pad_log_path`. No frames, embeddings or names are
+    /// written. The record is built and the extra MiniFASNet pass runs AFTER
+    /// the decision is made, in a detached task: a failure there cannot change
+    /// the outcome. Default `false`.
+    #[serde(default)]
+    pub shadow_pad_logging: bool,
+
     /// Extra liveness signals (screen flash, head pose). None are implemented:
     /// any entry is rejected so a security setting is never silently ignored.
     #[serde(default)]
@@ -783,6 +795,7 @@ impl Default for LivenessConfig {
             relief_stat: default_relief_stat(),
             depth_input_size: default_depth_input_size(),
             mean_mode_depth_samples: 0,
+            shadow_pad_logging: false,
             signals: Vec::new(),
         }
     }
@@ -1350,6 +1363,12 @@ pub struct TelemetryConfig {
 
     #[serde(default = "default_timing_log_max_bytes")]
     pub timing_log_max_bytes: u64,
+
+    /// Where `[liveness] shadow_pad_logging` appends its records (mode 0640,
+    /// rotated to `<path>.1` at `timing_log_max_bytes`). Unused while shadow
+    /// logging is off.
+    #[serde(default = "default_shadow_pad_log_path")]
+    pub shadow_pad_log_path: String,
 }
 
 impl Default for TelemetryConfig {
@@ -1358,6 +1377,7 @@ impl Default for TelemetryConfig {
             timing_log: false,
             timing_log_path: default_timing_log_path(),
             timing_log_max_bytes: default_timing_log_max_bytes(),
+            shadow_pad_log_path: default_shadow_pad_log_path(),
         }
     }
 }
@@ -1423,6 +1443,9 @@ fn default_frame_socket() -> String {
 }
 fn default_timing_log_path() -> String {
     "/run/doorman/timing.jsonl".to_string()
+}
+fn default_shadow_pad_log_path() -> String {
+    "/run/doorman/shadow-pad.jsonl".to_string()
 }
 fn default_timing_log_max_bytes() -> u64 {
     1024 * 1024
