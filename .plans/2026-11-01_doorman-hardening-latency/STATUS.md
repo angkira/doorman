@@ -104,3 +104,48 @@ Proved by reading the dependency sources (not by running a camera): nokhwa's V4L
 **Hypothesis, not proved:** the cause of the non-JPEG buffer (junk/partial first buffers after STREAMON, or a format/buffer mismatch inside nokhwa or the driver). The new WARN line (first 8 bytes as hex, length, fourcc, resolution, frame index) is there to settle it on the next host run.
 
 Changes (tests in each; host-unverified): negotiated-format check that fails fast; validation of every buffer before the decoder (SOI + marker walk to EOI); `native_warmup_frames` (default 3) with retry inside `native_first_frame_timeout_ms`; per-(device, mode) negative cache `native_failure_cooldown_secs` (default 600) for `backend = "auto"`. No auth thresholds, liveness defaults or other defaults changed. Nothing here is claimed as verified on the host.
+
+## Round 8 (time-to-unlock; accuracy and security outrank speed)
+Goal: p50 4.3 s -> as low as possible WITHOUT touching the decision function. No threshold, liveness default, `auth_frames` or other existing default changed; two new `[ipc]` keys only.
+
+### Proved (from the owner's journals read on 2026-11-10, and the niri 26.04 source)
+- `LockedHint` is set by **niri**, not gtklock, the script or doorman: the niri binary contains the "Logind LockedHint Updater" thread (`GetSession` + `SetLockedHint`), and in `src/niri.rs` (v26.04) `update_locked_hint()` sets it only in `LockState::Locked`, i.e. after the lock client mapped a surface on every output and niri redrew (`lock()` -> `WaitingForSurfaces` -> `Locking` -> `Locked`; the 1 s timer is only a fallback).
+- 22 locks in the journal: WaitForMatch request -> niri "locking session" 0.34-0.73 s (gtklock start-up); niri "locking session" -> armed 0.50-0.91 s (niri surfaces + redraw + hint thread); request -> armed 0.87-1.49 s (median about 1.1 s).
+- The daemon is already event-driven on the hint (`lock_supervisor.rs`: D-Bus `PropertiesChanged`/`Lock` signal streams into a `watch` channel; `unlock_wait` awaits it). Nothing is polled on the daemon side, so there is no daemon-side lag to remove (task 3 needs no change). The 200 ms tick in `main.rs` only re-evaluates the camera gate and is also woken by the channels.
+- Before this round the camera was opened only after the gate armed (`AuthenticateSource` ran only when armed); the host log shows "Authentication request" in the same millisecond as `armed=true` and "Camera gated ON" 0.84 s later.
+- Auth loop: all 10 frames are processed (frames_seen = frames_used = 10 in the journal) at about 168 ms per frame, so the loop is inference-bound, not capture-bound (30 fps capture would be 33 ms per frame).
+
+### Inferred / not measured
+- The split of the 168 ms per frame between detection, embedding and (2 of the 10 frames) depth: no host timing log was enabled (`/run/doorman/timing.jsonl` absent), so it is NOT profiled. Enable `[telemetry] timing_log = true` for the next run.
+- Why niri takes 0.5-0.9 s to reach `Locked` (gtklock surface mapping vs. vblank redraw): not determined.
+
+### Implemented (host-unverified)
+1. Pre-arm in `unlock_wait.rs` (`[ipc] prearm_camera = true`, `prearm_max_hold_secs = 5`): the decision runs while the gate is closed, `Matched` only after armed, frames older than the request are skipped, lease and result dropped after the hold. Unit tests with a fake source and paused clock; real-path test for frame freshness.
+2. `doorman-lock` starts the watcher before the 0.3 s settle wait (`DOORMAN_WATCH_EARLY`, default 1; 0 restores the old order). flock/pidfile protections and exit codes unchanged; an early watcher for a refused locker is reaped before the old handling.
+3. Telemetry: `hint_wait_ms`, `lock_to_camera_ready_ms`, `frames_collect_ms` in the timing record; `WaitForMatch timing` info line (prearm, hint_wait_ms, total_ms).
+
+### Considered and dropped (not provably neutral for the decision)
+- `early_accept_after_frames` (accepting on fewer than `auth_frames`): changes the decision; no safety argument, not added.
+- Skipping the depth model on frames, or running inference on several frames in parallel: would change which frames/orderings the liveness and mean decision see; not argued neutral, not done. The loop is inference-bound, so overlapping capture with inference cannot help either.
+- Lowering `native_warmup_frames` / the 0.6 s camera warm-up: an existing key the owner may experiment with; default untouched.
+
+### Expected latency model (to be checked, not a host claim)
+Before: T = script 0.45 + hint lag 1.1 + camera 0.9 + recognition 1.7 + unlock 0.1 = about 4.3 s.
+After: lock 0.12 + max(hint lag, camera 0.9 + recognition 1.7). The recognition runs from camera-ready, in parallel with the remaining lag; the match is ready at about request + 2.6 s and delivered at max(2.6 s, hint), so T about 0.15 + 2.6 + 0.1 = about 2.9 s (saves about 1.4 s). The 2 s target is NOT reached by this round alone: the remainder is camera open + warm-up (0.9) and recognition (1.7), neither reducible without touching the camera policy or the decision.
+The host re-measure must show: `hint_wait_ms` about 1100, `lock_to_camera_ready_ms` negative (camera ready before the hint), `camera_open_ms` about 900, no `Matched` before `armed=true` in the journal, "Camera gated OFF" within about 0.2 s of unlock, and no camera open for more than `prearm_max_hold_secs` when the lock fails.
+
+### Security impact (every behavioural change)
+- Pre-arm runs the same `run_authenticate` (quality gate, depth liveness, aggregated threshold) with unchanged config; only its start time moves earlier. A false accept needs exactly the frames and scores it needed before.
+- `Matched` is delivered only when `armed` (LockedHint && !IdleHint) is observed true at delivery. While closed the function can only return `NoMatch`/hold; a test asserts no `Matched` with a gate that never opens. The unlock helper therefore still signals the locker only after niri is fully `Locked`.
+- Freshness: WaitForMatch attempts now skip frames captured before the request (stricter than before, where an already-open camera could hand over a buffered frame). Held results are at most `prearm_max_hold_secs` old (default 5 s) and are discarded after that.
+- A frame captured while the screen was still locking can count; it is a frame of whoever stood in front of the camera after the request, which is the same population as frames after the hint. No new impersonation route; a photo faces the same depth check.
+- Camera exposure: with pre-arm the camera can run up to 5 s while the session is unlocked, only on a WaitForMatch from the user's own helper (same peer-credential policy and rate limit as `Authenticate`, which can already open the camera). `prearm_camera = false` removes it.
+- Script: starting the watcher earlier does not change what it signals (same PID and comm checks). A watcher for a refused locker exits on its own and is reaped.
+- Not changed: thresholds, liveness, `auth_frames`, `mean`/`n_of_m` rules.
+
+### Weaknesses noticed in the auth path (NOT fixed here; Round 9)
+- `mean` mode with `mean_mode_depth_samples = 0` (default): depth is checked on the first quality frame and the deciding frame only, so middle photo frames plus live first/deciding frames are accepted (pinned by `mean_mode_without_samples_still_averages_in_unseen_middle_photos`).
+- Depth threshold 0.05 produced a genuine false reject at 0.0491 (owner journal): the margin is thin; calibration needed (accuracy, not only security).
+- The default `Authenticate` (PAM, non-sudo) path still starts from the buffered latest frame without a freshness floor; only the strict sudo profile and, since this round, WaitForMatch have one.
+- `WaitForMatch` retries attempts for up to the whole call (30-60 s) with no failure counter or backoff; the rate limit counts the call once.
+- `DaemonState` carries `unsafe impl Send/Sync`.

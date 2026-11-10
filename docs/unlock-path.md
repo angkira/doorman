@@ -69,12 +69,55 @@ Mod+L -> doorman-lock -> gtklock (background job, PID = $!)
   user, and its liveness gate runs only when `proactive_unlock` is on. So
   `WaitForMatch` repeats the Authenticate pipeline server-side instead; each
   attempt waits for camera frames, there is no sleep and no busy loop.
-* Attempts run only while the lock supervisor reports `armed`
+* `Matched` is delivered only while the lock supervisor reports `armed`
   (`LockedHint && !IdleHint`). While disarmed the call awaits the gate (no
-  polling), makes no attempt, and the camera is not switched on; if it never
-  arms the answer is `NoMatch{not_armed}`. In `--user`/dev mode there is no
-  gate. If logind cannot be reached the supervisor pins `armed=false`, so
-  event-driven unlock never fires; use `DOORMAN_UNLOCK_MODE=poll` there.
+  polling); if it never arms the answer is `NoMatch{not_armed}`. In
+  `--user`/dev mode there is no gate. If logind cannot be reached the
+  supervisor pins `armed=false`, so event-driven unlock never fires; use
+  `DOORMAN_UNLOCK_MODE=poll` there.
+* **Pre-arm** (`[ipc] prearm_camera`, default true). niri sets `LockedHint`
+  only after the compositor has fully locked (see "Why the hint lags" below),
+  about 1.1 s after the request on the measured host. Instead of idling until
+  then, a call that arrives with the gate closed starts the full decision at
+  once, so camera open (0.9 s) and frame scoring overlap the lag. Rules:
+  * the result is *held*; `Matched` goes out the moment the gate is armed and
+    never before (a closed gate can only produce `NoMatch`);
+  * frames captured before the request are skipped (same freshness rule as the
+    sudo profile), so nothing from before the call is ever scored;
+  * the whole pre-armed attempt, including the camera lease, is dropped
+    `[ipc] prearm_max_hold_secs` (default 5) after the request if the gate has
+    not opened; a result held that long is discarded, not reused, and the call
+    then behaves as without pre-arm (waits for the gate, then makes a fresh
+    attempt). The camera is released when the call ends, the client
+    disconnects, the gate closes after having been open, or the hold expires;
+  * the decision function is the unchanged `Authenticate` pipeline.
+  `prearm_camera = false` restores "no camera until the gate is armed".
+* An attempt in flight is dropped when the session disarms, the deadline
+  passes, or the client closes the connection (the helper does so when the
+  locker exits), which releases the camera lease.
+
+### Why the hint lags (niri + gtklock)
+
+`LockedHint` is set by the compositor, not by gtklock, the script or
+doorman: niri 26.04 calls logind `Session.SetLockedHint` from a short-lived
+thread only in its fully `Locked` state, i.e. after the lock client has
+created and mapped a lock surface on every output and niri has redrawn them
+(`niri.rs` `lock()`, `continue_to_locking()`, `update_locked_hint()`; the
+1 s timer there is only a fallback). The daemon already receives it as a
+D-Bus `PropertiesChanged` event (`lock_supervisor.rs`), so nothing is polled
+on the daemon side and nothing there can be sped up. The hint is a real
+protection: signalling the locker before niri is `Locked` would leave the
+session locked with a dead client. It is therefore never bypassed.
+
+### Timing stages
+
+`journalctl -u doormand | grep "WaitForMatch timing"` gives `prearm`,
+`hint_wait_ms` (request until armed) and `total_ms`. With `[telemetry]
+timing_log = true` each attempt record also carries `hint_wait_ms` (when the
+gate had opened by the end of the attempt), `lock_to_camera_ready_ms` (negative
+when pre-arm had the camera ready before the lock), `camera_open_ms`,
+`frames_collect_ms` and `decision_ms`. No identity is recorded.
+
 * An attempt in flight is dropped when the session disarms, the deadline
   passes, or the client closes the connection (the helper does so when the
   locker exits), which releases the camera lease.

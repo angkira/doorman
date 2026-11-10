@@ -98,6 +98,8 @@ admin_uids = []                   # may run admin operations
 max_auth_attempts_per_minute = 20 # 0 disables
 max_connections_per_uid = 8       # 0 disables; global cap is 64
 wait_for_match_max_ms = 60000     # cap for one WaitForMatch, see docs/unlock-path.md
+prearm_camera = true              # score frames while waiting for LockedHint; timing only
+prearm_max_hold_secs = 5          # 1..=30; camera released after this without a lock
 # stream_socket_group = "doorman"
 ```
 

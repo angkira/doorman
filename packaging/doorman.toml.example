@@ -68,3 +68,13 @@ raw_frame_jpeg_quality = 92
 max_attempt_records_per_day = 50000
 # Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
 retention_days = 14
+
+[ipc]
+# Face unlock waiting (docs/unlock-path.md). Pre-arm starts the camera and the
+# full recognition when the unlock helper asks, in parallel with the compositor
+# finishing the lock. The result is still delivered only after the session is
+# reported locked, and only from frames captured after the request. This changes
+# timing, not the decision. Set false to keep the camera off until locked.
+# prearm_camera = true
+# Longest the camera is held without the lock being confirmed (1..=30 s).
+# prearm_max_hold_secs = 5

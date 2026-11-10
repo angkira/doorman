@@ -234,3 +234,12 @@ device can report a real-camera identity; a loopback driver that uses a
 different name and has a parent device would pass the sysfs checks. Pinning
 `device_path` to the owner's physical camera narrows this to the last case. The
 GStreamer backend is hard-wired to `/dev/video0` (checked, not configurable).
+
+## WaitForMatch pre-arm and the camera
+
+With `[ipc] prearm_camera = true` (default) the unlock helper's `WaitForMatch`
+holds an on-demand capture lease (like `doorman test`) for at most
+`[ipc] prearm_max_hold_secs` (default 5) while the session is not yet reported
+locked. This is the one case where an unlock request, not a lock, opens the
+camera; it is bounded, requested by the user's own helper, and gated by the same
+peer-credential policy as `Authenticate`. See docs/unlock-path.md.
