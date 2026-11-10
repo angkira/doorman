@@ -299,12 +299,11 @@ pub fn match_shadow(
     records
         .iter()
         .filter(|r| r["source"].as_str().is_none_or(|s| s == "test"))
-        .filter(|r| {
+        .rfind(|r| {
             r["timestamp_unix_ms"]
                 .as_i64()
                 .is_some_and(|t| (lo..=hi).contains(&t))
         })
-        .next_back()
         .map(summarize_shadow)
 }
 
