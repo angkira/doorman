@@ -106,6 +106,8 @@ fn start(cfg: IpcConfig, alice_uid: u32, mode: Mode) -> Harness {
                         None,
                         &username,
                         unlock_wait::effective_timeout(timeout_ms, max_ms),
+                        None,
+                        &unlock_wait::WaitTiming::new(),
                     )
                     .await
                 }

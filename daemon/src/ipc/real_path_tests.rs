@@ -144,11 +144,30 @@ struct Run {
 }
 
 async fn authenticate(script: &[Scene], mean_mode_depth_samples: u32) -> Run {
+    let (state, depth_calls, _camera, _dir) =
+        build_state(script, script.len(), mean_mode_depth_samples).await;
+    let decision = run_authenticate(&state, USER, None, None).await;
+    Run {
+        decision,
+        depth_calls: depth_calls.load(Ordering::SeqCst),
+    }
+}
+
+async fn build_state(
+    script: &[Scene],
+    auth_frames: usize,
+    mean_mode_depth_samples: u32,
+) -> (
+    DaemonState,
+    Arc<AtomicUsize>,
+    watch::Sender<Option<RawFrame>>,
+    tempfile::TempDir,
+) {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let mut config = Config::default();
     config.daemon.data_dir = data_dir.path().to_string_lossy().into_owned();
     config.decision.mode = DecisionMode::Mean;
-    config.authentication.auth_frames = script.len();
+    config.authentication.auth_frames = auth_frames;
     config.authentication.similarity_threshold = SIMILARITY_THRESHOLD;
     config.authentication.liveness_enabled = true;
     config.authentication.liveness_depth_threshold = RELIEF_THRESHOLD;
@@ -164,7 +183,7 @@ async fn authenticate(script: &[Scene], mean_mode_depth_samples: u32) -> Run {
     let depth_calls = Arc::new(AtomicUsize::new(0));
     let backend = Arc::new(ScriptedBackend {
         script: script.to_vec(),
-        camera: camera_tx,
+        camera: camera_tx.clone(),
         depth_calls: depth_calls.clone(),
     });
     let mut storage = Storage::new_with_dir(data_dir.path())
@@ -194,11 +213,7 @@ async fn authenticate(script: &[Scene], mean_mode_depth_samples: u32) -> Run {
         capture_requests: Arc::new(AtomicUsize::new(0)),
     };
 
-    let decision = run_authenticate(&state, USER, None).await;
-    Run {
-        decision,
-        depth_calls: depth_calls.load(Ordering::SeqCst),
-    }
+    (state, depth_calls, camera_tx, data_dir)
 }
 
 fn assert_spoof_rejected(run: &Run) {
@@ -252,4 +267,36 @@ async fn mean_mode_accepts_a_genuine_live_sequence_and_each_sample_costs_one_che
 async fn mean_mode_rejects_photos_alone() {
     let run = authenticate(&[Photo; 5], 3).await;
     assert_eq!(run.decision.outcome, AuthOutcome::LivenessRejected);
+}
+
+/// A frame captured before the `WaitForMatch` request must never be scored:
+/// here the camera still holds an old photo frame when the request arrives.
+#[tokio::test]
+async fn wait_for_match_ignores_frames_captured_before_the_request() {
+    // Index 0..=2 live owner (fresh); index 3 is a stale photo that sits in the
+    // channel from before the request.
+    let script = [LiveOwner, LiveOwner, LiveOwner, Photo];
+    let (state, depth_calls, camera, _dir) = build_state(&script, 3, 0).await;
+    let stale = frame(3);
+    camera.send_replace(Some(stale));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let wait = doormand::unlock_wait::WaitTiming::new();
+    let feed = async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        camera.send_replace(Some(frame(0)));
+    };
+    let (decision, ()) = tokio::join!(run_authenticate(&state, USER, None, Some(&wait)), feed);
+    assert_eq!(decision.outcome, AuthOutcome::Matched);
+    assert_eq!(decision.frames_seen, 3, "the stale photo frame was skipped");
+    assert_eq!(depth_calls.load(Ordering::SeqCst), 2);
+}
+
+/// Control: without a request time the same stale frame IS scored first.
+#[tokio::test]
+async fn authenticate_without_a_request_time_still_scores_the_buffered_frame() {
+    let script = [LiveOwner, LiveOwner, LiveOwner, Photo];
+    let (state, _depth, camera, _dir) = build_state(&script, 3, 0).await;
+    camera.send_replace(Some(frame(3)));
+    let decision = run_authenticate(&state, USER, None, None).await;
+    assert_eq!(decision.outcome, AuthOutcome::LivenessRejected);
 }

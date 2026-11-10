@@ -146,6 +146,7 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
 /// weaker than an `Authenticate` success.
 struct AuthenticateSource<'a> {
     state: &'a DaemonState,
+    timing: &'a unlock_wait::WaitTiming,
 }
 
 #[async_trait]
@@ -161,7 +162,7 @@ impl DecisionSource for AuthenticateSource<'_> {
         {
             return AttemptOutcome::NotEnrolled;
         }
-        run_authenticate(self.state, username, None)
+        run_authenticate(self.state, username, None, Some(self.timing))
             .await
             .attempt_outcome()
     }
@@ -174,13 +175,33 @@ async fn handle_wait_for_match(state: &DaemonState, username: &str, timeout_ms: 
         timeout_ms = timeout.as_millis() as u64,
         "WaitForMatch request"
     );
+    let ipc = &state.config.ipc;
+    let prearm_hold = ipc
+        .prearm_camera
+        .then(|| std::time::Duration::from_secs(ipc.prearm_max_hold_secs));
+    let timing = unlock_wait::WaitTiming::new();
     let response = unlock_wait::wait_for_match(
-        &AuthenticateSource { state },
+        &AuthenticateSource {
+            state,
+            timing: &timing,
+        },
         state.armed.clone(),
         username,
         timeout,
+        prearm_hold,
+        &timing,
     )
     .await;
+    // Request-relative stages for the host re-measure (no identity, no frames).
+    // The per-attempt record (`[telemetry] timing_log`) is written when the
+    // attempt ends, which can be before the lock is confirmed, so the lock
+    // stage is reported here.
+    info!(
+        prearm = prearm_hold.is_some(),
+        hint_wait_ms = timing.hint_wait().map(|d| d.as_millis() as u64),
+        total_ms = timing.request_start.elapsed().as_millis() as u64,
+        "WaitForMatch timing"
+    );
     match &response {
         Response::Matched { similarity, .. } => {
             info!(similarity, "WaitForMatch decision: matched")
@@ -297,7 +318,7 @@ async fn handle_authenticate(
     let request_start = std::time::Instant::now();
     let strict = match sudo_policy::select_profile(service, &state.config) {
         Profile::Default => {
-            return run_authenticate(state, username, None)
+            return run_authenticate(state, username, None, None)
                 .await
                 .into_response()
         }
@@ -333,7 +354,7 @@ async fn handle_authenticate(
         );
     }
 
-    let decision = run_authenticate(state, username, Some((&strict, request_start))).await;
+    let decision = run_authenticate(state, username, Some((&strict, request_start)), None).await;
     let matched = decision.outcome == AuthOutcome::Matched;
     if matched {
         state.sudo_guard.record_success(username);
@@ -360,14 +381,26 @@ async fn handle_authenticate(
 /// forces the `n_of_m` decision with the profile's N/M and threshold, its
 /// multi-frame liveness and its timeout (counted from the arrival), and uses
 /// only frames captured after the arrival.
+///
+/// `wait` is set by `WaitForMatch`: only frames captured at or after its
+/// request time are used (the same freshness rule as the strict profile), and
+/// the timing record gets the lock-relative stages.
 async fn run_authenticate(
     state: &DaemonState,
     username: &str,
     strict: Option<(&StrictProfile, std::time::Instant)>,
+    wait: Option<&unlock_wait::WaitTiming>,
 ) -> AuthDecision {
     info!("Authentication request for user: {}", username);
     // Emits one timing record (debug log + optional JSONL file) when dropped.
     let mut timing = crate::timing::AttemptTiming::start(&state.config.telemetry);
+    // Frames older than this are never used (strict arrival or WaitForMatch request).
+    let fresh_floor = strict
+        .map(|(_, arrival)| arrival)
+        .or_else(|| wait.map(|w| w.request_start));
+    if let Some(w) = wait {
+        timing.set_wait(w.request_start, w.armed_cell());
+    }
 
     // Check if user is enrolled
     let storage = state.storage.read().await;
@@ -475,9 +508,9 @@ async fn run_authenticate(
                 None => break,
             },
         };
-        if let Some((_, request_start)) = strict {
-            if !sudo_policy::is_fresh(frame.timestamp, request_start) {
-                debug!("Skipping a frame captured before the sudo request arrived");
+        if let Some(floor) = fresh_floor {
+            if !sudo_policy::is_fresh(frame.timestamp, floor) {
+                debug!("Skipping a frame captured before the request arrived");
                 continue; // `maybe_frame` is empty: waits for the next frame
             }
         }
@@ -593,6 +626,9 @@ async fn run_authenticate(
     }
 
     timing.frames_used = passed_embeddings.len();
+    timing.frames_collect = timing
+        .camera_open
+        .map(|ready| timing.since_start().saturating_sub(ready));
     if frames_seen == 0 {
         timing.outcome = crate::timing::TimingOutcome::NoFrames;
         error!("Failed to capture any frames");

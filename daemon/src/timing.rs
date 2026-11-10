@@ -21,6 +21,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -89,6 +90,13 @@ pub struct TimingRecord {
     pub frames_used: usize,
     /// Final aggregate cosine similarity (calibration signal).
     pub similarity: Option<f32>,
+    /// `WaitForMatch` only: request until the lock gate was first seen armed.
+    pub hint_wait_ms: Option<f64>,
+    /// `WaitForMatch` only: lock gate armed until the camera delivered (signed:
+    /// negative when pre-arm had the camera ready before the lock was confirmed).
+    pub lock_to_camera_ready_ms: Option<f64>,
+    /// Camera ready until the last frame needed was scored.
+    pub frames_collect_ms: Option<f64>,
 }
 
 fn ms(d: Duration) -> f64 {
@@ -114,6 +122,10 @@ pub struct AttemptTiming {
     pub frames_seen: usize,
     pub frames_used: usize,
     pub similarity: Option<f32>,
+    /// Set by `WaitForMatch` attempts (see [`AttemptTiming::set_wait`]).
+    wait_request_start: Option<Instant>,
+    wait_armed_at: Option<Arc<OnceLock<Instant>>>,
+    pub frames_collect: Option<Duration>,
 }
 
 impl AttemptTiming {
@@ -138,6 +150,9 @@ impl AttemptTiming {
             frames_seen: 0,
             frames_used: 0,
             similarity: None,
+            wait_request_start: None,
+            wait_armed_at: None,
+            frames_collect: None,
         }
     }
 
@@ -158,6 +173,32 @@ impl AttemptTiming {
         if self.first_valid_frame.is_none() {
             self.first_valid_frame = Some(self.start.elapsed());
         }
+    }
+
+    /// Attach the `WaitForMatch` clock: when the request arrived and the cell
+    /// the lock gate fills in when it is first seen armed.
+    pub fn set_wait(&mut self, request_start: Instant, armed_at: Arc<OnceLock<Instant>>) {
+        self.wait_request_start = Some(request_start);
+        self.wait_armed_at = Some(armed_at);
+    }
+
+    fn armed_at(&self) -> Option<Instant> {
+        self.wait_armed_at.as_ref()?.get().copied()
+    }
+
+    fn hint_wait_ms(&self) -> Option<f64> {
+        let armed = self.armed_at()?;
+        Some(ms(armed.saturating_duration_since(self.wait_request_start?)))
+    }
+
+    /// Armed-to-camera-ready in ms, negative when the camera was ready first.
+    fn lock_to_camera_ready_ms(&self) -> Option<f64> {
+        let armed = self.armed_at()?;
+        let ready = self.start + self.camera_open?;
+        Some(match ready.checked_duration_since(armed) {
+            Some(after) => ms(after),
+            None => -ms(armed.saturating_duration_since(ready)),
+        })
     }
 
     pub fn record(&self) -> TimingRecord {
@@ -183,6 +224,9 @@ impl AttemptTiming {
             frames_seen: self.frames_seen,
             frames_used: self.frames_used,
             similarity: self.similarity,
+            hint_wait_ms: self.hint_wait_ms(),
+            lock_to_camera_ready_ms: self.lock_to_camera_ready_ms(),
+            frames_collect_ms: self.frames_collect.map(ms),
         }
     }
 }
@@ -274,5 +318,39 @@ mod tests {
         );
         let s = v.to_string();
         assert!(!s.contains("user") && !s.contains("uid"));
+    }
+
+    #[test]
+    fn lock_relative_stages_are_present_and_signed() {
+        let cfg = TelemetryConfig::default();
+        let mut t = AttemptTiming::start(&cfg);
+        let v = serde_json::to_value(t.record()).unwrap();
+        for key in [
+            "hint_wait_ms",
+            "lock_to_camera_ready_ms",
+            "frames_collect_ms",
+        ] {
+            assert!(
+                v.get(key).is_some_and(|x| x.is_null()),
+                "{key} absent or set"
+            );
+        }
+        // The gate opened 40 ms after the request; the camera became ready 100 ms
+        // after the attempt started (here: the request).
+        let request = t.start;
+        let armed = Arc::new(OnceLock::new());
+        armed.set(request + Duration::from_millis(40)).unwrap();
+        t.set_wait(request, armed);
+        t.camera_open = Some(Duration::from_millis(100));
+        t.frames_collect = Some(Duration::from_millis(250));
+        let v = serde_json::to_value(t.record()).unwrap();
+        assert_eq!(v["hint_wait_ms"], 40.0);
+        assert_eq!(v["lock_to_camera_ready_ms"], 60.0);
+        assert_eq!(v["frames_collect_ms"], 250.0);
+        // Camera ready before the gate opened: negative.
+        t.camera_open = Some(Duration::from_millis(10));
+        let v = serde_json::to_value(t.record()).unwrap();
+        assert_eq!(v["lock_to_camera_ready_ms"], -30.0);
+        assert!(!v.to_string().contains("user"));
     }
 }

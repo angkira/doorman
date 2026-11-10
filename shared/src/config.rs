@@ -896,6 +896,14 @@ impl SudoConfig {
 pub const DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE: u32 = 20;
 /// Default cap for a single `WaitForMatch` (milliseconds).
 pub const DEFAULT_WAIT_FOR_MATCH_MAX_MS: u64 = 60_000;
+/// Default for `[ipc] prearm_camera`: start recognition when `WaitForMatch`
+/// is requested instead of waiting for the lock state.
+pub const DEFAULT_PREARM_CAMERA: bool = true;
+/// Default for `[ipc] prearm_max_hold_secs`.
+pub const DEFAULT_PREARM_MAX_HOLD_SECS: u64 = 5;
+/// Inclusive bounds for `[ipc] prearm_max_hold_secs`.
+pub const MIN_PREARM_MAX_HOLD_SECS: u64 = 1;
+pub const MAX_PREARM_MAX_HOLD_SECS: u64 = 30;
 /// Default cap on simultaneously open command connections per peer uid.
 pub const DEFAULT_MAX_CONNECTIONS_PER_UID: u32 = 8;
 
@@ -927,10 +935,47 @@ pub struct IpcConfig {
     #[serde(default = "default_wait_for_match_max_ms")]
     pub wait_for_match_max_ms: u64,
 
+    /// Pre-arm: when a `WaitForMatch` arrives while the session is not yet
+    /// reported locked, open the camera and run the full decision right away,
+    /// pipelined with the wait for `LockedHint`. `Matched` is still delivered
+    /// only once the lock is confirmed, and only from frames captured after the
+    /// request. Changes timing only, never the decision rule.
+    #[serde(default = "default_prearm_camera")]
+    pub prearm_camera: bool,
+
+    /// Longest a pre-armed camera/decision is held without the lock being
+    /// confirmed, counted from the request. After it the camera is released and
+    /// the result (if any) discarded; the call then waits for the lock as
+    /// without pre-arm. Range 1..=30.
+    #[serde(default = "default_prearm_max_hold_secs")]
+    pub prearm_max_hold_secs: u64,
+
     /// Simultaneously open command connections allowed per peer uid (the global
     /// cap is 64). Extra connections are dropped. `0` disables the per-uid cap.
     #[serde(default = "default_max_connections_per_uid")]
     pub max_connections_per_uid: u32,
+}
+
+fn default_prearm_camera() -> bool {
+    DEFAULT_PREARM_CAMERA
+}
+
+fn default_prearm_max_hold_secs() -> u64 {
+    DEFAULT_PREARM_MAX_HOLD_SECS
+}
+
+impl IpcConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !(MIN_PREARM_MAX_HOLD_SECS..=MAX_PREARM_MAX_HOLD_SECS)
+            .contains(&self.prearm_max_hold_secs)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.prearm_max_hold_secs = {} is out of range ({MIN_PREARM_MAX_HOLD_SECS}..={MAX_PREARM_MAX_HOLD_SECS})",
+                self.prearm_max_hold_secs
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn default_max_connections_per_uid() -> u32 {
@@ -953,6 +998,8 @@ impl Default for IpcConfig {
             max_auth_attempts_per_minute: DEFAULT_MAX_AUTH_ATTEMPTS_PER_MINUTE,
             stream_socket_group: None,
             wait_for_match_max_ms: DEFAULT_WAIT_FOR_MATCH_MAX_MS,
+            prearm_camera: DEFAULT_PREARM_CAMERA,
+            prearm_max_hold_secs: DEFAULT_PREARM_MAX_HOLD_SECS,
             max_connections_per_uid: DEFAULT_MAX_CONNECTIONS_PER_UID,
         }
     }
@@ -1393,6 +1440,7 @@ impl Config {
             )));
         }
         self.camera.validate()?;
+        self.ipc.validate()?;
         self.decision.validate()?;
         self.liveness.validate()?;
         self.pam.sudo.validate(&self.authentication)?;
@@ -1874,5 +1922,32 @@ mod camera_guard_tests {
             cfg.camera.device_path.as_deref(),
             Some("/dev/v4l/by-id/usb-X-video-index0")
         );
+    }
+
+    #[test]
+    fn prearm_defaults_and_bounds() {
+        let cfg = Config::default();
+        assert!(cfg.ipc.prearm_camera);
+        assert_eq!(cfg.ipc.prearm_max_hold_secs, 5);
+        let old: Config = toml::from_str("[ipc]\nwait_for_match_max_ms=1500\n").unwrap();
+        assert!(old.ipc.prearm_camera);
+        assert_eq!(old.ipc.prearm_max_hold_secs, 5);
+        for bad in [0u64, 31] {
+            let cfg: Config =
+                toml::from_str(&format!("[ipc]\nprearm_max_hold_secs={bad}\n")).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("prearm_max_hold_secs") && err.contains("1..=30"),
+                "{err}"
+            );
+        }
+        for ok in [1u64, 30] {
+            let cfg: Config = toml::from_str(&format!(
+                "[ipc]\nprearm_camera=false\nprearm_max_hold_secs={ok}\n"
+            ))
+            .unwrap();
+            assert!(cfg.validate().is_ok());
+            assert!(!cfg.ipc.prearm_camera);
+        }
     }
 }
