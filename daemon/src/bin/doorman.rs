@@ -827,6 +827,28 @@ fn send_request(
     request: &Request,
     timeout: Duration,
 ) -> Result<Response, CliError> {
+    match send_request_raw(socket_path, request, timeout)? {
+        Response::Denied { reason } => Err(CliError::new(format!("denied by daemon: {reason}"))),
+        Response::RateLimited { retry_after_s } => Err(CliError::new(format!(
+            "rate limited by daemon: retry in {retry_after_s}s"
+        ))),
+        Response::UnsupportedProtocol {
+            reason,
+            supported_version,
+        } => Err(CliError::new(format!(
+            "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
+        ))),
+        other => Ok(other),
+    }
+}
+
+/// [`send_request`] without turning refusals into errors: the caller sees
+/// `Denied`, `RateLimited` and `UnsupportedProtocol` as responses.
+fn send_request_raw(
+    socket_path: &Path,
+    request: &Request,
+    timeout: Duration,
+) -> Result<Response, CliError> {
     let stream = UnixStream::connect(socket_path).map_err(|e| {
         CliError::new(format!(
             "could not connect to daemon socket {} ({e}). Is doormand running? \
@@ -872,19 +894,7 @@ fn send_request(
             line.trim()
         ))
     })?;
-    match response {
-        Response::Denied { reason } => Err(CliError::new(format!("denied by daemon: {reason}"))),
-        Response::RateLimited { retry_after_s } => Err(CliError::new(format!(
-            "rate limited by daemon: retry in {retry_after_s}s"
-        ))),
-        Response::UnsupportedProtocol {
-            reason,
-            supported_version,
-        } => Err(CliError::new(format!(
-            "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
-        ))),
-        other => Ok(other),
-    }
+    Ok(response)
 }
 
 fn print_raw(response: &Response) -> Result<(), CliError> {
@@ -1115,28 +1125,18 @@ fn cmd_remove(sockets: &Sockets, username: &str, yes: bool, json: bool) -> Resul
 // test / auth
 // ---------------------------------------------------------------------------
 
-/// `doorman test` exit code: the face was recognized.
-const TEST_EXIT_RECOGNIZED: i32 = 0;
-/// `doorman test` exit code: CLI error (daemon unreachable, denied or unexpected
-/// response); the same code `error:` exits with.
-const TEST_EXIT_ERROR: i32 = 1;
-/// `doorman test` exit code: the daemon answered but did not authenticate the
-/// user (`Response::Failure`, e.g. no match or camera unavailable). Distinct
-/// from `TEST_EXIT_ERROR` so scripts can tell "not recognized" from "daemon
-/// unreachable".
-const TEST_EXIT_NOT_RECOGNIZED: i32 = 2;
-
-/// Exit code for the daemon's answer to `doorman test`; stdout is unaffected.
-fn test_exit_code(response: &Response) -> i32 {
-    match response {
-        Response::Success { .. } => TEST_EXIT_RECOGNIZED,
-        Response::Failure { .. } => TEST_EXIT_NOT_RECOGNIZED,
-        _ => TEST_EXIT_ERROR,
-    }
-}
+/// Exit codes of `doorman test` (see `doormand::test_report`): 0 recognized,
+/// 1 error (daemon unreachable, denied, unexpected answer), 2 not recognized,
+/// rejected, unavailable or suspended. The `recognized:` / `!recognized:` lines
+/// on stdout are unchanged.
+use doormand::test_report::{
+    classify, error_report, EXIT_NOT_RECOGNIZED as TEST_EXIT_NOT_RECOGNIZED,
+    EXIT_RECOGNIZED as TEST_EXIT_RECOGNIZED,
+};
 
 fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<i32, CliError> {
-    let response = send_request(
+    let started = std::time::Instant::now();
+    let answer = send_request_raw(
         &sockets.command,
         &Request::Authenticate {
             username: username.to_string(),
@@ -1145,11 +1145,48 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<i32, CliErr
         },
         // Daemon captures AUTH_FRAMES frames; allow a little headroom over DEFAULT.
         Duration::from_secs(15),
-    )?;
+    );
+    let duration_ms = started.elapsed().as_millis() as u64;
     if json {
-        print_raw(&response)?;
-        return Ok(test_exit_code(&response));
+        // One JSON object on stdout in every case, errors included.
+        let report = match &answer {
+            Ok(response) => classify(response, duration_ms, chrono::Utc::now().timestamp()),
+            Err(_) => error_report(duration_ms),
+        };
+        let line = serde_json::to_string_pretty(&report)
+            .map_err(|e| CliError::new(format!("failed to serialize report: {e}")))?;
+        println!("{line}");
+        if let Err(CliError(msg)) = &answer {
+            eprintln!("error: {msg}");
+        }
+        return Ok(report.exit_code);
     }
+    let response = match answer? {
+        // A suspension is an expected outcome, shown like a rejection.
+        Response::Denied { reason }
+            if reason.contains(doormand::face_budget::FACE_SUSPENDED_CODE) =>
+        {
+            println!("!recognized: {username} ({reason})");
+            return Ok(TEST_EXIT_NOT_RECOGNIZED);
+        }
+        Response::Denied { reason } => {
+            return Err(CliError::new(format!("denied by daemon: {reason}")))
+        }
+        Response::RateLimited { retry_after_s } => {
+            return Err(CliError::new(format!(
+                "rate limited by daemon: retry in {retry_after_s}s"
+            )))
+        }
+        Response::UnsupportedProtocol {
+            reason,
+            supported_version,
+        } => {
+            return Err(CliError::new(format!(
+                "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
+            )))
+        }
+        other => other,
+    };
     match response {
         Response::Success { message, .. } => {
             let detail = message.unwrap_or_default();
@@ -1308,6 +1345,11 @@ fn render_progress(phase: &EnrollmentPhase, current: usize, total: usize) {
 mod tests {
     use super::*;
     use doorman_shared::NoMatchReason;
+    use doormand::test_report::EXIT_ERROR as TEST_EXIT_ERROR;
+
+    fn test_exit_code(response: &Response) -> i32 {
+        classify(response, 0, 0).exit_code
+    }
 
     #[test]
     fn test_exit_code_is_zero_only_for_a_recognized_face() {
@@ -1332,6 +1374,12 @@ mod tests {
                 TEST_EXIT_ERROR,
             ),
             (Response::RateLimited { retry_after_s: 1 }, TEST_EXIT_ERROR),
+            (
+                Response::Denied {
+                    reason: doormand::decision::suspended_reason(30),
+                },
+                TEST_EXIT_NOT_RECOGNIZED,
+            ),
             (
                 Response::NoMatch {
                     reason: NoMatchReason::Timeout,
