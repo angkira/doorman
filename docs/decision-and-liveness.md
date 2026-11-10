@@ -211,6 +211,21 @@ of
 (docs/bench/README.md), then multiply by K; the timing log's `liveness_frames`
 and `liveness_ms` show the real count and total per attempt.
 
+### Frame-level rules in mean mode (Round 9a)
+
+Applied by `run_authenticate` before a frame can enter the aggregate; the pure
+rules are in `daemon/src/frame_policy.rs`.
+
+| Rule | Key (default) | Effect |
+|---|---|---|
+| Identity floor | `[decision] frame_identity_floor` (0.30; 0 = off) | Each frame scored against the templates (same `template_score` as the decision) must reach the floor, otherwise the attempt ends as `identity_floor` (fail closed, a judged failure). Binds the liveness-checked frames to the owner: a live other face on the first and deciding frames with owner photos in between was accepted before (pinned by `identity_floor_rejects_a_live_attacker_around_owner_photos`, which shows the old acceptance with the floor off). Genuine frames sit far above it (host mean 0.74-0.82); a frame below 0.30 would drag the mean down anyway. `n_of_m` mode already scores every frame. |
+| Multi-face gate | `[recognition] multi_face_policy` (`reject`) | The detector reports the other faces it found anyway. A frame with a second face of at least `multi_face_min_area_ratio` (0.25) of the main face area and detector score `multi_face_min_score` (0.75) is not accepted; if that leaves too few frames the attempt ends as `ambiguous_faces`. `largest` uses the largest face; `off` keeps the old highest-score pick. |
+| Minimum frames | `[authentication] min_decision_frames` (0 = `auth_frames` - 2) | An attempt that ends with fewer judged-good frames is rejected as `insufficient_frames` (not a judged failure) instead of deciding on whatever the deadline left. |
+| Frame age | `[camera] max_frame_age_ms` (1000; 0 = off) | A frame older than this when taken up is skipped; with no usable frame the attempt ends `no_frames`. |
+
+Added work: the per-frame score is one dot product per template, already
+computed for the aggregate; no extra inference. All four are fail closed.
+
 ## Calibration recipes
 
 **Cosine threshold:** docs/bench/README.md, "Calibrating the cosine threshold".

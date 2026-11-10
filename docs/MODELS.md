@@ -79,7 +79,37 @@ disabled with `authentication.liveness_enabled = false`.
 
 ```bash
 doorman status        # shows model / camera / daemon health
+doorman models verify # SHA-256 of the loaded model files vs the manifest (read-only)
 ```
+
+### Integrity manifest
+
+`doormand` hashes the model files it loads (YuNet detector, EdgeFace-S
+recognizer, MiniFASNet liveness, and the Depth-Anything depth model while
+`authentication.liveness_enabled` is on) at start and compares them with a
+manifest in `sha256sum` format. Files that merely sit in the models directory
+(legacy models, `minifasnet_v2se_int8.onnx`) are not checked.
+
+* The shipped manifest is `packaging/models.sha256`, compiled into the binary.
+  It lists the hashes pinned in `scripts/fetch_models.sh` (a test keeps the two
+  in sync). The depth model has no pinned upstream hash in this repository, so it
+  is **not** listed: it is reported as unverified at start, never refused.
+* A loaded file that is listed and does not match makes the daemon refuse to
+  start (fail closed), with a log line naming the file. `systemd` will keep
+  retrying; the password path is unaffected. `[models] allow_unverified_models =
+  true` accepts the mismatch (a warning is logged each start); use it only while
+  you replace a model on purpose.
+* To pin a model the package does not know (the depth model, a replaced
+  recognizer): generate lines on a machine you trust with
+  `doorman models verify --print-manifest`, put them in a root-owned file (mode
+  0644, not group/world writable) and set `[models] manifest_path` to it. Its
+  entries override the built-in ones. Check with `doorman models verify`
+  (exit 0 all verified, 1 mismatch or error, 2 only unlisted/missing files).
+* Before upgrading a host whose model files were not produced by
+  `fetch_models.sh` (a locally exported recognizer, for example), run
+  `doorman models verify` first: a differing recognizer would stop the daemon.
+* With a GPU depth sidecar (`doorman-depthd`) the file in `models_dir` is
+  verified, but the sidecar opens its own path; keep them the same file.
 
 When models are absent, model-dependent tests skip rather than fail, so a fresh
 clone still builds and tests.

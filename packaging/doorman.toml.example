@@ -68,6 +68,13 @@ raw_frame_jpeg_quality = 92
 max_attempt_records_per_day = 50000
 # Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
 retention_days = 14
+# Raw frames of SUCCESSFUL unlocks are not stored, even with keep_raw_frames = true:
+# a sharp photo of the owner from the unlocking sensor is the best replay material.
+# Set true only while collecting genuine samples for calibration.
+# capture_successful_unlocks = false
+# Automatic deletion of capture packs older than N days (at start, then daily).
+# UNSET (default) deletes nothing; 0 keeps forever. Attempt/label shards are never touched.
+# raw_frames_retention_days = 7
 
 [ipc]
 # Face unlock waiting (docs/unlock-path.md). Pre-arm starts the camera and the
@@ -78,3 +85,27 @@ retention_days = 14
 # prearm_camera = true
 # Longest the camera is held without the lock being confirmed (1..=30 s).
 # prearm_max_hold_secs = 5
+# Failure budget of face auth, for every entry point incl. each lock-screen retry.
+# After this many JUDGED failures (a completed rejection; not camera errors,
+# timeouts or no face) within the window, face auth is suspended with escalating
+# cooldowns; the password always works and a match resets the budget. A person who
+# fails on purpose can switch YOUR face unlock off for the cooldown (not the password).
+# face_max_judged_failures = 5        # 0 disables, max 100
+# face_failure_window_secs = 300      # 10..=86400
+# face_cooldown_secs = [30, 120, 600] # non-decreasing, 1..=8 entries, last repeats
+# face_budget_quiet_reset_secs = 1800 # no failure for this long: start at the first cooldown
+
+# Mean-mode hardening (Round 9a); see docs/THREAT-MODEL.md "Round 9a controls".
+# [decision]
+# frame_identity_floor = 0.30   # every frame must reach this cosine alone; 0 disables
+# [authentication]
+# min_decision_frames = 0       # 0 = auth_frames - 2 (8 of 10); else 1..=auth_frames
+# [recognition]
+# multi_face_policy = "reject"  # reject | largest | off
+# multi_face_min_area_ratio = 0.25
+# multi_face_min_score = 0.75
+# [camera]
+# max_frame_age_ms = 1000       # 0 disables; else 100..=10000
+# [models]
+# allow_unverified_models = false  # true accepts model files that differ from the manifest
+# manifest_path = "/etc/doorman/models.sha256"  # extra hashes, root-owned (doorman models verify --print-manifest)

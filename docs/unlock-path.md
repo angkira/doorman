@@ -96,6 +96,37 @@ Mod+L -> doorman-lock -> gtklock (background job, PID = $!)
   passes, or the client closes the connection (the helper does so when the
   locker exits), which releases the camera lease.
 
+  Two properties of pre-arm to be aware of (documented, not bugs):
+  * **Camera on an unlocked session.** With pre-arm a `WaitForMatch` that
+    arrives while the session is still unlocked keeps the camera on for up to
+    `prearm_max_hold_secs` (default 5, max 30). The call comes from the user's
+    own helper (same peer-credential policy and 20 calls/min limit as
+    `Authenticate`, which can already open the camera), but a same-uid process
+    can keep the camera on nearly continuously by repeating the call within
+    that limit. `prearm_camera = false` removes this.
+  * **Freshness is relative to the request, not to the lock.** A frame captured
+    after the request but before the lock completed can count, and a held
+    result can be up to `prearm_max_hold_secs` old when the lock is confirmed.
+    A user who presses lock and walks away within that window can be unlocked
+    by their own face seen just before leaving. A hint arriving exactly when the
+    hold expires discards the held result (pinned by a test); one millisecond
+    earlier delivers it.
+* **Failure budget** (`[ipc] face_max_judged_failures`, default 5). Every
+  `WaitForMatch` attempt goes through the same decision core as
+  `Authenticate`, which counts judged failures (a completed rejection: below
+  threshold, liveness rejected, identity floor, ambiguous faces; not camera
+  errors, timeouts, no face or an unavailable liveness model) per user. After 5
+  within 300 s face auth is suspended for 30 s, then 2 min, then 10 min (the last
+  repeats; a match or 30 quiet minutes reset the escalation). While suspended the
+  daemon answers `NoMatch{suspended}` (`Denied [face_auth_suspended]` to
+  `Authenticate`/PAM) without opening the camera, and `doorman unlock-watch`
+  asks again only every 5 s; the locker is never touched, so the password
+  works. Attempts inside one call are also spaced by 250 ms, so an instantly
+  failing source cannot spin. The audit lines are on the `doorman::audit`
+  target. Side effect: someone who fails on purpose can switch the owner's face
+  unlock off for the cooldown; the owner then uses the password, and the next
+  match resets the budget.
+
 ### Why the hint lags (niri + gtklock)
 
 `LockedHint` is set by the compositor, not by gtklock, the script or
@@ -138,6 +169,26 @@ is CPU: ONNX sessions come from a round-robin pool behind `std::sync::Mutex`
 and inference runs inside async tasks, so many simultaneous recognitions
 queue on the sessions and each takes longer. Authenticate and `WaitForMatch`
 are rate limited per uid, which bounds this.
+
+`DOORMAN_WATCH_EARLY` (start the watcher before the settle wait) applies to
+`DOORMAN_UNLOCK_MODE=event` only. The poll watcher has no lock gate, so it is
+always started after the settle wait.
+
+## `doorman test`
+
+`doorman test NAME` prints `recognized: NAME (...)` or `!recognized: NAME
+(reason)`; those lines are stable. Exit codes: 0 recognized, 1 error (daemon
+unreachable, denied, rate limited, unexpected answer), 2 not recognized,
+rejected, unavailable or suspended. `doorman --json test NAME` prints one JSON
+object instead (also for errors): `decision` (`recognized`, `not_recognized`,
+`suspended`, `error`), `reason_code` (`matched`, `not_matched`,
+`liveness_rejected`, `liveness_unavailable`, `identity_floor`,
+`ambiguous_faces`, `insufficient_frames`, `no_clear_face`, `no_frames`,
+`not_enrolled`, `face_auth_suspended`, `denied`, `rate_limited`,
+`daemon_error`, `other_failure`), `similarity_bucket` (0.05 steps),
+`liveness_ok` (true/false/null), `frames_judged` (null for now: the wire answer
+does not carry it), `duration_ms`, `suspended_until` (RFC 3339, only when
+suspended). No frames, embeddings or exact scores.
 
 ## Exit codes of `doorman unlock-watch`
 

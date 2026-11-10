@@ -176,7 +176,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 | False accept rate | decision threshold: cosine 0.4 (`default_similarity_threshold`), N-of-M frames | open: **the false accept rate at 0.4 is unknown**. `scripts/threshold_security_eval.py` computes an impostor distribution on LFW-like data, but no result is recorded in `docs/`. A near-twin, sibling or a demographic group with a worse model can have a much higher FAR than a pooled number. |
 | Replay of a captured successful session | each attempt captures fresh frames; the sudo profile ignores frames older than the request | mitigated at the IPC level; not a defense against feed injection (above) |
 | Enrollment poisoning | enroll is root-only | mitigated |
-| Biometric data retention | dataset off by default, purge command | partial |
+| Biometric data retention | dataset off by default; raw frames of successful unlocks not stored unless `capture_successful_unlocks`; optional automatic retention for capture packs; purge command | partial |
 
 ## Summary of open items
 
@@ -184,11 +184,38 @@ the document itself advises FIDO2 or a fingerprint reader.
 2. Presentation-attack resistance and FAR at threshold 0.4 not measured.
 3. ~~Daemon silently falls back to default config on a bad config.~~ Closed: it exits non-zero.
 4. ~~Root-run CLI loads `./doorman.toml` from the working directory (`dataset purge`).~~ Closed: root only accepts a trusted config path.
-5. Models are not integrity-checked at load; no `SystemCallFilter=`; ONNX/image decoding runs inside the daemon that is the root of trust.
+5. ~~Models are not integrity-checked at load.~~ Partly closed (Round 9a): the loaded models are hashed against a manifest at start, see [Round 9a controls](#round-9a-controls). Still open: no `SystemCallFilter=`; ONNX/image decoding runs inside the daemon that is the root of trust.
 6. Daemon compromise = authentication bypass (design property; sandbox only limits collateral damage).
 7. Release/CI hardening: no signed artifacts or SBOM, no `cargo vet`, 9 documented advisory ignores.
 8. ~~Sway adapter writes a log to a predictable `/tmp` path.~~ Closed: logs under `$XDG_RUNTIME_DIR/doorman/`.
 9. Template protection beyond file permissions (next section).
+
+---
+
+## Round 9a controls
+
+Added after an analysis of the decision path (security plan, 2026-11-10). Each
+control, what it defends and its honest limit. Defaults were chosen so a genuine
+user is not affected in normal conditions; none of them lowers a threshold.
+Nothing here was measured against a real attack on the owner's host: "defends"
+means the code path is closed and a test fails without it.
+
+| Control | Defends against | Limit |
+|---|---|---|
+| Failure budget + cooldown (`[ipc] face_*`) | Unlimited retries on the lock screen: an attack whose per-attempt success chance p is small became 1-(1-p)^k over the many attempts a `WaitForMatch` loop makes. After 5 judged failures face auth is off for 30 s, then 2 min, then 10 min. | Does not lower p; it caps k. A denial of service is possible: someone who fails on purpose switches the owner's FACE unlock off for the cooldown. The password path is never affected, and a match resets the budget. In memory: a daemon restart (root) clears it. |
+| Per-frame identity floor (`[decision] frame_identity_floor`, mean mode) | A live face of someone else on the frames that carry the depth checks, with photos of the owner in between: liveness was not bound to identity and the frames were averaged. Every frame must reach cosine 0.30 on its own. | A look-alike who clears 0.30 per frame is not stopped by it (the 0.4 threshold still decides). The floor is a coarse tripwire, not a second threshold. |
+| Multi-face gate (`[recognition] multi_face_policy`) | A phone showing a face held next to a live face: the detector picked one face by score per frame, so the attacker could alternate. Frames with a second face of at least 25% of the main face area and detector score 0.75 are not accepted. | A bystander close behind the owner causes a rejection (password). A photo held so that it is the only face is not a multi-face case (depth liveness is the control there). |
+| Minimum frames (`[authentication] min_decision_frames`) | Deciding on one frame when the CPU is loaded and the deadline cuts the collection short. Default 8 of 10. | Raises the genuine false-reject rate only when frames arrive slower than about 3 per second; the next `WaitForMatch` attempt retries. |
+| Max frame age (`[camera] max_frame_age_ms`) | A frozen or stalled capture handing over an old frame. | A frame injected with a fresh timestamp (virtual camera) is not detected; see device guard. |
+| Model integrity manifest (`[models]`) | A swapped detector, recognizer or liveness model. SHA-256 of the loaded files vs the manifest; a mismatch makes the daemon refuse to start. | Hashes are only as good as the manifest: it is compiled into the binary (root-owned) plus an optional root-owned file. The depth model has no pinned upstream hash in this repository and is reported as unlisted unless the owner adds it. A root or build-pipeline attacker replaces the manifest too. |
+| Raw frame hygiene (`[dataset]`) | Sharp photos of the owner from the unlocking sensor stored at rest (printable, replayable). Frames of successful unlocks are no longer stored by default; automatic retention for capture packs when configured; directories forced to 0700. | Rejected attempts (which may contain the owner) are still stored when `keep_raw_frames` is on. Retention is off until `raw_frames_retention_days` is set. |
+
+What stays out of scope or unproven: this is an RGB-only camera with a
+monocular-depth heuristic as the only presentation-attack check. It does not
+stop a 3D mask, a curved or cut-out print that fools the depth network, or a
+look-alike at the FAR of the recognizer (unmeasured at threshold 0.4). Treat
+face unlock as a convenience factor, not a strong biometric. See the Round 9b
+backlog in `.plans/2026-11-01_doorman-hardening-latency/STATUS.md`.
 
 ---
 

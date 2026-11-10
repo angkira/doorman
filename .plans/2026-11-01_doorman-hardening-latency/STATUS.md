@@ -149,3 +149,63 @@ The host re-measure must show: `hint_wait_ms` about 1100, `lock_to_camera_ready_
 - The default `Authenticate` (PAM, non-sudo) path still starts from the buffered latest frame without a freshness floor; only the strict sudo profile and, since this round, WaitForMatch have one.
 - `WaitForMatch` retries attempts for up to the whole call (30-60 s) with no failure counter or backoff; the rate limit counts the call once.
 - `DaemonState` carries `unsafe impl Send/Sync`.
+
+## Round 9a (security hardening that does not need the owner's data)
+Scope: controls that close proved code-level gaps without lowering any threshold. Round 9b (below) needs the owner's measurements. Unchanged on purpose: `similarity_threshold`, `liveness_depth_threshold` (0.05), `auth_frames` (10), `mean_mode_depth_samples`, N-of-M defaults. Commits are one per item, except B+C+D which share the per-frame loop and the config surface (the config keys of B-D are introduced in the commit of A).
+
+### PROVED (code read at 16ed392 and tests, nothing run on a camera or on the host)
+- Lock path had no attempt budget: `wait_for_match` re-ran the full decision back to back until the deadline; a source that fails instantly (camera unavailable) made it a busy loop. Now: shared budget in `run_authenticate` + 250 ms pause (`unlock_wait::RETRY_PAUSE`).
+- `mean` mode scored every frame into the aggregate with no per-frame identity test, and liveness was only checked on the first and deciding frame: the live-other-face + owner-photos mix was ACCEPTED (test `identity_floor_rejects_a_live_attacker_around_owner_photos` pins the old acceptance with the floor off, and the rejection with it on).
+- The detector kept one face per frame (highest score) and discarded the rest; only an empty set was checked before deciding (a single-frame mean was possible).
+- No model hash was checked at load; `doorman models verify` did not exist (docs/MODELS.md only mentioned `doorman status`).
+- Matched raw frames were stored whenever `keep_raw_frames` was on (`log_auth_capture_pack` is called for ConfirmedGenuine); `retention_days` never deleted anything.
+- `DOORMAN_WATCH_EARLY=1` started the poll watcher before the settle wait (verifier finding); fixed, test fails without the fix.
+
+### INFERRED / not measured
+- Effect on FRR: the floor (0.30 vs genuine frames far above it), min frames (8 of 10) and the multi-face gate are argued from the host-observed genuine range and the detector rate, not measured. Watch `identity_floor`, `insufficient_frames`, `ambiguous_faces` in the journal after the rollout.
+- Per-frame genuine cosine distribution is unknown (the host range 0.74-0.82 is the aggregate); the floor 0.30 is justified as "well below the match threshold and well above where impostor frames sit (about 0)", not fitted.
+- That `max_frame_age_ms = 1000` never trims a genuine frame on the host (the frame is taken up within about one frame period of capture).
+- The owner's installed model files match `packaging/models.sha256` (they come from `fetch_models.sh` pins if installed from the .deb; a locally exported recognizer would not). Check with `doorman models verify` before upgrading.
+
+### Implemented
+| Item | What | Where |
+|---|---|---|
+| A | Failure budget + cooldown 30 s / 2 min / 10 min for ALL entry points; `NoMatch{suspended}` and `Denied [face_auth_suspended]`; watcher backs off 5 s; WaitForMatch attempts spaced 250 ms | `daemon/src/face_budget.rs`, `ipc.rs` `run_authenticate`, `unlock_wait.rs`, `unlock_watch.rs`, `[ipc] face_*` |
+| B | `[decision] frame_identity_floor = 0.30`, fail closed (`identity_floor`) | `frame_policy.rs`, `ipc.rs` |
+| C | `[recognition] multi_face_policy = reject|largest|off` (+ ratio 0.25, score 0.75); detector reports `Face.other_faces` | `ml/backend.rs`, `ml/ort_backend.rs`, `ipc.rs` |
+| D | `[authentication] min_decision_frames` (0 = auth_frames - 2), `[camera] max_frame_age_ms = 1000` | `frame_policy.rs`, `ipc.rs` |
+| E | SHA-256 manifest compiled in, checked at start for the loaded models, fail closed; `[models] allow_unverified_models`, `manifest_path`; `doorman models verify [--print-manifest]` | `model_integrity.rs`, `packaging/models.sha256`, `main.rs` |
+| F | `[dataset] capture_successful_unlocks = false`, `raw_frames_retention_days` (unset = never delete), dirs forced to 0700, INFO line with the retention state | `dataset.rs`, `dataset_purge.rs`, `main.rs` |
+| G | `doorman --json test` structured record, exit codes 0/1/2 documented | `test_report.rs`, `bin/doorman.rs` |
+| H | poll mode never starts the watcher early; flap and hold==hint tests; docs for camera-on-unlocked and request-relative freshness | `doorman-lock`, `unlock_wait.rs`, `docs/unlock-path.md` |
+
+### Security impact (every behavioural change)
+| Change | FAR | FRR | Latency | Fail-closed paths |
+|---|---|---|---|---|
+| A budget | lowers the achievable attack rate: k attempts become at most 5 per 5 min, then 30 s / 2 min / 10 min lockouts | none unless 5 judged failures in a row (the owner in a dark room: then the password is right) | 0 on success; 250 ms pause between failed retries inside a call | suspended -> Denied/NoMatch, no camera opened |
+| A DoS | n/a | an attacker who fails on purpose switches the owner's face unlock off for the cooldown (password and a later match unaffected) | n/a | documented |
+| B floor | closes the live-face + photo mix; does not stop a look-alike above 0.30 | none expected (genuine frames far above 0.30); a genuinely bad frame (blur, head turn) now fails the attempt, the next WaitForMatch attempt retries | about 0 (a dot product) | below floor or NaN -> reject |
+| C multi-face | closes the phone-next-to-face alternation | a close bystander (>= 25% of the face area, score >= 0.75) causes a reject -> password | 0 (detections already computed) | ambiguous -> reject |
+| D min frames | removes the 1-frame decision under load | rises only if fewer than 8 of 10 good frames arrive in the 3 s window (below about 3 fps); retry follows | 0 | too few -> reject (not a judged failure) |
+| D frame age | stops a stalled feed from deciding | none expected | 0 | stale -> skipped, none usable -> `no_frames` |
+| E manifest | blocks swapped detector/recognizer/liveness model | a host whose model files differ from the pins will not start the daemon until fixed or opted out | start-up hashing (about 0.1-0.5 s for 100-200 MB) | mismatch -> daemon exits non-zero |
+| F | removes sharp owner photos of successful unlocks from disk by default | none | 0 | retention only deletes when configured |
+| G, H | none | none | none | none |
+
+Upgrade effects on the owner's host (explicit keys needed to keep the old behaviour): `capture_successful_unlocks = true` if genuine frames are still wanted for calibration; `doorman models verify` first.
+
+### Mutation checks (each safety property, on the dev clone, reverted after)
+See `$HOME/.cache/doorman-verify/round9a-report.md` for the full table. Every control above has a test that fails when the check is removed.
+
+### Round 9b backlog (needs the owner's measurements; nothing below is enabled)
+- Depth on several frames: `mean_mode_depth_samples` 0 -> 2 and a median over 3 spread frames (the depth threshold has a thin genuine margin: 0.0491 vs 0.05 observed).
+- Second PAD model (MiniFASNet) in shadow mode, with a fail-closed wrapper (the legacy `check_liveness` returns `Ok(true)` when the model is missing).
+- Quality gates (face-region sharpness, yaw proxy, inner-face brightness) in log-only mode first; restore `min_face_area_frac` from the host's 0.005.
+- Threshold calibration with the owner's attack protocol (print, screen, curved print, cut-out, mixed track) and the production scorer; FAR at 0.4 is still unmeasured.
+- `frames_judged` and the margin in the wire answer; `doorman stats`; lock-generation-bound `Matched`.
+- Per-frame genuine cosine distribution from the timing log to tune the floor (0.30) and `min_decision_frames`.
+
+### Not done / limits
+- Honest limits: RGB-only camera, monocular-depth heuristic as the only PAD; a convenience factor, not a strong biometric.
+- The depth model has no pinned hash in the repository (unlisted unless the owner adds it with `manifest_path`).
+- Host verification of all of this is pending (no daemon, camera or `doorman test` was run).

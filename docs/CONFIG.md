@@ -236,10 +236,24 @@ or directory is group/world-writable.
   `retention_days = 14` is new. An existing file that sets these keys keeps its
   values; a file that omits them now gets the smaller caps. The daemon logs the
   effective `[dataset]` values once at start.
-* `retention_days` is advisory: the daemon never deletes data. Remove old
+* `retention_days` is advisory (it is only the default of `doorman dataset purge`); the daemon deletes capture packs only when `raw_frames_retention_days` is set. Remove old
   files yourself with `sudo doorman dataset purge [--older-than DAYS] [--dry-run]`
   (root only; it deletes `attempts-*.jsonl`, `labels-*.jsonl` and
   `captures/<day>/` entries whose UTC day is older than the cutoff).
+* Round 9a (security hardening) changed defaults for installs whose file omits
+  the keys: face auth is suspended after 5 judged failures
+  (`ipc.face_max_judged_failures`, 0 disables); in `mean` mode every frame must
+  reach `decision.frame_identity_floor = 0.30` (0 disables) and at least
+  `authentication.min_decision_frames` (derived: auth_frames - 2) good frames
+  must be collected; frames with a second face are not accepted
+  (`recognition.multi_face_policy = "reject"`, `"off"` restores the old
+  behaviour); frames older than `camera.max_frame_age_ms = 1000` are skipped (0
+  disables); the daemon refuses to start when a listed model file does not match
+  the integrity manifest (`models.allow_unverified_models`); raw frames of
+  SUCCESSFUL unlocks are no longer stored even with `keep_raw_frames = true`
+  (`dataset.capture_successful_unlocks = true` restores it); automatic deletion
+  of capture packs happens only when `dataset.raw_frames_retention_days` is set
+  (unset = never). Run `doorman models verify` before upgrading.
 * `dataset.raw_face_frame_bundle_size` was removed (commit 7c511d9) and has no
   effect. `doorman config check` reports it as deprecated (exit 2); delete it
   from the file. See `dataset.raw_frame_bundle_size` for the remaining cap.
