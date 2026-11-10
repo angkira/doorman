@@ -120,6 +120,8 @@ or directory is group/world-writable.
 | `admin_uids` | `[]` |
 | `max_auth_attempts_per_minute` | `20` |
 | `max_connections_per_uid` | `8` |
+| `prearm_camera` | `true` |
+| `prearm_max_hold_secs` | `5` |
 | `stream_socket_group` | `unset` |
 | `trusted_uids` | `[]` |
 | `wait_for_match_max_ms` | `60000` |
