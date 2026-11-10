@@ -209,3 +209,37 @@ See `$HOME/.cache/doorman-verify/round9a-report.md` for the full table. Every co
 - Honest limits: RGB-only camera, monocular-depth heuristic as the only PAD; a convenience factor, not a strong biometric.
 - The depth model has no pinned hash in the repository (unlisted unless the owner adds it with `manifest_path`).
 - Host verification of all of this is pending (no daemon, camera or `doorman test` was run).
+
+## Round 9b-1 (instruments to MEASURE presentation-attack resistance; no decision change)
+Goal: give the owner the tools to collect attack and genuine data on the real host. No threshold, default or decision-path behaviour changed: similarity threshold, depth relief threshold 0.05, `auth_frames`, `mean_mode_depth_samples`, N-of-M and every 9a default are untouched. The one new behaviour, shadow PAD logging, is OFF by default and purely log-only.
+
+### PROVED (code read at fb3d721, then tests on the dev clone; nothing run on a camera or the host)
+- A: the niri shell tests leaked processes. `LOCKER_STUB` / `LONG_WATCHER_STUB` looped forever (`while :; do sleep 0.05; done`) and were stopped only by the test's last line (`stop_locker`), so an assertion failure, a pytest timeout or a SIGKILL left a stub `gtklock` alive. Reproduced: started `test_poll_mode_never_starts_its_watcher_early`, SIGKILLed pytest (my own process), the stub `.../stubs/gtklock` survived (then killed by me by pid). Fixed: stubs end after 30 s or when the owning pytest pid is gone (`STUB_OWNER`), an autouse fixture reaps every process of the test's own Env (matched by `STUB_DIR` + `STUB_OWNER` in the environment, never by name), `tests/conftest.py` fails the session if a process carrying this pytest's `STUB_OWNER` is still alive, CI runs the whole suite, so that guard applies there. An extra explicit CI step (`pgrep -af 'pytest-of-.*/stubs/'` after the pytest step) was written but NOT pushed: the push token has no `workflow` scope; the owner can add it by hand. Mutation (no reap, no owner check, injected assertion failure) reproduced the leak again; restored, the same injected failure leaves nothing.
+- B: with `[liveness] shadow_pad_logging = true` each attempt appends one JSON record; decisions are identical with the flag on and off for 9 synthetic sequences x 3 decision configurations (mean, mean with 3 depth samples, n_of_m) through the real `run_authenticate` path, including the number of depth inferences; also with injected panics in the hooks, in record building and in the detached task, and with MiniFASNet loaded, missing and failing. Mutations (hook panics escape; `finish` without `catch_unwind`; shadow flips `frames_used`) are each caught by these tests.
+- C: `scripts/pad_protocol.py` (stdlib only) with 29 pytest cases against a stub `doorman` (exit codes 0 / 2 / 1, suspended with cooldown wait, unparsable output, no-face as non-response, pacing with `--budget-max`, file mode 0600). Clopper-Pearson bounds by bisection on the binomial CDF checked against scipy's beta quantiles: 0/10 25.9%, 0/20 13.9%, 0/30 9.5%, 0/100 2.95%.
+- D: `doorman-bench pad-report` exists; the protocol writes a `-bench.csv` it can read (score 1.0 accepted / 0.0 rejected, `--threshold 0.5`), no Rust change.
+
+### INFERRED / not measured
+- Cost of the extra MiniFASNet pass: about 5-20 ms on CPU, from the 1.8 MB model and 128x128 input; not timed. It runs after the response is built, off the async workers.
+- The task statement quoted 3.6% for 0 of 100; that is the TWO-sided 97.5% figure. The one-sided 95% bound (the one the repo's SELF-ASSESSMENT.md and this protocol use) is 2.95%; both are tested.
+- Whether the owner's `/run/doorman` group permissions let the owner read the shadow log without sudo.
+- The yaw proxy (nose offset over inter-ocular distance) is uncalibrated; it ranks head turn, it is not degrees.
+
+### Implemented
+| Item | What | Where |
+|---|---|---|
+| A | self-terminating stubs, reaping fixture, session leak guard, CI check | `tests/test_niri_lock_scripts.py`, `tests/conftest.py`, `.github/workflows/ci.yml` |
+| B | shadow PAD collector and record; `MLBackend::minifasnet_logit_diff` (missing model is `None`, never a pass); `[liveness] shadow_pad_logging = false`, `[telemetry] shadow_pad_log_path` | `daemon/src/shadow_pad.rs`, `ipc.rs` (`decide` wrapper + hooks), `ml/*`, `shared/src/config.rs` |
+| C | owner protocol harness | `scripts/pad_protocol.py`, `tests/test_pad_protocol.py` |
+| E | docs | `docs/PAD-PROTOCOL.md`, `docs/CONFIG.md` (regenerated), `packaging/doorman.toml.example` |
+
+### Security impact
+No decision change: `decide` is now a thin wrapper around the unchanged body (`decide_core`); the hooks only copy values out. The legacy `check_liveness` path (which passes when its model is missing) is not used. The shadow file is created 0640 (the timing log's mode), holds no frame, embedding or name, and is bounded by rotation. The only new exposure is that the attempt's similarity and relief distribution sit in a daemon-group-readable file while the flag is on.
+
+### Round 9b-2 (data-driven; all pending the owner's protocol data, nothing enabled)
+- Depth on several frames: `mean_mode_depth_samples` 0 -> 2 and a median over 3 spread frames, if the data shows photo frames mid-sequence passing; check the genuine margin first (observed 0.0491 vs 0.05).
+- Per-frame liveness requirement (every judged frame must pass) vs the current first-plus-deciding-frame checks.
+- Threshold calibration: depth relief threshold and similarity threshold from the genuine / attack score distributions (use the shadow log for the per-attempt distributions).
+- MiniFASNet as a second signal: shadow first (this round), then enforce as an AND gate only if its attack separation holds on the owner's data.
+- Quality gates enforce (face-region sharpness, yaw, brightness) after their distributions are known; restore `min_face_area_frac` from the host's 0.005.
+- Open from 9a: `frames_judged` and the margin in the wire answer, `doorman stats`, lock-generation-bound `Matched`.
