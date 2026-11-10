@@ -29,6 +29,10 @@
 #   DOORMAN_GTKLOCK_CONFIG  default: ${XDG_CONFIG_HOME:-$HOME/.config}/gtklock/config.ini
 #   DOORMAN_SWAYLOCK_CONFIG default: ${XDG_CONFIG_HOME:-$HOME/.config}/swaylock/config
 #   DOORMAN_LOCKER_SETTLE   seconds to wait before deciding the locker stayed up (0.3)
+#   DOORMAN_WATCH_EARLY     1 (default): start the watcher as soon as the locker
+#                           process exists, in parallel with the settle wait, so
+#                           the daemon starts the camera ~0.3 s earlier. 0: old
+#                           order (settle first, then watcher).
 #   GTKLOCK, SWAYLOCK       locker executables
 # Extra arguments are passed to the locker.
 set -euo pipefail
@@ -41,6 +45,7 @@ doorman_bin="${DOORMAN_BIN:-doorman}"
 backend="${DOORMAN_LOCK_BACKEND:-auto}"
 unlock_mode="${DOORMAN_UNLOCK_MODE:-event}"
 settle="${DOORMAN_LOCKER_SETTLE:-0.3}"
+watch_early="${DOORMAN_WATCH_EARLY:-1}"
 gtklock_bin="${GTKLOCK:-gtklock}"
 swaylock_bin="${SWAYLOCK:-swaylock}"
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -214,11 +219,25 @@ log "locking: user=$user mode=$unlock_mode cmd=${locker_cmd[*]} $*"
 "${locker_cmd[@]}" "$@" >>"$log" 2>&1 &
 locker_pid=$!
 
+# Hot path: the watcher only needs the PID, and the daemon can start the camera
+# as soon as it is asked, so do not make it wait for the settle check. A locker
+# that dies meanwhile makes the early watcher exit by itself (locker gone); it is
+# reaped below before the already-locked handling runs.
+if [ "$watch_early" = 1 ] && kill -0 "$locker_pid" 2>/dev/null; then
+    start_watcher_once "$locker_pid"
+fi
+
 # A locker that is refused because the session is already locked exits at
 # once. Do not start a second locker. With a zero status that is success; a
 # non-zero status may still mean the lock is held (see the header).
 sleep "$settle"
 if ! kill -0 "$locker_pid" 2>/dev/null; then
+    if [ -n "$watcher_pid" ]; then
+        wait "$watcher_pid" 2>/dev/null || true
+        log "early unlock watcher pid=$watcher_pid ended with its locker"
+        cleanup_pidfile
+        watcher_pid=""
+    fi
     rc=0
     wait "$locker_pid" || rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -231,7 +250,8 @@ if ! kill -0 "$locker_pid" 2>/dev/null; then
 fi
 log "locker pid=$locker_pid name=$locker_name"
 
-# Watch whenever the recorded locker is alive, whatever its exit code will be.
+# Watch whenever the recorded locker is alive, whatever its exit code will be
+# (a no-op when the early watcher above is already running).
 start_watcher_once "$locker_pid"
 
 # Stay as the locker's parent so it is reaped the moment it exits.

@@ -108,6 +108,9 @@ class Env:
             "DOORMAN_USER": "alice",
             "DOORMAN_SOCKET": str(tmp_path / "doorman.sock"),
             "DOORMAN_LOCKER_SETTLE": "0.2",
+            # The tests below describe the settle-first order; the early
+            # watcher has its own tests.
+            "DOORMAN_WATCH_EARLY": "0",
             # Never pick up a real locker or doorman from the host.
             "GTKLOCK": "gtklock",
             "SWAYLOCK": "swaylock",
@@ -505,3 +508,60 @@ def test_poll_watcher_survives_nonzero_not_recognized_and_stops_on_recognized(
     assert "!recognized: alice" in result.stdout
     kills = (env.stub_dir / "pkill.calls").read_text().splitlines()
     assert kills and all("-x gtklock" in k for k in kills)
+
+
+def test_early_watcher_starts_before_the_settle_wait_ends(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    settle = 4.0
+
+    started = time.monotonic()
+    proc = env.run({"DOORMAN_WATCH_EARLY": "1", "DOORMAN_LOCKER_SETTLE": str(settle)})
+    env.wait_for("doorman.args")
+    assert time.monotonic() - started < settle - 1.0, "watcher waited for the settle"
+    locker_pid = (env.stub_dir / "gtklock.pid").read_text().strip()
+    watch = env.read_args("doorman")
+    assert watch[watch.index("--locker-pid") + 1] == locker_pid
+    stop_locker(env, "gtklock", proc)
+    assert proc.returncode == 0
+    # One watcher only: the late start_watcher_once finds the pidfile or the
+    # finished watcher; either way exactly one start was logged for this pid.
+    assert env.log.read_text().count(f"locker_pid={locker_pid}") >= 1
+
+
+def test_early_watcher_for_a_refused_locker_is_reaped_and_nothing_is_left(
+    tmp_path: Path,
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)  # exits at once, like a watcher whose locker is gone
+
+    proc = env.run({"DOORMAN_WATCH_EARLY": "1"})
+    proc.wait(timeout=TIMEOUT)
+
+    assert proc.returncode == 0
+    log = env.log.read_text()
+    assert "rc=1" in log and "no watcher" in log
+    assert not (env.runtime / "doorman" / "unlock-watch.pid").exists()
+
+
+def test_early_watcher_does_not_block_attaching_to_a_live_holder(
+    tmp_path: Path, alive_holder: subprocess.Popen
+) -> None:
+    env = Env(tmp_path)
+    env.stub("gtklock", EXITING_LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    (env.stub_dir / "pgrep.out").write_text(f"{alive_holder.pid}\n")
+
+    proc = env.run({"DOORMAN_WATCH_EARLY": "1"})
+    proc.wait(timeout=TIMEOUT)
+
+    assert proc.returncode == 0
+    watch = env.read_args("doorman")  # the last start wins: the holder's
+    assert watch[watch.index("--locker-pid") + 1] == str(alive_holder.pid)
+    assert "attaching watcher" in env.log.read_text()
+
+
+def test_early_watcher_is_the_default() -> None:
+    assert 'watch_early="${DOORMAN_WATCH_EARLY:-1}"' in LOCK.read_text()
