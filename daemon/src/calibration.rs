@@ -143,6 +143,48 @@ impl Calibration {
     }
 }
 
+/// Parse a session length typed by the operator: `45m`, `2700s`, `2h`, `1h30m`;
+/// a bare number is minutes. Range checking is the daemon's job.
+pub fn parse_ttl(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("empty duration".to_string());
+    }
+    if let Ok(minutes) = text.parse::<u64>() {
+        return minutes
+            .checked_mul(60)
+            .ok_or_else(|| format!("`{text}` is too large"));
+    }
+    let mut total: u64 = 0;
+    let mut digits = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c.to_ascii_lowercase() {
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => return Err(format!("`{text}`: use forms like 45m, 2700s, 2h or 1h30m")),
+        };
+        let n: u64 = digits
+            .parse()
+            .map_err(|_| format!("`{text}`: a number must come before `{c}`"))?;
+        digits.clear();
+        total = n
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(|| format!("`{text}` is too large"))?;
+    }
+    if !digits.is_empty() {
+        return Err(format!(
+            "`{text}`: the trailing {digits} needs a unit (h, m or s)"
+        ));
+    }
+    Ok(total)
+}
+
 fn inactive() -> CalibrationInfo {
     CalibrationInfo {
         active: false,
@@ -251,6 +293,33 @@ mod tests {
         assert_eq!(info.judged_failures_counted, 0);
         assert!(c.is_active(t0 + 18 * MIN));
         assert!(!c.is_active(t0 + 19 * MIN));
+    }
+
+    #[test]
+    fn ttl_parsing() {
+        for (text, want) in [
+            ("45m", 2700),
+            ("45", 2700),
+            ("2700s", 2700),
+            ("2h", 7200),
+            ("1h30m", 5400),
+            ("1H", 3600),
+            (" 10m ", 600),
+        ] {
+            assert_eq!(parse_ttl(text), Ok(want), "{text}");
+        }
+        for bad in [
+            "",
+            "m",
+            "-5m",
+            "4x",
+            "1h30",
+            "abc",
+            "1.5h",
+            "99999999999999999999m",
+        ] {
+            assert!(parse_ttl(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

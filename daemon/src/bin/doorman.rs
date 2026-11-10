@@ -43,6 +43,10 @@ use doorman_shared::{
 mod install;
 use install::{DesktopChoice, EpChoice, InstallOpts, PamScope, UninstallOpts};
 
+// Terminal side of `calibrate`, `pad run` and `config get|set|unset`.
+#[path = "../cli_pad.rs"]
+mod cli_pad;
+
 // Event-driven unlock helper for screen lockers (`doorman unlock-watch`).
 #[path = "../unlock_watch.rs"]
 mod unlock_watch;
@@ -95,6 +99,52 @@ enum ConfigAction {
     },
     /// Print every config key with its default as Markdown (docs/CONFIG.md).
     DumpDefaults,
+    /// Show the effective value of a key (or of every key of a section).
+    Get {
+        /// Dotted key, for example `ipc.face_cooldown_secs`, or a section.
+        key: String,
+        /// Config file (default: the file the daemon would load).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Set a key in /etc/doorman/doorman.toml (root). The key and value are
+    /// validated like the daemon does, comments are kept, the file is replaced
+    /// atomically after a backup. Never restarts anything.
+    Set {
+        /// Dotted key, for example `ipc.face_max_judged_failures`.
+        key: String,
+        /// TOML value: `7`, `true`, `"text"` (a bare word works for strings), `[10, 30, 120]`.
+        value: String,
+        /// Edit this file instead of the system config.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Remove a key from /etc/doorman/doorman.toml (root) so its default applies.
+    Unset {
+        key: String,
+        /// Edit this file instead of the system config.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PadAction {
+    /// Guided presentation-attack screening against the live camera: genuine
+    /// baseline, phone photo / video, print, mixed, lighting, glasses, yaw,
+    /// distance. Needs no root. Run `sudo doorman calibrate` first for a
+    /// session without pauses. Screening, not certification.
+    Run {
+        /// Enrolled user to test (default: you).
+        #[arg(long)]
+        user: Option<String>,
+        /// Short smoke run: 3 genuine, 2 per attack class, 2 per condition.
+        #[arg(long)]
+        quick: bool,
+        /// Result file prefix (default: ~/doorman-pad-<date>).
+        #[arg(long, value_name = "PREFIX")]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,8 +214,28 @@ enum Command {
         /// Username to authenticate.
         username: String,
     },
-    /// Show daemon status (version, uptime, camera, models, enrolled users).
+    /// Show daemon status (version, uptime, camera, models, enrolled users,
+    /// calibration mode).
     Status,
+    /// Calibration mode for measuring presentation attacks: root only, time
+    /// limited, never persisted. `sudo doorman calibrate` starts it (default 45
+    /// minutes), `--end` ends it, `--status` shows it (any user).
+    Calibrate {
+        /// Session length: 45m, 2700s, 1h30m (bare number = minutes). Max 120m.
+        #[arg(long, value_name = "TIME", conflicts_with_all = ["end", "status"])]
+        ttl: Option<String>,
+        /// End calibration mode now.
+        #[arg(long, conflicts_with = "status")]
+        end: bool,
+        /// Show whether calibration mode is active and for how long.
+        #[arg(long)]
+        status: bool,
+    },
+    /// Presentation-attack screening (see `doorman pad run --help`).
+    Pad {
+        #[command(subcommand)]
+        action: PadAction,
+    },
     /// Unlock a screen locker on face match: waits on the daemon (WaitForMatch)
     /// and SIGTERMs the given locker PID. Exit codes: see docs/unlock-path.md.
     UnlockWatch {
@@ -352,6 +422,30 @@ fn default_runtime_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(FALLBACK_RUNTIME_DIR))
 }
 
+fn is_root() -> bool {
+    doorman_shared::config_trust::effective_uid() == 0
+}
+
+/// A request sender for the `cli_pad` commands: refusals come back as errors
+/// with the daemon's own reason.
+fn transport(sockets: &Sockets) -> impl Fn(&Request, Duration) -> Result<Response, String> {
+    let socket = sockets.command.clone();
+    move |request, timeout| match send_request_raw(&socket, request, timeout) {
+        Ok(Response::Denied { reason }) => Err(format!("denied by daemon: {reason}")),
+        Ok(other) => Ok(other),
+        Err(CliError(msg)) => Err(msg),
+    }
+}
+
+/// Turn a `cli_pad` result into the CLI's error handling and exit code.
+fn exit_with(result: Result<i32, String>) -> Result<(), CliError> {
+    match result {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(e) => Err(CliError::new(e)),
+    }
+}
+
 /// A flat error with a friendly, actionable message.
 struct CliError(String);
 
@@ -375,6 +469,25 @@ fn main() {
             }
         }),
         Command::Status => cmd_status(&sockets, cli.json),
+        Command::Calibrate { ttl, end, status } => {
+            let send = transport(&sockets);
+            match cli_pad::cmd_calibrate(&send, ttl.as_deref(), *end, *status, cli.json, is_root())
+            {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(CliError::new(e)),
+            }
+        }
+        Command::Pad {
+            action: PadAction::Run { user, quick, out },
+        } => {
+            let send = transport(&sockets);
+            match cli_pad::cmd_pad_run(&send, user.as_deref(), *quick, out.as_deref()) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(CliError::new(e)),
+            }
+        }
         Command::UnlockWatch {
             user,
             locker_pid,
@@ -448,6 +561,21 @@ fn main() {
                 );
                 Ok(())
             }
+            ConfigAction::Get { key, config } => {
+                exit_with(cli_pad::cmd_config_get(config.as_deref(), key))
+            }
+            ConfigAction::Set { key, value, config } => exit_with(cli_pad::cmd_config_edit(
+                config.as_deref(),
+                key,
+                Some(value),
+                is_root(),
+            )),
+            ConfigAction::Unset { key, config } => exit_with(cli_pad::cmd_config_edit(
+                config.as_deref(),
+                key,
+                None,
+                is_root(),
+            )),
         },
         Command::Doctor => cmd_doctor(),
         Command::Install {
@@ -1001,6 +1129,12 @@ fn print_status(info: &DaemonInfo) {
     if let Some(ort) = &info.ort_runtime {
         println!("  onnx runtime   : {ort}");
     }
+    if let Some(left) = info.calibration_remaining_secs {
+        println!(
+            "  CALIBRATION    : ACTIVE, {} left (failure budget suspended; end: sudo doorman calibrate --end)",
+            cli_pad::fmt_duration(left)
+        );
+    }
 }
 
 fn format_uptime(secs: u64) -> String {
@@ -1149,10 +1283,13 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<i32, CliErr
     let duration_ms = started.elapsed().as_millis() as u64;
     if json {
         // One JSON object on stdout in every case, errors included.
-        let report = match &answer {
+        let mut report = match &answer {
             Ok(response) => classify(response, duration_ms, chrono::Utc::now().timestamp()),
             Err(_) => error_report(duration_ms),
         };
+        // Loud in the data too: results taken in calibration mode say so.
+        let send = transport(sockets);
+        report.calibration = cli_pad::calibration_state(&send).is_some_and(|c| c.active);
         let line = serde_json::to_string_pretty(&report)
             .map_err(|e| CliError::new(format!("failed to serialize report: {e}")))?;
         println!("{line}");
@@ -1390,5 +1527,181 @@ mod tests {
         for (response, want) in table {
             assert_eq!(test_exit_code(&response), want, "{response:?}");
         }
+    }
+
+    // --- Round 9b-2a: calibrate, pad run, config get|set|unset ---
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["doorman"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn calibrate_parses_ttl_end_and_status_and_rejects_mixtures() {
+        match parse(&["calibrate"]).unwrap().command {
+            Command::Calibrate {
+                ttl: None,
+                end: false,
+                status: false,
+            } => {}
+            _ => panic!("plain calibrate"),
+        }
+        match parse(&["calibrate", "--ttl", "45m"]).unwrap().command {
+            Command::Calibrate { ttl: Some(t), .. } => assert_eq!(t, "45m"),
+            _ => panic!("ttl"),
+        }
+        assert!(matches!(
+            parse(&["calibrate", "--end"]).unwrap().command,
+            Command::Calibrate { end: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["calibrate", "--status"]).unwrap().command,
+            Command::Calibrate { status: true, .. }
+        ));
+        assert!(parse(&["calibrate", "--end", "--status"]).is_err());
+        assert!(parse(&["calibrate", "--end", "--ttl", "5m"]).is_err());
+    }
+
+    #[test]
+    fn pad_run_has_sensible_defaults_and_one_optional_quick() {
+        match parse(&["pad", "run"]).unwrap().command {
+            Command::Pad {
+                action:
+                    PadAction::Run {
+                        user: None,
+                        quick: false,
+                        out: None,
+                    },
+            } => {}
+            _ => panic!("defaults"),
+        }
+        assert!(matches!(
+            parse(&["pad", "run", "--quick"]).unwrap().command,
+            Command::Pad {
+                action: PadAction::Run { quick: true, .. }
+            }
+        ));
+        assert!(parse(&["pad"]).is_err());
+        assert!(
+            parse(&["pad", "run", "--genuine", "5"]).is_err(),
+            "no flag soup"
+        );
+    }
+
+    #[test]
+    fn config_get_set_unset_parse() {
+        match parse(&["config", "set", "ipc.face_cooldown_secs", "[10, 30, 120]"])
+            .unwrap()
+            .command
+        {
+            Command::Config {
+                action:
+                    ConfigAction::Set {
+                        key,
+                        value,
+                        config: None,
+                    },
+            } => {
+                assert_eq!(
+                    (key.as_str(), value.as_str()),
+                    ("ipc.face_cooldown_secs", "[10, 30, 120]")
+                );
+            }
+            _ => panic!("set"),
+        }
+        assert!(matches!(
+            parse(&["config", "get", "ipc"]).unwrap().command,
+            Command::Config {
+                action: ConfigAction::Get { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["config", "unset", "ipc.face_max_judged_failures"])
+                .unwrap()
+                .command,
+            Command::Config {
+                action: ConfigAction::Unset { .. }
+            }
+        ));
+        assert!(parse(&["config", "set", "only.key"]).is_err());
+        assert!(
+            parse(&["config", "set", "k", "v", "--restart"]).is_err(),
+            "no --restart flag"
+        );
+    }
+
+    #[test]
+    fn calibrate_from_a_non_root_user_prints_the_sudo_line_and_sends_nothing() {
+        let sent = std::cell::Cell::new(0);
+        let send = |_: &Request, _: Duration| -> Result<Response, String> {
+            sent.set(sent.get() + 1);
+            Err("must not be called".into())
+        };
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, Some("30m"), false, false, false, false),
+            Ok(1)
+        );
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, None, true, false, false, false),
+            Ok(1)
+        );
+        assert_eq!(sent.get(), 0);
+        assert!(
+            cli_pad::sudo_instruction(" --ttl 30m").contains("sudo doorman calibrate --ttl 30m")
+        );
+    }
+
+    #[test]
+    fn calibrate_status_works_for_anyone_and_root_sends_the_request() {
+        use doorman_shared::CalibrationInfo;
+        let seen = std::cell::RefCell::new(Vec::new());
+        let send = |r: &Request, _: Duration| -> Result<Response, String> {
+            seen.borrow_mut().push(serde_json::to_string(r).unwrap());
+            Ok(Response::Success {
+                message: None,
+                data: Some(ResponseData::Calibration {
+                    info: CalibrationInfo {
+                        active: true,
+                        remaining_secs: 60,
+                        ttl_secs: 2700,
+                        judged_failures_counted: 0,
+                    },
+                }),
+            })
+        };
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, None, false, true, false, false),
+            Ok(0)
+        );
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, Some("30m"), false, false, false, true),
+            Ok(0)
+        );
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, None, true, false, false, true),
+            Ok(0)
+        );
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                r#"{"type":"calibrate_status"}"#.to_string(),
+                r#"{"type":"calibrate","ttl_secs":1800}"#.to_string(),
+                r#"{"type":"calibrate_end"}"#.to_string(),
+            ]
+        );
+        assert!(cli_pad::cmd_calibrate(&send, Some("soon"), false, false, false, true).is_err());
+    }
+
+    #[test]
+    fn calibrate_surfaces_the_daemons_refusal() {
+        let send = |_: &Request, _: Duration| -> Result<Response, String> {
+            Ok(Response::Failure {
+                reason: "ttl 99999s exceeds the maximum of 7200s (120 min)".into(),
+            })
+        };
+        let err =
+            cli_pad::cmd_calibrate(&send, Some("99999s"), false, false, false, true).unwrap_err();
+        assert!(err.contains("exceeds the maximum"), "{err}");
     }
 }

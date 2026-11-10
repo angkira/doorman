@@ -109,6 +109,13 @@ chrono = "0.4"
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
 sha2 = "0.10"
 
+# Comment- and format-preserving TOML editing for `doorman config set|unset`.
+# The `toml` crate (a parser/serializer) rewrites the whole file and drops
+# comments; toml_edit is the editing library of the same project and is already
+# in the lock file (0.25.x, build-time via proc-macro-crate). Parse + display
+# only, no serde feature.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
+
 [features]
 # Default dev/preview build: CPU ONNX Runtime + cross-platform mock camera +
 # the dependency-free ffmpeg live-webcam path. Works on macOS and inside an

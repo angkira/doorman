@@ -281,3 +281,46 @@ async fn request_line_at_the_cap_is_still_parsed() {
         .unwrap();
     assert!(matches!(got, Gated::Allowed(_)));
 }
+
+/// Round 9b-2a: over a real socket and the real gate, calibration start and end
+/// are refused to every non-root peer with a reason that names root, a
+/// configured admin uid included; status is open; root is let through.
+#[tokio::test]
+async fn calibration_requests_are_root_only_on_the_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("d.sock");
+    let listener = ipc_policy::bind_socket(sock.to_str().unwrap(), 0o666, None).unwrap();
+    let cfg = IpcConfig {
+        admin_uids: vec![ALICE],
+        trusted_uids: vec![BOB],
+        ..IpcConfig::default()
+    };
+    let gate = gate_with(cfg, Arc::new(Mutex::new(Instant::now())));
+    let start = r#"{"type":"calibrate","ttl_secs":600,"protocol_version":1}"#;
+    let end = r#"{"type":"calibrate_end","protocol_version":1}"#;
+    let status = r#"{"type":"calibrate_status","protocol_version":1}"#;
+    for uid in [ALICE, BOB, 65534] {
+        for line in [start, end] {
+            match roundtrip(&gate, peer(uid), &sock, &listener, line).await {
+                Response::Denied { reason } => {
+                    assert!(reason.contains("requires root"), "uid {uid}: {reason}");
+                    assert!(
+                        reason.contains("sudo"),
+                        "tells the user what to do: {reason}"
+                    );
+                }
+                other => panic!("uid {uid} {line}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            roundtrip(&gate, peer(uid), &sock, &listener, status).await,
+            Response::Success { .. }
+        ));
+    }
+    for line in [start, end, status] {
+        assert!(matches!(
+            roundtrip(&gate, peer(0), &sock, &listener, line).await,
+            Response::Success { .. }
+        ));
+    }
+}

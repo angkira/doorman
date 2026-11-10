@@ -36,6 +36,9 @@ pub struct TestReport {
     /// RFC 3339 UTC time until which face auth is suspended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspended_until: Option<String>,
+    /// Calibration mode was active when the attempt ended (filled in by the CLI
+    /// from `CalibrateStatus`; the daemon's answer does not carry it).
+    pub calibration: bool,
     /// Process exit code (not part of the JSON).
     #[serde(skip)]
     pub exit_code: i32,
@@ -69,6 +72,7 @@ pub fn classify(response: &Response, duration_ms: u64, now_unix: i64) -> TestRep
         frames_judged: None,
         duration_ms,
         suspended_until: None,
+        calibration: false,
         exit_code,
     };
     match response {
@@ -135,6 +139,7 @@ pub fn error_report(duration_ms: u64) -> TestReport {
         frames_judged: None,
         duration_ms,
         suspended_until: None,
+        calibration: false,
         exit_code: EXIT_ERROR,
     }
 }
@@ -294,6 +299,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "calibration",
                 "decision",
                 "duration_ms",
                 "frames_judged",
