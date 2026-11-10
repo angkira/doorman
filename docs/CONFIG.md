@@ -58,7 +58,9 @@ or directory is group/world-writable.
 | `fourcc` | `unset` |
 | `fps` | `30` |
 | `height` | `720` |
+| `native_failure_cooldown_secs` | `600` |
 | `native_first_frame_timeout_ms` | `1500` |
+| `native_warmup_frames` | `3` |
 | `prearm_on_lock` | `false` |
 | `prearm_window_ms` | `5000` |
 | `presence_autolock_secs` | `0` |

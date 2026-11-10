@@ -26,6 +26,15 @@ pub const MAX_PREARM_WINDOW_MS: u32 = 30_000;
 /// Bounds (inclusive, ms) for `[camera] native_first_frame_timeout_ms`.
 pub const MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS: u32 = 100;
 pub const MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS: u32 = 10_000;
+/// Upper bound (inclusive) for `[camera] native_warmup_frames`.
+pub const MAX_NATIVE_WARMUP_FRAMES: u32 = 10;
+/// Default `[camera] native_warmup_frames`: UVC cameras often deliver junk or
+/// partial buffers right after STREAMON.
+pub const DEFAULT_NATIVE_WARMUP_FRAMES: u32 = 3;
+/// Upper bound (inclusive, seconds) for `[camera] native_failure_cooldown_secs` (one day).
+pub const MAX_NATIVE_FAILURE_COOLDOWN_SECS: u32 = 86_400;
+/// Default `[camera] native_failure_cooldown_secs` (ten minutes).
+pub const DEFAULT_NATIVE_FAILURE_COOLDOWN_SECS: u32 = 600;
 /// Largest 8-bit luma value; upper bound of `[recognition] min_brightness`.
 pub const MAX_LUMA: f32 = 255.0;
 /// Largest `[liveness] frames`.
@@ -52,6 +61,14 @@ fn default_prearm_window_ms() -> u32 {
 
 fn default_native_first_frame_timeout_ms() -> u32 {
     1500
+}
+
+fn default_native_warmup_frames() -> u32 {
+    DEFAULT_NATIVE_WARMUP_FRAMES
+}
+
+fn default_native_failure_cooldown_secs() -> u32 {
+    DEFAULT_NATIVE_FAILURE_COOLDOWN_SECS
 }
 
 /// Which live-camera backend `[camera] backend` selects.
@@ -263,6 +280,22 @@ pub struct CameraConfig {
     #[serde(default = "default_native_first_frame_timeout_ms")]
     pub native_first_frame_timeout_ms: u32,
 
+    /// With the native backend: buffers read and thrown away right after
+    /// STREAMON before one may count as the first frame (UVC cameras can
+    /// deliver junk or partial buffers first). Candidates after the warm-up are
+    /// validated and retried within `native_first_frame_timeout_ms`.
+    /// 0..=10, default 3. Not the same as `warmup_frames` (cold-open discard
+    /// by the producer).
+    #[serde(default = "default_native_warmup_frames")]
+    pub native_warmup_frames: u32,
+
+    /// With `backend = "auto"`: after the native backend failed in this daemon
+    /// process, go straight to ffmpeg for this many seconds (per device and
+    /// requested mode), then probe native again. 0 disables the memory.
+    /// 0..=86400, default 600. Ignored when `backend = "native"`.
+    #[serde(default = "default_native_failure_cooldown_secs")]
+    pub native_failure_cooldown_secs: u32,
+
     /// Pin the camera by a stable device node instead of `device_index`, for
     /// example `/dev/v4l/by-id/usb-Vendor_Camera-video-index0`. The path is
     /// resolved on every open and must end at a `/dev/videoN` character
@@ -299,6 +332,19 @@ impl CameraConfig {
                 "camera.native_first_frame_timeout_ms = {} is out of range \
                  ({MIN_NATIVE_FIRST_FRAME_TIMEOUT_MS}..={MAX_NATIVE_FIRST_FRAME_TIMEOUT_MS})",
                 self.native_first_frame_timeout_ms
+            )));
+        }
+        if self.native_warmup_frames > MAX_NATIVE_WARMUP_FRAMES {
+            return Err(ConfigError::Invalid(format!(
+                "camera.native_warmup_frames = {} is out of range (0..={MAX_NATIVE_WARMUP_FRAMES})",
+                self.native_warmup_frames
+            )));
+        }
+        if self.native_failure_cooldown_secs > MAX_NATIVE_FAILURE_COOLDOWN_SECS {
+            return Err(ConfigError::Invalid(format!(
+                "camera.native_failure_cooldown_secs = {} is out of range \
+                 (0..={MAX_NATIVE_FAILURE_COOLDOWN_SECS})",
+                self.native_failure_cooldown_secs
             )));
         }
         self.fourcc()?;
@@ -1241,6 +1287,8 @@ impl Default for CameraConfig {
             prearm_window_ms: default_prearm_window_ms(),
             backend: CameraBackendChoice::default(),
             native_first_frame_timeout_ms: default_native_first_frame_timeout_ms(),
+            native_warmup_frames: default_native_warmup_frames(),
+            native_failure_cooldown_secs: default_native_failure_cooldown_secs(),
             device_path: None,
             allow_virtual_devices: false,
         }
@@ -1666,6 +1714,38 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn test_native_warmup_and_cooldown_default_and_validate() {
+        let old: Config = toml::from_str("[camera]\nwidth = 1024\n").unwrap();
+        assert_eq!(old.camera.native_warmup_frames, 3);
+        assert_eq!(old.camera.native_failure_cooldown_secs, 600);
+
+        let ok: Config = toml::from_str(
+            "[camera]\nnative_warmup_frames = 0\nnative_failure_cooldown_secs = 0\n",
+        )
+        .unwrap();
+        assert!(ok.camera.validate().is_ok());
+
+        let bad_warmup = CameraConfig {
+            native_warmup_frames: MAX_NATIVE_WARMUP_FRAMES + 1,
+            ..CameraConfig::default()
+        };
+        let err = bad_warmup.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("native_warmup_frames") && err.contains("0..=10"),
+            "{err}"
+        );
+        let bad_cooldown = CameraConfig {
+            native_failure_cooldown_secs: MAX_NATIVE_FAILURE_COOLDOWN_SECS + 1,
+            ..CameraConfig::default()
+        };
+        let err = bad_cooldown.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("native_failure_cooldown_secs") && err.contains("0..=86400"),
+            "{err}"
+        );
     }
 
     #[test]
