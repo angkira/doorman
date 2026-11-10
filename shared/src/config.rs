@@ -160,6 +160,9 @@ pub struct Config {
 
     #[serde(default)]
     pub pam: PamConfig,
+
+    #[serde(default)]
+    pub calibration: CalibrationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -781,6 +784,14 @@ pub struct LivenessConfig {
     #[serde(default)]
     pub shadow_pad_logging: bool,
 
+    /// Shadow records of lock-screen attempts (`WaitForMatch`, including every
+    /// pre-arm retry) are written only when this is `true`; records of
+    /// `doorman test` / PAM attempts are written whenever shadow logging is
+    /// active. Each record carries a `source` tag. Default `false`, so a
+    /// calibration session is not drowned by lock-screen traffic.
+    #[serde(default)]
+    pub shadow_pad_include_lockscreen: bool,
+
     /// Extra liveness signals (screen flash, head pose). None are implemented:
     /// any entry is rejected so a security setting is never silently ignored.
     #[serde(default)]
@@ -796,6 +807,7 @@ impl Default for LivenessConfig {
             depth_input_size: default_depth_input_size(),
             mean_mode_depth_samples: 0,
             shadow_pad_logging: false,
+            shadow_pad_include_lockscreen: false,
             signals: Vec::new(),
         }
     }
@@ -822,6 +834,99 @@ impl LivenessConfig {
             )));
         }
         Ok(())
+    }
+}
+
+/// Default calibration session length (`doorman calibrate`): 45 minutes.
+pub const DEFAULT_CALIBRATION_TTL_SECS: u64 = 45 * 60;
+/// Hard ceiling of `[calibration] max_ttl_secs`: 120 minutes. A config cannot raise it.
+pub const CALIBRATION_TTL_CEILING_SECS: u64 = 120 * 60;
+/// Shortest accepted calibration session.
+pub const CALIBRATION_MIN_TTL_SECS: u64 = 60;
+/// Default interval of the "CALIBRATION MODE ACTIVE" warning.
+pub const DEFAULT_CALIBRATION_WARN_INTERVAL_SECS: u64 = 5 * 60;
+
+/// `[calibration]`: limits of the root-only, time-limited calibration mode
+/// (`sudo doorman calibrate`). The mode itself is never configured on: it
+/// exists only after a root request and ends on its own, at the latest after
+/// `max_ttl_secs`, and with the daemon process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationConfig {
+    /// Session length when the request names none. Default 2700 (45 min).
+    #[serde(default = "default_calibration_ttl")]
+    pub default_ttl_secs: u64,
+
+    /// Longest session a request may ask for. Range 60..=7200 (120 min).
+    #[serde(default = "default_calibration_max_ttl")]
+    pub max_ttl_secs: u64,
+
+    /// Interval of the WARN log line while the mode is active. Range 10..=3600.
+    #[serde(default = "default_calibration_warn_interval")]
+    pub warn_interval_secs: u64,
+}
+
+fn default_calibration_ttl() -> u64 {
+    DEFAULT_CALIBRATION_TTL_SECS
+}
+
+fn default_calibration_max_ttl() -> u64 {
+    CALIBRATION_TTL_CEILING_SECS
+}
+
+fn default_calibration_warn_interval() -> u64 {
+    DEFAULT_CALIBRATION_WARN_INTERVAL_SECS
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self {
+            default_ttl_secs: default_calibration_ttl(),
+            max_ttl_secs: default_calibration_max_ttl(),
+            warn_interval_secs: default_calibration_warn_interval(),
+        }
+    }
+}
+
+impl CalibrationConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !(CALIBRATION_MIN_TTL_SECS..=CALIBRATION_TTL_CEILING_SECS).contains(&self.max_ttl_secs) {
+            return Err(ConfigError::Invalid(format!(
+                "calibration.max_ttl_secs = {} is out of range ({CALIBRATION_MIN_TTL_SECS}..={CALIBRATION_TTL_CEILING_SECS})",
+                self.max_ttl_secs
+            )));
+        }
+        if !(CALIBRATION_MIN_TTL_SECS..=self.max_ttl_secs).contains(&self.default_ttl_secs) {
+            return Err(ConfigError::Invalid(format!(
+                "calibration.default_ttl_secs = {} is out of range ({CALIBRATION_MIN_TTL_SECS}..=calibration.max_ttl_secs = {})",
+                self.default_ttl_secs, self.max_ttl_secs
+            )));
+        }
+        if !(10..=3600).contains(&self.warn_interval_secs) {
+            return Err(ConfigError::Invalid(format!(
+                "calibration.warn_interval_secs = {} is out of range (10..=3600)",
+                self.warn_interval_secs
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate a requested session length (`None` = the default). The error
+    /// text is shown to the operator.
+    pub fn resolve_ttl(&self, requested: Option<u64>) -> Result<u64, String> {
+        let ttl = requested.unwrap_or(self.default_ttl_secs);
+        if ttl < CALIBRATION_MIN_TTL_SECS {
+            return Err(format!(
+                "ttl {ttl}s is below the minimum of {CALIBRATION_MIN_TTL_SECS}s"
+            ));
+        }
+        if ttl > self.max_ttl_secs {
+            return Err(format!(
+                "ttl {ttl}s exceeds the maximum of {}s ({} min)",
+                self.max_ttl_secs,
+                self.max_ttl_secs / 60
+            ));
+        }
+        Ok(ttl)
     }
 }
 
@@ -1737,6 +1842,7 @@ impl Default for Config {
             decision: DecisionConfig::default(),
             liveness: LivenessConfig::default(),
             pam: PamConfig::default(),
+            calibration: CalibrationConfig::default(),
         }
     }
 }
@@ -1754,6 +1860,7 @@ impl Config {
         self.ipc.validate()?;
         self.decision.validate()?;
         self.liveness.validate()?;
+        self.calibration.validate()?;
         self.pam.sudo.validate(&self.authentication)?;
         let brightness = self.recognition.min_brightness;
         if !(0.0..=MAX_LUMA).contains(&brightness) {

@@ -50,6 +50,8 @@ pub struct DaemonState {
     /// Failure budget and cooldown of face auth, shared by every entry point
     /// (`[ipc] face_*`).
     pub face_budget: Arc<doormand::face_budget::FaceBudget>,
+    /// Root-only, time-limited calibration mode (in memory; a restart ends it).
+    pub calibration: Arc<doormand::calibration::Calibration>,
     /// On-demand camera capture leases. IPC operations that need live frames
     /// (enroll, `test`/PAM auth) increment this; the camera gate keeps the camera ON
     /// while it is > 0, so capture works even when the screen is unlocked and the
@@ -509,6 +511,7 @@ async fn main() -> Result<()> {
         Some(lock_supervisor::spawn().await)
     };
 
+    let calibration = Arc::new(doormand::calibration::Calibration::new());
     let state = DaemonState {
         latest_frame: latest_frame_rx,
         ml_pipeline,
@@ -528,11 +531,17 @@ async fn main() -> Result<()> {
             config.pam.sudo.max_failures,
             std::time::Duration::from_secs(config.pam.sudo.suspend_secs),
         )),
-        face_budget: Arc::new(doormand::face_budget::FaceBudget::new(
-            doormand::face_budget::FaceBudgetSettings::from_config(&config.ipc),
-        )),
+        face_budget: Arc::new(
+            doormand::face_budget::FaceBudget::new(
+                doormand::face_budget::FaceBudgetSettings::from_config(&config.ipc),
+            )
+            .with_calibration(calibration.clone()),
+        ),
+        calibration: calibration.clone(),
         capture_requests: capture_requests.clone(),
     };
+
+    spawn_calibration_watch(calibration, config.calibration.warn_interval_secs);
 
     // Setup signal handlers for graceful shutdown
     let mut signals = signal_hook_tokio::Signals::new([
@@ -842,6 +851,38 @@ fn spawn_raw_frame_retention(config: &Config) {
                 Ok(Ok(n)) => info!("raw frame retention: removed {n} capture day(s)"),
                 Ok(Err(e)) => warn!("raw frame retention pass failed (non-fatal): {e}"),
                 Err(e) => warn!("raw frame retention task failed: {e}"),
+            }
+        }
+    });
+}
+
+/// Seconds between looks at the calibration state. Expiry itself is exact
+/// (derived from time); this only decides when the log lines appear.
+const CALIBRATION_TICK_SECS: u64 = 5;
+
+/// Logs the periodic "CALIBRATION MODE ACTIVE" warning and the expiry. A
+/// stalled task cannot extend the mode: `Calibration::is_active` is a pure
+/// function of time.
+fn spawn_calibration_watch(calibration: Arc<doormand::calibration::Calibration>, warn_secs: u64) {
+    use doormand::calibration::{Tick, AUDIT_TARGET};
+    let warn_interval = std::time::Duration::from_secs(warn_secs);
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(CALIBRATION_TICK_SECS));
+        loop {
+            interval.tick().await;
+            match calibration.tick(std::time::Instant::now(), warn_interval) {
+                Tick::Idle => {}
+                Tick::Warn { remaining_secs } => warn!(
+                    target: AUDIT_TARGET,
+                    remaining_secs,
+                    "CALIBRATION MODE ACTIVE: failure budget suspended"
+                ),
+                Tick::Expired { counted_failures } => info!(
+                    target: AUDIT_TARGET,
+                    judged_failures_counted = counted_failures,
+                    "CALIBRATION MODE EXPIRED: failure budget active again, shadow PAD logging back to its config value"
+                ),
             }
         }
     });

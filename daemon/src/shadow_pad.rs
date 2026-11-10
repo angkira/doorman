@@ -41,10 +41,32 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// Record format version; bump on an incompatible change.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 /// Upper bound for the shadow MiniFASNet pass; past it the record says `timeout`.
 const MINIFASNET_TIMEOUT: Duration = Duration::from_secs(2);
 const P10: f32 = 0.10;
+
+/// Where an attempt came from; written to every record as `source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptSource {
+    /// A direct `Authenticate` that is not the sudo profile: `doorman test`,
+    /// PAM login/unlock.
+    Test,
+    /// The strict sudo profile.
+    Sudo,
+    /// `WaitForMatch` (lock-screen unlock watcher, including pre-arm retries).
+    LockScreen,
+}
+
+impl AttemptSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Sudo => "sudo",
+            Self::LockScreen => "lock_screen",
+        }
+    }
+}
 
 /// Why a frame did or did not reach the decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +195,10 @@ pub struct QualityBlock {
 #[derive(Debug, Serialize)]
 pub struct ShadowRecord {
     pub schema_version: u32,
+    /// `test`, `sudo` or `lock_screen`.
+    pub source: &'static str,
+    /// Calibration mode was active when the attempt started.
+    pub calibration: bool,
     pub attempt_id: String,
     pub timestamp_unix_ms: u64,
     /// `recognized`, `not_recognized`, `suspended` or `error` (as `doorman --json test`).
@@ -191,6 +217,8 @@ pub struct ShadowRecord {
 }
 
 struct Inner {
+    source: AttemptSource,
+    calibration: bool,
     started: Instant,
     pipeline: Arc<MLPipeline>,
     log_path: PathBuf,
@@ -239,12 +267,25 @@ fn inject(at: Fault) {
 }
 
 impl ShadowPad {
-    pub fn new(config: &Config, pipeline: &Arc<MLPipeline>) -> Self {
-        if !config.liveness.shadow_pad_logging {
+    /// `calibrating`: calibration mode is active, which forces the collector on
+    /// exactly like `[liveness] shadow_pad_logging`. Lock-screen attempts are
+    /// collected only with `shadow_pad_include_lockscreen`, either way.
+    pub fn new(
+        config: &Config,
+        pipeline: &Arc<MLPipeline>,
+        source: AttemptSource,
+        calibrating: bool,
+    ) -> Self {
+        if !(config.liveness.shadow_pad_logging || calibrating) {
+            return Self::disabled();
+        }
+        if source == AttemptSource::LockScreen && !config.liveness.shadow_pad_include_lockscreen {
             return Self::disabled();
         }
         Self {
             inner: Some(Inner {
+                source,
+                calibration: calibrating,
                 started: Instant::now(),
                 pipeline: pipeline.clone(),
                 log_path: PathBuf::from(&config.telemetry.shadow_pad_log_path),
@@ -378,6 +419,8 @@ fn build(inner: Inner, decision: &AuthDecision) -> (ShadowRecord, EmitJob) {
     let final_score = decision.similarity;
     let record = ShadowRecord {
         schema_version: SCHEMA_VERSION,
+        source: inner.source.as_str(),
+        calibration: inner.calibration,
         attempt_id: inner.attempt_id,
         timestamp_unix_ms: now.timestamp_millis().max(0) as u64,
         decision: report.decision.to_string(),

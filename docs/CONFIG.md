@@ -47,6 +47,14 @@ or directory is group/world-writable.
 | `similarity_threshold` | `0.4` |
 | `timeout_secs` | `3` |
 
+## `[calibration]`
+
+| Key | Default |
+|---|---|
+| `default_ttl_secs` | `2700` |
+| `max_ttl_secs` | `7200` |
+| `warn_interval_secs` | `300` |
+
 ## `[camera]`
 
 | Key | Default |
@@ -144,6 +152,7 @@ or directory is group/world-writable.
 | `frames` | `1` |
 | `mean_mode_depth_samples` | `0` |
 | `relief_stat` | `"minmax"` |
+| `shadow_pad_include_lockscreen` | `false` |
 | `shadow_pad_logging` | `false` |
 | `signals` | `[]` |
 

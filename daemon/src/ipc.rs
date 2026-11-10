@@ -116,6 +116,9 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
             username,
             timeout_ms,
         } => handle_wait_for_match(state, &username, timeout_ms).await,
+        Request::Calibrate { ttl_secs } => handle_calibrate(state, &peer, ttl_secs),
+        Request::CalibrateStatus => calibration_response(state),
+        Request::CalibrateEnd => handle_calibrate_end(state, &peer),
         Request::Shutdown => {
             info!("Shutdown requested");
             Response::Success {
@@ -431,7 +434,18 @@ async fn decide(
 ) -> AuthDecision {
     // Shadow PAD logging (default off): observes the attempt, never steers it.
     // Its record is built and written after the decision exists.
-    let mut shadow = crate::shadow_pad::ShadowPad::new(&state.config, &state.ml_pipeline);
+    // Calibration mode forces it on (same collector); lock-screen attempts are
+    // logged only with `shadow_pad_include_lockscreen`.
+    let source = if wait.is_some() {
+        crate::shadow_pad::AttemptSource::LockScreen
+    } else if strict.is_some() {
+        crate::shadow_pad::AttemptSource::Sudo
+    } else {
+        crate::shadow_pad::AttemptSource::Test
+    };
+    let calibrating = state.calibration.is_active(std::time::Instant::now());
+    let mut shadow =
+        crate::shadow_pad::ShadowPad::new(&state.config, &state.ml_pipeline, source, calibrating);
     let decision = decide_core(state, username, strict, wait, &mut shadow).await;
     let _ = shadow.finish(&decision);
     decision
@@ -1892,6 +1906,66 @@ fn ort_runtime_info() -> Option<String> {
     None
 }
 
+fn calibration_response(state: &DaemonState) -> Response {
+    Response::Success {
+        message: None,
+        data: Some(ResponseData::Calibration {
+            info: state.calibration.status(std::time::Instant::now()),
+        }),
+    }
+}
+
+/// `Calibrate`: only reached for uid 0 (`ipc_policy::authorize`). The ttl is
+/// validated against `[calibration]` limits; an invalid request changes nothing.
+fn handle_calibrate(state: &DaemonState, peer: &PeerCred, ttl_secs: Option<u64>) -> Response {
+    let cfg = &state.config.calibration;
+    let ttl = match cfg.resolve_ttl(ttl_secs) {
+        Ok(ttl) => ttl,
+        Err(reason) => {
+            warn!(
+                target: doormand::calibration::AUDIT_TARGET,
+                peer_uid = peer.uid,
+                "calibration request refused: {reason}"
+            );
+            return Response::Failure { reason };
+        }
+    };
+    let now = std::time::Instant::now();
+    let rearmed = state.calibration.is_active(now);
+    state.calibration.start(
+        now,
+        std::time::Duration::from_secs(ttl),
+        std::time::Duration::from_secs(cfg.warn_interval_secs),
+    );
+    warn!(
+        target: doormand::calibration::AUDIT_TARGET,
+        peer_uid = peer.uid,
+        peer_pid = ?peer.pid,
+        ttl_secs = ttl,
+        rearmed,
+        "CALIBRATION MODE ACTIVE: failure budget suspended, shadow PAD logging on; \
+         ends by itself in {ttl} s (or on a daemon restart)"
+    );
+    calibration_response(state)
+}
+
+fn handle_calibrate_end(state: &DaemonState, peer: &PeerCred) -> Response {
+    match state.calibration.end(std::time::Instant::now()) {
+        Some(counted) => info!(
+            target: doormand::calibration::AUDIT_TARGET,
+            peer_uid = peer.uid,
+            judged_failures_counted = counted,
+            "CALIBRATION MODE ENDED: failure budget active again, shadow PAD logging back to its config value"
+        ),
+        None => info!(
+            target: doormand::calibration::AUDIT_TARGET,
+            peer_uid = peer.uid,
+            "calibration end requested, but calibration mode was not active"
+        ),
+    }
+    calibration_response(state)
+}
+
 async fn handle_status(state: &DaemonState) -> Response {
     let storage = state.storage.read().await;
     let camera_available = state.latest_frame.borrow().is_some();
@@ -1903,6 +1977,7 @@ async fn handle_status(state: &DaemonState) -> Response {
         models_loaded: state.ml_pipeline.models_loaded(),
         enrolled_users: storage.count(),
         ort_runtime: ort_runtime_info(),
+        calibration_remaining_secs: state.calibration.remaining_secs(std::time::Instant::now()),
     };
 
     Response::Success {

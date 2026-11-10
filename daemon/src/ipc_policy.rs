@@ -46,6 +46,9 @@ pub const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DENIED_AUTHENTICATE: &str = "not permitted to authenticate as this user";
 /// Reason for refusing an administrative request.
 pub const DENIED_ADMIN: &str = "administrative operation requires root";
+/// Reason for refusing to start or end calibration mode. Calibration relaxes
+/// the failure budget, so it needs uid 0 itself; `[ipc] admin_uids` do not count.
+pub const DENIED_CALIBRATE: &str = "calibration mode requires root (uid 0): run it with sudo";
 
 /// Kernel-reported credentials of the connecting process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +93,18 @@ pub fn authorize(
             }
         }
         // Read-only, no biometric data and no user names.
-        Request::Status => Decision::Allow,
+        Request::Status | Request::CalibrateStatus => Decision::Allow,
+        // Relaxes the failure budget: root only, deliberately NOT `is_admin`
+        // (a configured admin uid must not be able to switch the budget off).
+        Request::Calibrate { .. } | Request::CalibrateEnd => {
+            if peer.uid == 0 {
+                Decision::Allow
+            } else {
+                Decision::Denied {
+                    reason: DENIED_CALIBRATE,
+                }
+            }
+        }
         // Administrative: enrollment data, user enumeration, frames, shutdown.
         Request::Enroll { .. }
         | Request::RemoveUser { .. }
@@ -329,6 +343,9 @@ pub fn request_name(req: &Request) -> &'static str {
         Request::ListUsers => "list_users",
         Request::RemoveUser { .. } => "remove_user",
         Request::Status => "status",
+        Request::Calibrate { .. } => "calibrate",
+        Request::CalibrateStatus => "calibrate_status",
+        Request::CalibrateEnd => "calibrate_end",
         Request::Shutdown => "shutdown",
         Request::DetectAndRecognize => "detect_and_recognize",
         Request::GetLatestDetection => "get_latest_detection",
@@ -726,6 +743,60 @@ mod tests {
         for (name, p, req, cfg, want) in cases {
             assert_eq!(authorize(&p, &req, cfg, resolve), want, "case: {name}");
         }
+    }
+
+    #[test]
+    fn calibration_start_and_end_are_root_only_status_is_open() {
+        let admin = IpcConfig {
+            admin_uids: vec![3000],
+            trusted_uids: vec![2000],
+            ..IpcConfig::default()
+        };
+        let start = Request::Calibrate { ttl_secs: Some(60) };
+        let denied = Decision::Denied {
+            reason: DENIED_CALIBRATE,
+        };
+        for uid in [ALICE, BOB, 2000, 3000, 65534] {
+            for req in [&start, &Request::CalibrateEnd] {
+                assert_eq!(
+                    authorize(&peer(uid), req, &admin, resolve),
+                    denied,
+                    "uid {uid} must be refused {req:?} (admin_uids and trusted_uids do not count)"
+                );
+            }
+            assert_eq!(
+                authorize(&peer(uid), &Request::CalibrateStatus, &admin, resolve),
+                Decision::Allow
+            );
+        }
+        for req in [&start, &Request::CalibrateEnd, &Request::CalibrateStatus] {
+            assert_eq!(
+                authorize(&peer(0), req, &admin, resolve),
+                Decision::Allow,
+                "root: {req:?}"
+            );
+        }
+        assert!(DENIED_CALIBRATE.contains("root"), "the reason says why");
+    }
+
+    #[test]
+    fn a_non_root_peer_gets_a_clear_denied_response_through_the_gate() {
+        let gate = Gatekeeper::with_parts(
+            IpcConfig {
+                admin_uids: vec![3000],
+                ..IpcConfig::default()
+            },
+            Box::new(resolve),
+            Box::new(Instant::now),
+        );
+        let env = RequestEnvelope::new(Request::Calibrate { ttl_secs: None });
+        for uid in [ALICE, 3000] {
+            match gate.check(&peer(uid), &env) {
+                Err(Response::Denied { reason }) => assert_eq!(reason, DENIED_CALIBRATE),
+                other => panic!("uid {uid}: expected Denied, got {other:?}"),
+            }
+        }
+        assert!(gate.check(&peer(0), &env).is_ok());
     }
 
     #[test]

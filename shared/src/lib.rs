@@ -52,6 +52,16 @@ pub enum Request {
     /// `Authenticate`), the (capped) timeout expires, or the session is not
     /// armed. Answered with exactly one terminal `Matched` or `NoMatch`.
     WaitForMatch { username: String, timeout_ms: u64 },
+    /// Start (or re-arm) calibration mode: root only (peer uid 0), time-limited,
+    /// not persisted. `ttl_secs` absent = `[calibration] default_ttl_secs`.
+    Calibrate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_secs: Option<u64>,
+    },
+    /// Calibration mode state; read-only, open to every local user.
+    CalibrateStatus,
+    /// End calibration mode now: root only.
+    CalibrateEnd,
 }
 
 /// Wire envelope for a request: the `Request` fields stay at the top level of
@@ -142,6 +152,20 @@ pub enum ResponseData {
     UserList { users: Vec<UserInfo> },
     DaemonStatus { info: DaemonInfo },
     DetectionResult { result: DetectionInfo },
+    Calibration { info: CalibrationInfo },
+}
+
+/// State of calibration mode (see `docs/PAD-PROTOCOL.md`). Carries no identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalibrationInfo {
+    pub active: bool,
+    /// Seconds until the mode expires on its own; 0 when inactive.
+    pub remaining_secs: u64,
+    /// Length of the current session; 0 when inactive.
+    pub ttl_secs: u64,
+    /// Judged failures that did NOT count toward the failure budget in this
+    /// session (the separate calibration counter).
+    pub judged_failures_counted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +203,10 @@ pub struct DaemonInfo {
     /// from builds without an ORT backend. Additive (protocol_version stays 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ort_runtime: Option<String>,
+    /// Seconds left of calibration mode; absent when it is not active (and
+    /// from old daemons). Additive (protocol_version stays 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration_remaining_secs: Option<u64>,
 }
 
 /// Configuration paths

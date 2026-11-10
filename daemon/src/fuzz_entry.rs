@@ -43,7 +43,10 @@ fn fuzz_resolver(name: &str) -> Option<u32> {
 fn is_admin_request(req: &Request) -> bool {
     !matches!(
         req,
-        Request::Authenticate { .. } | Request::WaitForMatch { .. } | Request::Status
+        Request::Authenticate { .. }
+            | Request::WaitForMatch { .. }
+            | Request::Status
+            | Request::CalibrateStatus
     )
 }
 

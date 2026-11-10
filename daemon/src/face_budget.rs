@@ -9,10 +9,11 @@
 //! Pure policy with an injected clock (`now`), no camera or model code. In
 //! memory: a daemon restart clears it (a restart needs root).
 
+use crate::calibration::Calibration;
 use crate::decision::AuthOutcome;
 use doorman_shared::IpcConfig;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Stable code of the suspension, in the wire reason, logs and `doorman test --json`.
@@ -72,6 +73,10 @@ struct UserBudget {
 pub struct FaceBudget {
     settings: FaceBudgetSettings,
     users: Mutex<HashMap<String, UserBudget>>,
+    /// While calibration mode is active the budget is frozen: nothing is
+    /// enforced, counted or reset (judged failures go to the calibration
+    /// counter instead). `None` = never frozen.
+    calibration: Option<Arc<Calibration>>,
 }
 
 impl FaceBudget {
@@ -79,7 +84,18 @@ impl FaceBudget {
         Self {
             settings,
             users: Mutex::new(HashMap::new()),
+            calibration: None,
         }
+    }
+
+    /// Freeze this budget while `calibration` is active.
+    pub fn with_calibration(mut self, calibration: Arc<Calibration>) -> Self {
+        self.calibration = Some(calibration);
+        self
+    }
+
+    fn frozen(&self, now: Instant) -> bool {
+        self.calibration.as_ref().is_some_and(|c| c.is_active(now))
     }
 
     fn enabled(&self) -> bool {
@@ -88,7 +104,7 @@ impl FaceBudget {
 
     /// `Err(remaining)` while face auth for `user` is suspended.
     pub fn check(&self, user: &str, now: Instant) -> Result<(), Duration> {
-        if !self.enabled() {
+        if !self.enabled() || self.frozen(now) {
             return Ok(());
         }
         let mut users = self.users.lock().unwrap_or_else(|e| e.into_inner());
@@ -148,6 +164,15 @@ impl FaceBudget {
     /// Account for a finished decision: a match resets, a judged failure
     /// counts, anything else is ignored. Returns the cooldown if one started.
     pub fn record(&self, user: &str, outcome: &AuthOutcome, now: Instant) -> Option<Duration> {
+        if self.frozen(now) {
+            // Calibration mode: the budget state is left exactly as it was.
+            if is_judged_failure(outcome) {
+                if let Some(c) = &self.calibration {
+                    c.count_judged_failure(now);
+                }
+            }
+            return None;
+        }
         if *outcome == AuthOutcome::Matched {
             self.record_success(user);
             None
@@ -302,5 +327,98 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(fail_n(&b, 50, t0), None);
         assert!(b.check("u", t0).is_ok());
+    }
+
+    // --- calibration mode: the budget is frozen, then exactly as before ---
+
+    type Snapshot = Vec<(String, usize, usize, Option<Instant>, Option<Instant>)>;
+
+    fn snapshot(b: &FaceBudget) -> Snapshot {
+        let users = b.users.lock().unwrap();
+        let mut rows: Snapshot = users
+            .iter()
+            .map(|(k, u)| {
+                (
+                    k.clone(),
+                    u.failures.len(),
+                    u.level,
+                    u.suspended_until,
+                    u.last_failure,
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    fn calibrated(t0: Instant, ttl: Duration) -> (FaceBudget, Arc<Calibration>) {
+        let cal = Arc::new(Calibration::new());
+        cal.start(t0, ttl, Duration::from_secs(300));
+        let b = FaceBudget::new(FaceBudgetSettings::from_config(&IpcConfig::default()))
+            .with_calibration(cal.clone());
+        (b, cal)
+    }
+
+    #[test]
+    fn calibration_freezes_the_budget_and_counts_separately() {
+        let t0 = Instant::now();
+        let (b, cal) = calibrated(t0, Duration::from_secs(600));
+        // Calibration started before these failures: they are all frozen.
+        let before = snapshot(&b);
+        for i in 0..40 {
+            let now = t0 + Duration::from_secs(i);
+            assert!(b.check("u", now).is_ok());
+            assert_eq!(b.record("u", &AuthOutcome::NotMatched, now), None);
+            assert_eq!(b.record("u", &AuthOutcome::NoClearFace, now), None);
+        }
+        // A match during calibration does not reset anything either.
+        assert_eq!(b.record("u", &AuthOutcome::Matched, t0), None);
+        assert_eq!(snapshot(&b), before);
+        assert_eq!(cal.status(t0).judged_failures_counted, 40);
+    }
+
+    #[test]
+    fn calibration_does_not_enforce_an_earlier_suspension_and_it_returns_after() {
+        let t0 = Instant::now();
+        let cal = Arc::new(Calibration::new());
+        let b = FaceBudget::new(FaceBudgetSettings::from_config(&IpcConfig::default()))
+            .with_calibration(cal.clone());
+        assert_eq!(fail_n(&b, 5, t0), Some(30 * SEC)); // suspended until t0+30
+        let t1 = t0 + 2 * SEC;
+        cal.start(t1, 10 * SEC, Duration::from_secs(300));
+        let frozen = snapshot(&b);
+        assert!(
+            b.check("u", t1 + SEC).is_ok(),
+            "not enforced while calibrating"
+        );
+        assert_eq!(snapshot(&b), frozen, "check() did not touch the state");
+        // Calibration expired at t0+12 s, suspension (until t0+30 s) is back.
+        assert_eq!(b.check("u", t0 + 13 * SEC).unwrap_err(), 17 * SEC);
+    }
+
+    #[test]
+    fn after_calibration_expires_every_control_behaves_like_an_untouched_twin() {
+        let t0 = Instant::now();
+        let (b, cal) = calibrated(t0, Duration::from_secs(120));
+        let twin = FaceBudget::new(FaceBudgetSettings::from_config(&IpcConfig::default()));
+        // Same pre-history in both would be pre-calibration; here both start clean.
+        for i in 0..30 {
+            b.record(
+                "u",
+                &AuthOutcome::LivenessRejected,
+                t0 + Duration::from_secs(i),
+            );
+        }
+        assert!(cal.is_active(t0 + 119 * SEC));
+        assert!(!cal.is_active(t0 + 120 * SEC));
+        let after = t0 + 121 * SEC;
+        // Identical behaviour from the first failure after expiry.
+        for n in 1..=5u32 {
+            let a = b.record("u", &AuthOutcome::NotMatched, after);
+            let c = twin.record("u", &AuthOutcome::NotMatched, after);
+            assert_eq!(a, c, "failure {n} after expiry");
+            assert_eq!(a.is_some(), n == 5);
+        }
+        assert!(b.check("u", after).is_err(), "suspension enforced again");
     }
 }

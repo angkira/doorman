@@ -120,3 +120,17 @@ retention_days = 14
 # shadow_pad_logging = false
 # [telemetry]
 # shadow_pad_log_path = "/run/doorman/shadow-pad.jsonl"   # mode 0640, rotated at timing_log_max_bytes
+
+# Calibration mode (Round 9b-2a). It is NEVER switched on from this file: a root
+# user starts it at run time with `sudo doorman calibrate`; it lasts at most
+# max_ttl_secs, is not persisted and ends with a daemon restart. While it is on,
+# the failure budget is frozen and shadow PAD logging is forced on; nothing else
+# changes. These keys only set its limits.
+# [calibration]
+# default_ttl_secs = 2700    # 45 min
+# max_ttl_secs = 7200        # 120 min (hard ceiling, cannot be raised)
+# warn_interval_secs = 300   # "CALIBRATION MODE ACTIVE" WARN log interval
+# Lock-screen attempts (WaitForMatch, pre-arm retries) are left out of the shadow
+# log unless this is true; every record has a `source` (test, sudo, lock_screen).
+# [liveness]
+# shadow_pad_include_lockscreen = false

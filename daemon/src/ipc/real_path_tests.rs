@@ -298,6 +298,7 @@ async fn build_state_mini(
         .await
         .expect("store template");
 
+    let calibration = Arc::new(doormand::calibration::Calibration::new());
     let state = DaemonState {
         latest_frame: camera_rx,
         ml_pipeline: Arc::new(MLPipeline::with_backend(backend, &config)),
@@ -314,9 +315,13 @@ async fn build_state_mini(
             config.pam.sudo.max_failures,
             std::time::Duration::from_secs(config.pam.sudo.suspend_secs),
         )),
-        face_budget: Arc::new(doormand::face_budget::FaceBudget::new(
-            doormand::face_budget::FaceBudgetSettings::from_config(&config.ipc),
-        )),
+        face_budget: Arc::new(
+            doormand::face_budget::FaceBudget::new(
+                doormand::face_budget::FaceBudgetSettings::from_config(&config.ipc),
+            )
+            .with_calibration(calibration.clone()),
+        ),
+        calibration: calibration.clone(),
         capture_requests: Arc::new(AtomicUsize::new(0)),
     };
 
@@ -817,7 +822,9 @@ async fn shadow_logging_leaves_every_decision_unchanged() {
             assert_eq!(on, off, "{name} samples={samples} n_of_m={n_of_m}");
             assert_eq!(on_lines.len(), 1, "{name}: exactly one record per attempt");
             let rec = &on_lines[0];
-            assert_eq!(rec["schema_version"], 1);
+            assert_eq!(rec["schema_version"], 2);
+            assert_eq!(rec["source"], "test");
+            assert_eq!(rec["calibration"], false);
             assert_eq!(rec["frames_used"], on.0.frames_used as u64);
             assert_eq!(rec["frames"]["seen"], on.0.frames_seen as u64);
         }
@@ -993,4 +1000,180 @@ async fn the_shadow_log_is_not_world_readable() {
     }
     let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode & 0o007, 0, "no access for others: {mode:o}");
+}
+
+// ---------------------------------------------------------------------------
+// Round 9b-2a: calibration mode (root-only, time-limited, decision-neutral)
+// ---------------------------------------------------------------------------
+
+use crate::shadow_pad::{AttemptSource, ShadowPad};
+use doormand::calibration::Calibration;
+
+const CALIBRATION_TEST_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn start_calibration(cal: &Calibration) {
+    cal.start(
+        std::time::Instant::now(),
+        CALIBRATION_TEST_TTL,
+        std::time::Duration::from_secs(300),
+    );
+}
+
+/// One attempt with shadow logging OFF in the config; calibration mode on or off.
+async fn calibration_attempt(
+    script: &[Scene],
+    samples: u32,
+    n_of_m: bool,
+    calibrating: bool,
+) -> (Observed, Vec<serde_json::Value>) {
+    let log_dir = tempfile::tempdir().expect("log dir");
+    let log = log_dir.path().join("shadow.jsonl");
+    let log_str = log.to_string_lossy().into_owned();
+    let (state, depth_calls, _camera, _dir) = build_state_mini(
+        script,
+        script.len(),
+        samples,
+        |c| {
+            c.decision.frame_identity_floor = 0.0;
+            if n_of_m {
+                c.decision.mode = DecisionMode::NOfM;
+                c.decision.accept_n = 3;
+                c.decision.window_m = 5;
+            }
+            assert!(!c.liveness.shadow_pad_logging, "the config flag stays off");
+            c.telemetry.shadow_pad_log_path = log_str.clone();
+        },
+        MiniMode::Loaded,
+    )
+    .await;
+    if calibrating {
+        start_calibration(&state.calibration);
+    }
+    let decision = run_authenticate(&state, USER, None, None).await;
+    for _ in 0..100 {
+        if !calibrating
+            || std::fs::metadata(&log)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let lines = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+        .collect();
+    ((decision, depth_calls.load(Ordering::SeqCst)), lines)
+}
+
+/// The same synthetic sequences as the shadow-logging neutrality test: the
+/// whole `AuthDecision` and the depth inference count are identical with
+/// calibration mode on and off, and calibration (not the config flag) is what
+/// produced the one record.
+#[tokio::test]
+async fn calibration_mode_leaves_every_decision_unchanged() {
+    for (name, script) in sequences() {
+        for (samples, n_of_m) in [(0, false), (3, false), (0, true)] {
+            let (off, off_lines) = calibration_attempt(&script, samples, n_of_m, false).await;
+            assert!(off_lines.is_empty(), "{name}: no calibration, no record");
+            let (on, on_lines) = calibration_attempt(&script, samples, n_of_m, true).await;
+            assert_eq!(on, off, "{name} samples={samples} n_of_m={n_of_m}");
+            assert_eq!(on_lines.len(), 1, "{name}: calibration logs the attempt");
+            assert_eq!(on_lines[0]["calibration"], true);
+            assert_eq!(on_lines[0]["source"], "test");
+        }
+    }
+}
+
+/// The failure budget: with calibration on, any number of judged failures
+/// never suspends; once it ends, the budget is exactly as untouched.
+#[tokio::test]
+async fn calibration_suspends_the_budget_and_ending_it_restores_enforcement() {
+    let cal = Arc::new(Calibration::new());
+    let budget = Arc::new(
+        FaceBudget::new(FaceBudgetSettings::from_config(
+            &doorman_shared::IpcConfig::default(),
+        ))
+        .with_calibration(cal.clone()),
+    );
+    let attempt = |script: &'static [Scene]| {
+        let budget = budget.clone();
+        let cal = cal.clone();
+        async move {
+            let (mut state, ..) = build_state(script, script.len(), 0).await;
+            state.face_budget = budget;
+            state.calibration = cal;
+            run_authenticate(&state, USER, None, None).await
+        }
+    };
+    start_calibration(&cal);
+    for n in 1..=8 {
+        let d = attempt(&[LiveImpostor; 5]).await;
+        assert!(
+            doormand::face_budget::is_judged_failure(&d.outcome),
+            "calibration attempt {n} still runs and is judged: {:?}",
+            d.outcome
+        );
+    }
+    let d = attempt(&[LiveOwner; 5]).await;
+    assert_eq!(d.outcome, AuthOutcome::Matched, "genuine still matches");
+    assert_eq!(
+        cal.status(std::time::Instant::now())
+            .judged_failures_counted,
+        8
+    );
+
+    assert_eq!(cal.end(std::time::Instant::now()), Some(8));
+    // Back to normal: five judged failures suspend, exactly as without calibration.
+    for n in 1..=5 {
+        let d = attempt(&[LiveImpostor; 5]).await;
+        assert!(
+            doormand::face_budget::is_judged_failure(&d.outcome),
+            "attempt {n}: {:?}",
+            d.outcome
+        );
+    }
+    let d = attempt(&[LiveOwner; 5]).await;
+    assert!(
+        matches!(d.outcome, AuthOutcome::Suspended { .. }),
+        "enforcement is back: {:?}",
+        d.outcome
+    );
+}
+
+#[tokio::test]
+async fn lock_screen_attempts_are_logged_only_when_asked_for() {
+    let (state, ..) = build_state_mini(
+        &[LiveOwner; 5],
+        5,
+        0,
+        |c| c.liveness.shadow_pad_logging = true,
+        MiniMode::Loaded,
+    )
+    .await;
+    let new = |cfg: &Config, source, calibrating| {
+        ShadowPad::new(cfg, &state.ml_pipeline, source, calibrating).is_enabled()
+    };
+    let mut cfg = (*state.config).clone();
+    assert!(new(&cfg, AttemptSource::Test, false));
+    assert!(new(&cfg, AttemptSource::Sudo, false));
+    assert!(
+        !new(&cfg, AttemptSource::LockScreen, false),
+        "lock screen is off by default"
+    );
+    assert!(
+        !new(&cfg, AttemptSource::LockScreen, true),
+        "calibration does not switch lock-screen logging on"
+    );
+    cfg.liveness.shadow_pad_include_lockscreen = true;
+    assert!(new(&cfg, AttemptSource::LockScreen, false));
+    assert!(new(&cfg, AttemptSource::LockScreen, true));
+    // Neither flag nor calibration: nothing, whatever the source.
+    cfg.liveness.shadow_pad_logging = false;
+    assert!(!new(&cfg, AttemptSource::Test, false));
+    assert!(!new(&cfg, AttemptSource::LockScreen, false));
+    // Calibration alone forces it on, with the same collector.
+    assert!(new(&cfg, AttemptSource::Test, true));
 }

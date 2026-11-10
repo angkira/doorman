@@ -1,4 +1,5 @@
 // Public modules for integration tests and examples
+pub mod calibration;
 pub mod camera;
 pub mod dataset;
 pub mod dataset_purge;
@@ -10,6 +11,7 @@ pub mod ipc_policy;
 pub mod liveness;
 pub mod ml;
 pub mod model_integrity;
+pub mod pad_stats;
 pub mod storage;
 pub mod sudo_policy;
 pub mod test_report;
