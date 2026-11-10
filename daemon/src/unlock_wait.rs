@@ -632,6 +632,61 @@ mod tests {
         );
     }
 
+    /// Boundary: the hint arrives at the very instant the hold expires. The
+    /// hold branch is polled first, so the held result is DISCARDED (the
+    /// conservative side) and a fresh attempt runs after the hint.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_result_is_discarded_when_the_hint_arrives_exactly_at_hold_expiry() {
+        let rig = rig(1_000, MATCH);
+        let (r, took) = run_gate(&rig, Some(HOLD), Some(HOLD), LONG).await;
+        assert!(matches!(r, Response::Matched { .. }), "{r:?}");
+        assert_eq!(took, HOLD + Duration::from_secs(1), "fresh attempt");
+        assert_eq!(rig.calls.load(Ordering::SeqCst), 2, "held result not used");
+    }
+
+    /// One tick before the boundary the held result IS delivered at the hint.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_result_is_delivered_when_the_hint_arrives_just_before_hold_expiry() {
+        let rig = rig(1_000, MATCH);
+        let just_before = HOLD - Duration::from_millis(1);
+        let (r, took) = run_gate(&rig, Some(just_before), Some(HOLD), LONG).await;
+        assert!(matches!(r, Response::Matched { .. }), "{r:?}");
+        assert_eq!(took, just_before);
+        assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The gate flaps armed -> unarmed -> armed while the first attempt is in
+    /// flight. The attempt that straddles the close is dropped (never
+    /// delivered at the first arming or at the re-arming); a fresh attempt
+    /// started after the re-arm decides.
+    #[tokio::test(start_paused = true)]
+    async fn a_gate_flap_through_prearm_never_delivers_the_straddling_attempt() {
+        let rig = rig(3_000, MATCH);
+        let (tx, rx) = watch::channel(false);
+        let t0 = Instant::now();
+        let flap = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            tx.send(true).unwrap(); // armed
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            tx.send(false).unwrap(); // unarmed at 2 s, attempt #1 would finish at 3 s
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            tx.send(true).unwrap(); // re-armed at 2.5 s
+        };
+        let timing = WaitTiming::new();
+        let (r, ()) = tokio::join!(
+            wait_for_match(&rig.source, Some(rx), "alice", LONG, Some(HOLD), &timing),
+            flap
+        );
+        assert!(matches!(r, Response::Matched { .. }), "{r:?}");
+        assert_eq!(
+            t0.elapsed(),
+            Duration::from_millis(2_500 + 3_000),
+            "decided by the attempt started after the re-arm"
+        );
+        assert_eq!(rig.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(rig.live.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn hold_is_capped_by_the_call_timeout() {
         let rig = rig(10, MATCH);

@@ -32,7 +32,9 @@
 #   DOORMAN_WATCH_EARLY     1 (default): start the watcher as soon as the locker
 #                           process exists, in parallel with the settle wait, so
 #                           the daemon starts the camera ~0.3 s earlier. 0: old
-#                           order (settle first, then watcher).
+#                           order (settle first, then watcher). Applies to
+#                           DOORMAN_UNLOCK_MODE=event only; poll mode always
+#                           starts its watcher after the settle wait.
 #   GTKLOCK, SWAYLOCK       locker executables
 # Extra arguments are passed to the locker.
 set -euo pipefail
@@ -223,7 +225,10 @@ locker_pid=$!
 # as soon as it is asked, so do not make it wait for the settle check. A locker
 # that dies meanwhile makes the early watcher exit by itself (locker gone); it is
 # reaped below before the already-locked handling runs.
-if [ "$watch_early" = 1 ] && kill -0 "$locker_pid" 2>/dev/null; then
+# Event mode only: the poll watcher has no lock gate (it would run `doorman test`
+# and kill the locker before the compositor has locked), so it keeps the old
+# order and starts after the settle check.
+if [ "$watch_early" = 1 ] && [ "$unlock_mode" = event ] && kill -0 "$locker_pid" 2>/dev/null; then
     start_watcher_once "$locker_pid"
 fi
 

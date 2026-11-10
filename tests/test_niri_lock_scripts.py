@@ -563,5 +563,33 @@ def test_early_watcher_does_not_block_attaching_to_a_live_holder(
     assert "attaching watcher" in env.log.read_text()
 
 
+def test_poll_mode_never_starts_its_watcher_early(tmp_path: Path) -> None:
+    """DOORMAN_WATCH_EARLY must not start the gate-less poll watcher before the
+    settle check: it would run `doorman test` and kill the locker before the
+    compositor locked."""
+    env = Env(tmp_path)
+    env.stub("gtklock", LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    env.stub("poll-watcher", RECORDER_STUB)
+    settle = 3.0
+
+    started = time.monotonic()
+    proc = env.run(
+        {
+            "DOORMAN_UNLOCK_MODE": "poll",
+            "DOORMAN_WATCH_EARLY": "1",
+            "DOORMAN_LOCKER_SETTLE": str(settle),
+            "DOORMAN_LOCK_WATCH_POLL": str(env.stub_dir / "poll-watcher"),
+        }
+    )
+    env.wait_for("gtklock.pid")
+    time.sleep(1.0)
+    assert not (env.stub_dir / "poll-watcher.args").exists(), "poll watcher started early"
+    env.wait_for("poll-watcher.args")
+    assert time.monotonic() - started >= settle - 0.2, "poll watcher ignored the settle wait"
+    assert not (env.stub_dir / "doorman.args").exists(), "event helper not started"
+    stop_locker(env, "gtklock", proc)
+
+
 def test_early_watcher_is_the_default() -> None:
     assert 'watch_early="${DOORMAN_WATCH_EARLY:-1}"' in LOCK.read_text()
