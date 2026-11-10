@@ -163,11 +163,13 @@ or directory is group/world-writable.
 
 | Key | Default |
 |---|---|
+| `allow_unverified_models` | `false` |
 | `detector_input_height` | `128` |
 | `detector_input_width` | `128` |
 | `detector_num_anchors` | `896` |
 | `liveness_input_height` | `80` |
 | `liveness_input_width` | `80` |
+| `manifest_path` | `unset` |
 | `recognizer_embedding_size` | `128` |
 | `recognizer_input_height` | `112` |
 | `recognizer_input_width` | `112` |

@@ -1369,6 +1369,21 @@ pub struct ModelsConfig {
 
     #[serde(default = "default_recognizer_embedding_size")]
     pub recognizer_embedding_size: usize,
+
+    /// Accept model files whose SHA-256 does not match the manifest. Default
+    /// `false`: a loaded model (detector, recognizer, liveness, depth) that is
+    /// listed in the manifest and differs makes the daemon refuse to start.
+    /// Set `true` only after replacing a model on purpose and before adding its
+    /// hash to `manifest_path`. Models not listed at all are never refused.
+    #[serde(default)]
+    pub allow_unverified_models: bool,
+
+    /// Extra manifest (`sha256sum` format, bare file names) merged over the
+    /// one compiled into the daemon: add the depth model or a replaced model.
+    /// Must be root-owned and not writable by others. Unset: built-in only.
+    /// Generate with `doorman models verify --print-manifest`.
+    #[serde(default)]
+    pub manifest_path: Option<String>,
 }
 
 // Default values
@@ -1654,6 +1669,8 @@ impl Default for ModelsConfig {
             recognizer_input_width: default_recognizer_input_width(),
             recognizer_input_height: default_recognizer_input_height(),
             recognizer_embedding_size: default_recognizer_embedding_size(),
+            allow_unverified_models: false,
+            manifest_path: None,
         }
     }
 }
@@ -2273,6 +2290,8 @@ mod camera_guard_tests {
             crate::config::MultiFacePolicy::Reject
         );
         assert_eq!(cfg.recognition.multi_face_min_area_ratio, 0.25);
+        assert!(!cfg.models.allow_unverified_models);
+        assert!(cfg.models.manifest_path.is_none());
         assert!(cfg.validate().is_ok());
         let one: Config = toml::from_str("[authentication]\nauth_frames=1\n").unwrap();
         assert_eq!(one.authentication.effective_min_decision_frames(), 1);

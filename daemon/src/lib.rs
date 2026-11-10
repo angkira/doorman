@@ -9,6 +9,7 @@ pub mod fuzz_entry;
 pub mod ipc_policy;
 pub mod liveness;
 pub mod ml;
+pub mod model_integrity;
 pub mod storage;
 pub mod sudo_policy;
 pub mod timing;

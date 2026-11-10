@@ -400,6 +400,8 @@ async fn main() -> Result<()> {
     // Ensure data directory exists
     std::fs::create_dir_all(&config.daemon.data_dir)?;
 
+    verify_model_integrity(&config)?;
+
     info!("Initializing ML pipeline...");
     let ml_pipeline = match ml::MLPipeline::new(&config).await {
         Ok(pipeline) => {
@@ -773,4 +775,35 @@ async fn main() -> Result<()> {
     // all fds/sockets/memory anyway. (CPU ORT doesn't hit this, but the call is safe
     // unconditionally.)
     std::process::exit(0);
+}
+
+/// Hash the model files this daemon loads and compare them with the manifest
+/// (`[models] manifest_path` over the built-in one). A listed file that does
+/// not match is fatal unless `[models] allow_unverified_models = true`.
+fn verify_model_integrity(config: &Config) -> anyhow::Result<()> {
+    use doormand::model_integrity as mi;
+    let (report, outcome) = match mi::check_config(config) {
+        Ok(report) => (report, Ok(())),
+        Err((report, err)) => (report, Err(err)),
+    };
+    for (name, status) in &report.files {
+        match status {
+            mi::FileStatus::Verified => info!("model integrity: {name} verified"),
+            mi::FileStatus::Unlisted { .. } => warn!(
+                "model integrity: {name} is not in the manifest and cannot be verified \
+                 (add it via [models] manifest_path)"
+            ),
+            mi::FileStatus::Missing => warn!("model integrity: {name} not found"),
+            mi::FileStatus::Mismatch { .. } | mi::FileStatus::Unreadable(_) => {
+                error!("model integrity: {name} FAILED the check: {status:?}")
+            }
+        }
+    }
+    if config.models.allow_unverified_models && !report.mismatches().is_empty() {
+        warn!(
+            "[models] allow_unverified_models = true: continuing with unverified model files {:?}",
+            report.mismatches()
+        );
+    }
+    outcome.map_err(anyhow::Error::msg)
 }

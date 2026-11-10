@@ -98,6 +98,27 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum ModelsAction {
+    /// Hash the model files the daemon loads and compare them with the
+    /// integrity manifest (built-in, plus `[models] manifest_path`). Read-only,
+    /// needs no daemon. Exit codes: 0 all verified, 1 mismatch or error,
+    /// 2 no mismatch but some files unlisted or missing.
+    Verify {
+        /// Models directory (default: `[ml] models_dir`).
+        #[arg(long, value_name = "DIR")]
+        models_dir: Option<PathBuf>,
+        /// Extra manifest to merge over the built-in one (default:
+        /// `[models] manifest_path`).
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+        /// Print the loaded files in `sha256sum` format (for a user manifest)
+        /// instead of verifying. Only run it on files you trust.
+        #[arg(long)]
+        print_manifest: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DatasetAction {
     /// Delete dataset files (attempt/label shards, capture packs) older than N days.
     /// Root only; never run automatically.
@@ -208,6 +229,11 @@ enum Command {
     Dataset {
         #[command(subcommand)]
         action: DatasetAction,
+    },
+    /// Verify the model files against the integrity manifest (docs/MODELS.md).
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
     },
     /// Validate or document the daemon config (see docs/CONFIG.md).
     Config {
@@ -400,6 +426,17 @@ fn main() {
                 data_dir,
             } => cmd_dataset_purge(*older_than, *dry_run, data_dir.as_deref()),
         },
+        Command::Models { action } => match action {
+            ModelsAction::Verify {
+                models_dir,
+                manifest,
+                print_manifest,
+            } => std::process::exit(cmd_models_verify(
+                models_dir.as_deref(),
+                manifest.as_deref(),
+                *print_manifest,
+            )),
+        },
         Command::Config { action } => match action {
             ConfigAction::Check { config } => {
                 std::process::exit(cmd_config_check(config.as_deref()))
@@ -493,6 +530,73 @@ fn cmd_train(
         println!("  promoted: {}", if report.promoted { "yes" } else { "no" });
     }
     Ok(())
+}
+
+/// Exit code: every loaded model file matches the manifest.
+const MODELS_EXIT_OK: i32 = 0;
+/// Exit code: a hash mismatch, an unreadable file, or an error.
+const MODELS_EXIT_MISMATCH: i32 = 1;
+/// Exit code: no mismatch, but a file is unlisted (unverifiable) or missing.
+const MODELS_EXIT_UNVERIFIED: i32 = 2;
+
+fn cmd_models_verify(
+    models_dir: Option<&Path>,
+    manifest_file: Option<&Path>,
+    print_manifest: bool,
+) -> i32 {
+    use doormand::model_integrity::{self as mi, FileStatus};
+    let config = match doorman_shared::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot load config: {e}");
+            return MODELS_EXIT_MISMATCH;
+        }
+    };
+    let dir = models_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.ml.models_dir));
+    let files = mi::loaded_model_files(config.authentication.liveness_enabled);
+    if print_manifest {
+        for name in &files {
+            match mi::sha256_file(&dir.join(name)) {
+                Ok(hash) => println!("{hash}  {name}"),
+                Err(e) => eprintln!("# {name}: {e}"),
+            }
+        }
+        return MODELS_EXIT_OK;
+    }
+    let user_manifest = manifest_file
+        .map(PathBuf::from)
+        .or_else(|| config.models.manifest_path.as_ref().map(PathBuf::from));
+    let manifest = match mi::manifest_for(user_manifest.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return MODELS_EXIT_MISMATCH;
+        }
+    };
+    let report = mi::verify(&dir, &files, &manifest);
+    println!("models dir: {}", dir.display());
+    for (name, status) in &report.files {
+        match status {
+            FileStatus::Verified => println!("  ok         {name}"),
+            FileStatus::Mismatch { expected, actual } => {
+                println!("  MISMATCH   {name}\n             expected {expected}\n             actual   {actual}")
+            }
+            FileStatus::Unlisted { actual } => {
+                println!("  unlisted   {name} (sha256 {actual}; not in the manifest)")
+            }
+            FileStatus::Missing => println!("  missing    {name}"),
+            FileStatus::Unreadable(e) => println!("  UNREADABLE {name}: {e}"),
+        }
+    }
+    if !report.mismatches().is_empty() {
+        MODELS_EXIT_MISMATCH
+    } else if report.all_verified() {
+        MODELS_EXIT_OK
+    } else {
+        MODELS_EXIT_UNVERIFIED
+    }
 }
 
 fn cmd_dataset_purge(

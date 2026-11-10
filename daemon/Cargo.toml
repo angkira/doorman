@@ -107,6 +107,7 @@ chrono = "0.4"
 # routes zbus onto the existing tokio reactor instead of its async-io default, so
 # it shares the daemon's runtime in the --no-default-features ROCm build too.
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+sha2 = "0.10"
 
 [features]
 # Default dev/preview build: CPU ONNX Runtime + cross-platform mock camera +
