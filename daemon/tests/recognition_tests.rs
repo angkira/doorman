@@ -423,6 +423,7 @@ async fn e2e_liveness_real_face_passes() {
                 confidence: 0.0,
                 frame_dimensions: (sw, sh),
                 landmarks: None,
+                other_faces: Vec::new(),
             }
         }
     };

@@ -535,6 +535,13 @@ async fn decide(
     let mut scored_frames: Vec<(image::DynamicImage, crate::ml::Face)> = Vec::new();
     let mut scored_checked: Vec<bool> = Vec::new();
     let mut frames_seen = 0usize;
+    // Frames not accepted by the multi-face gate / the frame-age guard.
+    let mut multi_face_dropped = 0usize;
+    let mut stale_dropped = 0usize;
+    let max_frame_age = std::time::Duration::from_millis(state.config.camera.max_frame_age_ms);
+    // `mean` mode: every frame must reach the identity floor, and at least this
+    // many judged-good frames must be collected (`n_of_m` has its own N-of-M).
+    let min_decision_frames = state.config.authentication.effective_min_decision_frames();
     let mut rx = state.latest_frame.clone();
     let mut maybe_frame = rx.borrow_and_update().clone();
 
@@ -552,6 +559,15 @@ async fn decide(
                 continue; // `maybe_frame` is empty: waits for the next frame
             }
         }
+        if !doormand::frame_policy::is_recent(
+            frame.timestamp,
+            std::time::Instant::now(),
+            max_frame_age,
+        ) {
+            debug!("Skipping a frame older than camera.max_frame_age_ms");
+            stale_dropped += 1;
+            continue;
+        }
         let frame = (*frame.image).clone();
         let i = frames_seen;
         frames_seen += 1;
@@ -561,7 +577,7 @@ async fn decide(
         let detect_started = std::time::Instant::now();
         let detect_result = state.ml_pipeline.detect_face(&frame).await;
         timing.detect.record(detect_started.elapsed());
-        let face = match detect_result {
+        let mut face = match detect_result {
             Ok(Some(f)) => f,
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
@@ -575,6 +591,41 @@ async fn decide(
             }
         };
         raw_face_frames.push(auth_face_capture_frame(i, &frame, &face));
+
+        // Multi-face gate: a second face in view means this frame cannot be
+        // attributed to one person (a photo held next to a live face).
+        let others: Vec<doormand::frame_policy::Sighting> = face
+            .other_faces
+            .iter()
+            .map(|o| doormand::frame_policy::Sighting {
+                area: o.area_frac(),
+                score: o.confidence,
+            })
+            .collect();
+        match doormand::frame_policy::choose_face(
+            rec.multi_face_policy,
+            rec.multi_face_min_area_ratio,
+            rec.multi_face_min_score,
+            doormand::frame_policy::Sighting {
+                area: face.area_frac(),
+                score: face.confidence,
+            },
+            &others,
+        ) {
+            doormand::frame_policy::FaceChoice::Main => {}
+            doormand::frame_policy::FaceChoice::Other(idx) => {
+                face = face.other_faces.swap_remove(idx);
+            }
+            doormand::frame_policy::FaceChoice::Ambiguous => {
+                debug!(
+                    "Frame {}: more than one face in view; frame not accepted",
+                    i
+                );
+                multi_face_dropped += 1;
+                maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
+                continue;
+            }
+        }
 
         if !frame_passes_quality_gate(&frame, &face, rec, i, "auth") {
             maybe_frame = wait_for_auth_frame_until(&mut rx, deadline).await;
@@ -636,6 +687,32 @@ async fn decide(
         timing.embed.record(embed_started.elapsed());
         match embed_result {
             Ok(embedding) => {
+                if sequential.is_none() {
+                    let frame_score = crate::pipeline::template_score(
+                        dec.template_score,
+                        &embedding,
+                        &stored_embeddings,
+                    );
+                    if doormand::frame_policy::below_identity_floor(
+                        frame_score,
+                        dec.frame_identity_floor,
+                    ) {
+                        return rejected_frame(
+                            state,
+                            &mut timing,
+                            RejectedFrame {
+                                outcome: AuthOutcome::IdentityFloor,
+                                timing_outcome: crate::timing::TimingOutcome::IdentityFloor,
+                                code: doormand::decision::IDENTITY_FLOOR_CODE,
+                            },
+                            &attempt_id,
+                            username,
+                            raw_face_frames,
+                            frames_seen,
+                            liveness,
+                        );
+                    }
+                }
                 if let Some(decider) = sequential.as_mut() {
                     let score = crate::pipeline::template_score(
                         dec.template_score,
@@ -690,6 +767,23 @@ async fn decide(
         auth_frames
     );
 
+    if passed_embeddings.is_empty() && multi_face_dropped > 0 {
+        return rejected_frame(
+            state,
+            &mut timing,
+            RejectedFrame {
+                outcome: AuthOutcome::AmbiguousFaces,
+                timing_outcome: crate::timing::TimingOutcome::AmbiguousFaces,
+                code: doormand::decision::AMBIGUOUS_FACES_CODE,
+            },
+            &attempt_id,
+            username,
+            raw_face_frames,
+            frames_seen,
+            liveness,
+        );
+    }
+
     if passed_embeddings.is_empty() {
         timing.outcome = crate::timing::TimingOutcome::NoClearFace;
         warn!(
@@ -729,6 +823,49 @@ async fn decide(
             liveness,
             ..AuthDecision::bare(AuthOutcome::NoClearFace)
         };
+    }
+
+    // `mean` mode: do not decide on whatever the deadline left (one frame on a
+    // loaded CPU). Too few frames is a clear, unjudged rejection, or an
+    // ambiguity rejection when the multi-face gate was what removed them.
+    if sequential.is_none()
+        && !doormand::frame_policy::enough_frames(passed_embeddings.len(), min_decision_frames)
+    {
+        warn!(
+            "Authentication for {}: {} judged-good frames, {} required; {} dropped by the multi-face gate, {} by the frame-age guard",
+            username,
+            passed_embeddings.len(),
+            min_decision_frames,
+            multi_face_dropped,
+            stale_dropped
+        );
+        let (outcome, timing_outcome, code) = if multi_face_dropped > 0 {
+            (
+                AuthOutcome::AmbiguousFaces,
+                crate::timing::TimingOutcome::AmbiguousFaces,
+                doormand::decision::AMBIGUOUS_FACES_CODE,
+            )
+        } else {
+            (
+                AuthOutcome::InsufficientFrames,
+                crate::timing::TimingOutcome::InsufficientFrames,
+                doormand::decision::INSUFFICIENT_FRAMES_CODE,
+            )
+        };
+        return rejected_frame(
+            state,
+            &mut timing,
+            RejectedFrame {
+                outcome,
+                timing_outcome,
+                code,
+            },
+            &attempt_id,
+            username,
+            raw_face_frames,
+            frames_seen,
+            liveness,
+        );
     }
 
     // The authentication timeout ended the run before the liveness aggregate
@@ -947,6 +1084,56 @@ async fn decide(
         frames_used: passed_embeddings.len(),
         frames_seen,
         liveness,
+    }
+}
+
+/// How a frame-level rule ended an attempt.
+struct RejectedFrame {
+    outcome: AuthOutcome,
+    timing_outcome: crate::timing::TimingOutcome,
+    code: &'static str,
+}
+
+/// Terminal rejection by a frame-level rule (identity floor, multi-face gate,
+/// too few frames): record the attempt and build the decision. Same
+/// bookkeeping as [`liveness_failure`], without the spoof label.
+#[allow(clippy::too_many_arguments)]
+fn rejected_frame(
+    state: &DaemonState,
+    timing: &mut crate::timing::AttemptTiming,
+    why: RejectedFrame,
+    attempt_id: &str,
+    username: &str,
+    raw_face_frames: Vec<dataset::CaptureFrameImage>,
+    frames_seen: usize,
+    liveness: Option<LivenessOutcome>,
+) -> AuthDecision {
+    timing.outcome = why.timing_outcome;
+    warn!(
+        "Authentication failed for {}: frame rule [{}]",
+        username, why.code
+    );
+    log_auth_failure_attempt(
+        state,
+        attempt_id,
+        username,
+        Outcome::Rejected,
+        None,
+        why.code,
+        AttemptConditions::default(),
+    );
+    log_auth_capture_pack(
+        state,
+        attempt_id,
+        Some(username),
+        Outcome::Rejected,
+        GtSource::PamFaceAuth,
+        raw_face_frames,
+    );
+    AuthDecision {
+        frames_seen,
+        liveness,
+        ..AuthDecision::bare(why.outcome)
     }
 }
 
@@ -1188,6 +1375,7 @@ mod tests {
             confidence: 0.95,
             frame_dimensions: (4, 3),
             landmarks: None,
+            other_faces: Vec::new(),
         }
     }
 

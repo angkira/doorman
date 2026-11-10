@@ -223,6 +223,7 @@ fn handle_conn(
         confidence: 1.0,
         frame_dimensions: (req.width, req.height),
         landmarks: None,
+        other_faces: Vec::new(),
     };
 
     let resp = match depth {

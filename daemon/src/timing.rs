@@ -44,6 +44,9 @@ pub enum TimingOutcome {
     NoClearFace,
     NotEnrolled,
     CameraUnavailable,
+    IdentityFloor,
+    AmbiguousFaces,
+    InsufficientFrames,
 }
 
 /// Sum + count of repeated stage invocations.

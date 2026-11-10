@@ -375,6 +375,7 @@ impl MLPipeline {
             confidence: 0.9,
             frame_dimensions: (640, 480),
             landmarks: None,
+            other_faces: Vec::new(),
         };
 
         // Run liveness warmup

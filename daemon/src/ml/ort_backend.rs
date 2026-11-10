@@ -945,48 +945,53 @@ impl MLBackend for OrtBackend {
         );
         let dets = yunet_decoder::nms(dets, cfg.iou_threshold);
 
-        // Single-user behavior: pick the highest-scoring face.
-        let best = dets.into_iter().max_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        match best {
-            Some(d) => {
+        // The highest-scoring face is the main one; the rest are reported so the
+        // caller can apply `[recognition] multi_face_policy`.
+        let mut faces: Vec<Face> = dets
+            .into_iter()
+            .map(|d| {
                 // Clamp the normalized bbox to the frame.
                 let (mut x, mut y, w, h) = d.bbox;
                 x = x.clamp(0.0, 1.0);
                 y = y.clamp(0.0, 1.0);
                 let w = w.clamp(0.0, 1.0 - x);
                 let h = h.clamp(0.0, 1.0 - y);
-
-                tracing::debug!(
-                    "YuNet detection: score={:.3} bbox_norm=({:.3},{:.3},{:.3},{:.3}) frame={}x{}",
-                    d.score,
-                    x,
-                    y,
-                    w,
-                    h,
-                    orig_width,
-                    orig_height
-                );
-
-                Ok(Some(Face {
+                Face {
                     bbox: (x, y, w, h),
                     confidence: d.score,
                     frame_dimensions: (orig_width, orig_height),
                     landmarks: Some(d.landmarks),
-                }))
-            }
-            None => {
-                tracing::debug!(
-                    "YuNet: no face above threshold {:.2}",
-                    cfg.confidence_threshold
-                );
-                Ok(None)
-            }
+                    other_faces: Vec::new(),
+                }
+            })
+            .collect();
+        faces.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if faces.is_empty() {
+            tracing::debug!(
+                "YuNet: no face above threshold {:.2}",
+                cfg.confidence_threshold
+            );
+            return Ok(None);
         }
+        let mut main = faces.remove(0);
+        tracing::debug!(
+            "YuNet detection: score={:.3} bbox_norm=({:.3},{:.3},{:.3},{:.3}) frame={}x{} other_faces={}",
+            main.confidence,
+            main.bbox.0,
+            main.bbox.1,
+            main.bbox.2,
+            main.bbox.3,
+            orig_width,
+            orig_height,
+            faces.len()
+        );
+        main.other_faces = faces;
+        Ok(Some(main))
     }
 
     /// MiniFASNetV2-SE anti-spoofing (facenox/face-antispoof-onnx, 128x128).

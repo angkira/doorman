@@ -13,6 +13,18 @@ pub struct Face {
     /// ordered: right-eye, left-eye, nose, right-mouth-corner, left-mouth-corner
     /// (YuNet/OpenCV ordering). `None` when the detector does not provide them.
     pub landmarks: Option<[(f32, f32); 5]>,
+    /// The other faces the detector found in the same frame (post-NMS, above
+    /// the detector's own score threshold), without their own `other_faces`.
+    /// Empty when the detector reports a single face or cannot tell.
+    pub other_faces: Vec<Face>,
+}
+
+impl Face {
+    /// Normalized box area.
+    pub fn area_frac(&self) -> f32 {
+        let (_, _, w, h) = self.bbox;
+        (w * h).abs()
+    }
 }
 
 /// Abstract ML backend trait - implements driver pattern

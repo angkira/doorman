@@ -47,25 +47,42 @@ enum Scene {
     LiveImpostor,
     /// A photo of the owner: owner embedding, flat.
     Photo,
+    /// The live owner with a poorer frame: cosine 0.35 to the template (above
+    /// the 0.30 identity floor, below the 0.4 threshold).
+    WeakOwner,
+    /// A frame whose cosine to the template is 0.25 (below the floor).
+    TooWeak,
+    /// The live owner with a phone showing a face next to them: a second face
+    /// of 36% of the main face's area is detected.
+    OwnerWithPhoneFace,
+    /// The live owner with a small face far in the background (4% of the area).
+    OwnerWithBackgroundFace,
 }
 
 impl Scene {
     fn embedding(self) -> Vec<f32> {
         match self {
-            Scene::LiveOwner | Scene::Photo => OWNER_EMBEDDING.to_vec(),
+            Scene::LiveOwner
+            | Scene::Photo
+            | Scene::OwnerWithPhoneFace
+            | Scene::OwnerWithBackgroundFace => OWNER_EMBEDDING.to_vec(),
             Scene::LiveImpostor => IMPOSTOR_EMBEDDING.to_vec(),
+            Scene::WeakOwner => vec![0.35, (1.0f32 - 0.35 * 0.35).sqrt(), 0.0],
+            Scene::TooWeak => vec![0.25, (1.0f32 - 0.25 * 0.25).sqrt(), 0.0],
         }
     }
 
     fn relief(self) -> f32 {
         match self {
-            Scene::LiveOwner | Scene::LiveImpostor => LIVE_RELIEF,
             Scene::Photo => FLAT_RELIEF,
+            _ => LIVE_RELIEF,
         }
     }
 }
 
-use Scene::{LiveImpostor, LiveOwner, Photo};
+use Scene::{
+    LiveImpostor, LiveOwner, OwnerWithBackgroundFace, OwnerWithPhoneFace, Photo, TooWeak, WeakOwner,
+};
 
 fn frame(index: usize) -> RawFrame {
     let mut image = RgbImage::new(FRAME_SIDE, FRAME_SIDE);
@@ -99,11 +116,26 @@ impl MLBackend for ScriptedBackend {
         if next < self.script.len() {
             self.camera.send_replace(Some(frame(next)));
         }
+        let second_face_side = match self.script[frame_index(image)] {
+            Scene::OwnerWithPhoneFace => Some(0.3),
+            Scene::OwnerWithBackgroundFace => Some(0.1),
+            _ => None,
+        };
         Ok(Some(Face {
             bbox: (0.25, 0.25, 0.5, 0.5),
             confidence: 0.99,
             frame_dimensions: (FRAME_SIDE, FRAME_SIDE),
             landmarks: None,
+            other_faces: second_face_side
+                .map(|side| Face {
+                    bbox: (0.0, 0.0, side, side),
+                    confidence: 0.9,
+                    frame_dimensions: (FRAME_SIDE, FRAME_SIDE),
+                    landmarks: None,
+                    other_faces: Vec::new(),
+                })
+                .into_iter()
+                .collect(),
         }))
     }
 
@@ -163,6 +195,25 @@ async fn build_state(
     watch::Sender<Option<RawFrame>>,
     tempfile::TempDir,
 ) {
+    // The liveness-binding tests below predate the per-frame identity floor
+    // and use an impostor face on purpose: they run with the floor off.
+    build_state_cfg(script, auth_frames, mean_mode_depth_samples, |c| {
+        c.decision.frame_identity_floor = 0.0;
+    })
+    .await
+}
+
+async fn build_state_cfg(
+    script: &[Scene],
+    auth_frames: usize,
+    mean_mode_depth_samples: u32,
+    tweak: impl FnOnce(&mut Config),
+) -> (
+    DaemonState,
+    Arc<AtomicUsize>,
+    watch::Sender<Option<RawFrame>>,
+    tempfile::TempDir,
+) {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let mut config = Config::default();
     config.daemon.data_dir = data_dir.path().to_string_lossy().into_owned();
@@ -178,6 +229,9 @@ async fn build_state(
     config.recognition.min_face_area_frac = 0.0;
     config.recognition.min_brightness = 0.0;
     config.dataset.logging_enabled = false;
+    // Real time: keep attempts that wait for more frames short.
+    config.authentication.timeout_secs = 1;
+    tweak(&mut config);
 
     let (camera_tx, camera_rx) = watch::channel(Some(frame(0)));
     let depth_calls = Arc::new(AtomicUsize::new(0));
@@ -383,4 +437,180 @@ async fn a_disabled_budget_never_suspends() {
     }
     let (d, _, _) = attempt_with(&budget, &[LiveOwner; 5]).await;
     assert_eq!(d.outcome, AuthOutcome::Matched);
+}
+
+// ---------------------------------------------------------------------------
+// Round 9a B-D: identity floor, multi-face gate, minimum frames, frame age
+// ---------------------------------------------------------------------------
+
+async fn run_cfg(
+    script: &[Scene],
+    auth_frames: usize,
+    tweak: impl FnOnce(&mut Config),
+) -> AuthDecision {
+    let (state, _depth, _camera, _dir) = build_state_cfg(script, auth_frames, 0, tweak).await;
+    run_authenticate(&state, USER, None, None).await
+}
+
+/// The mix the floor closes: a live other face on the frames that carry the
+/// liveness checks, owner photos in between. Without the floor it is ACCEPTED
+/// (pinned below with the floor off), with the default floor it is rejected.
+#[tokio::test]
+async fn identity_floor_rejects_a_live_attacker_around_owner_photos() {
+    let mix = [LiveImpostor, Photo, Photo, Photo, LiveImpostor];
+    let before = run_cfg(&mix, 5, |c| c.decision.frame_identity_floor = 0.0).await;
+    assert_eq!(
+        before.outcome,
+        AuthOutcome::Matched,
+        "accepted without the floor"
+    );
+    let after = run_cfg(&mix, 5, |_| {}).await;
+    assert_eq!(after.outcome, AuthOutcome::IdentityFloor);
+    assert!(doormand::face_budget::is_judged_failure(&after.outcome));
+}
+
+#[tokio::test]
+async fn identity_floor_leaves_genuine_sequences_unchanged() {
+    let genuine = run_cfg(&[LiveOwner; 5], 5, |_| {}).await;
+    assert_eq!(genuine.outcome, AuthOutcome::Matched);
+    // Poorer genuine frames (cosine 0.35, above the floor) still average above
+    // the threshold exactly as before.
+    let seq = [LiveOwner, WeakOwner, LiveOwner, WeakOwner, LiveOwner];
+    let with_floor = run_cfg(&seq, 5, |_| {}).await;
+    let without = run_cfg(&seq, 5, |c| c.decision.frame_identity_floor = 0.0).await;
+    assert_eq!(with_floor.outcome, AuthOutcome::Matched);
+    assert_eq!(with_floor.outcome, without.outcome);
+    assert_eq!(with_floor.similarity, without.similarity);
+}
+
+#[tokio::test]
+async fn identity_floor_boundary_is_between_035_and_025() {
+    let ok = run_cfg(
+        &[LiveOwner, LiveOwner, LiveOwner, LiveOwner, WeakOwner],
+        5,
+        |_| {},
+    )
+    .await;
+    assert_eq!(ok.outcome, AuthOutcome::Matched);
+    let bad = run_cfg(
+        &[LiveOwner, LiveOwner, LiveOwner, LiveOwner, TooWeak],
+        5,
+        |_| {},
+    )
+    .await;
+    assert_eq!(bad.outcome, AuthOutcome::IdentityFloor);
+}
+
+#[tokio::test]
+async fn multi_face_reject_drops_frames_with_a_second_qualifying_face() {
+    let seq = [OwnerWithPhoneFace; 5];
+    let d = run_cfg(&seq, 5, |_| {}).await;
+    assert_eq!(d.outcome, AuthOutcome::AmbiguousFaces);
+    assert!(doormand::face_budget::is_judged_failure(&d.outcome));
+    // Policy off restores the original behaviour (the owner's frames win).
+    let off = run_cfg(&seq, 5, |c| {
+        c.recognition.multi_face_policy = doorman_shared::config::MultiFacePolicy::Off
+    })
+    .await;
+    assert_eq!(off.outcome, AuthOutcome::Matched);
+    // The main face is the largest here, so `largest` also accepts.
+    let largest = run_cfg(&seq, 5, |c| {
+        c.recognition.multi_face_policy = doorman_shared::config::MultiFacePolicy::Largest
+    })
+    .await;
+    assert_eq!(largest.outcome, AuthOutcome::Matched);
+}
+
+#[tokio::test]
+async fn a_small_background_face_does_not_trip_the_multi_face_gate() {
+    let d = run_cfg(&[OwnerWithBackgroundFace; 5], 5, |_| {}).await;
+    assert_eq!(d.outcome, AuthOutcome::Matched);
+}
+
+#[tokio::test]
+async fn a_phone_face_on_some_frames_leaves_too_few_frames() {
+    // Three clean frames then two with a phone face, 5 wanted, 3 needed ->
+    // accepted; with 4 needed the two dropped frames make it ambiguous.
+    let seq = [
+        LiveOwner,
+        LiveOwner,
+        LiveOwner,
+        OwnerWithPhoneFace,
+        OwnerWithPhoneFace,
+    ];
+    let ok = run_cfg(&seq, 5, |c| c.authentication.min_decision_frames = 3).await;
+    assert_eq!(ok.outcome, AuthOutcome::Matched);
+    let bad = run_cfg(&seq, 5, |c| c.authentication.min_decision_frames = 4).await;
+    assert_eq!(bad.outcome, AuthOutcome::AmbiguousFaces);
+}
+
+#[tokio::test]
+async fn too_few_judged_good_frames_are_rejected_not_decided() {
+    // Default minimum for 10 frames is 8. Seven genuine frames then silence.
+    let seven = run_cfg(&[LiveOwner; 7], 10, |_| {}).await;
+    assert_eq!(seven.outcome, AuthOutcome::InsufficientFrames);
+    assert!(!doormand::face_budget::is_judged_failure(&seven.outcome));
+    assert!(matches!(
+        seven.into_response(),
+        doorman_shared::Response::Failure { reason } if reason.contains("insufficient_frames")
+    ));
+    // A single frame must not decide, even though it is the owner.
+    let one = run_cfg(&[LiveOwner], 10, |_| {}).await;
+    assert_eq!(one.outcome, AuthOutcome::InsufficientFrames);
+    // Eight are enough.
+    let eight = run_cfg(&[LiveOwner; 8], 10, |_| {}).await;
+    assert_eq!(eight.outcome, AuthOutcome::Matched);
+    // The old behaviour is reachable with an explicit minimum of 1.
+    let legacy = run_cfg(&[LiveOwner], 10, |c| {
+        c.authentication.min_decision_frames = 1
+    })
+    .await;
+    assert_eq!(legacy.outcome, AuthOutcome::Matched);
+}
+
+/// A frame captured long before it is taken up (a stalled feed) is not used.
+#[tokio::test]
+async fn a_stale_frame_is_skipped_by_the_frame_age_guard() {
+    let script = [LiveOwner, LiveOwner, LiveOwner];
+    let stale_by = std::time::Duration::from_secs(5);
+    let old = std::time::Instant::now()
+        .checked_sub(stale_by)
+        .expect("monotonic clock far enough from its origin");
+
+    // Guard on (default 1000 ms): the only frame is 5 s old -> nothing usable.
+    let (state, _d, camera, _dir) = build_state_cfg(&script, 3, 0, |_| {}).await;
+    let mut stale = frame(0);
+    stale.timestamp = old;
+    camera.send_replace(Some(stale));
+    let d = run_authenticate(&state, USER, None, None).await;
+    assert_eq!(d.outcome, AuthOutcome::NoFrames);
+
+    // Control: guard off -> the same stale frame is scored and the owner matches.
+    let (state, _d, camera, _dir) =
+        build_state_cfg(&script, 3, 0, |c| c.camera.max_frame_age_ms = 0).await;
+    let mut stale = frame(0);
+    stale.timestamp = old;
+    camera.send_replace(Some(stale));
+    let d = run_authenticate(&state, USER, None, None).await;
+    assert_eq!(d.outcome, AuthOutcome::Matched);
+}
+
+/// A stale frame followed by fresh ones: the stale one is skipped, the fresh
+/// ones decide.
+#[tokio::test]
+async fn fresh_frames_after_a_stale_one_still_decide() {
+    let script = [LiveOwner, LiveOwner, LiveOwner];
+    let (state, _d, camera, _dir) = build_state_cfg(&script, 3, 0, |_| {}).await;
+    let mut stale = frame(2);
+    stale.timestamp = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(5))
+        .unwrap();
+    camera.send_replace(Some(stale));
+    let feed = async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        camera.send_replace(Some(frame(0)));
+    };
+    let (d, ()) = tokio::join!(run_authenticate(&state, USER, None, None), feed);
+    assert_eq!(d.outcome, AuthOutcome::Matched);
+    assert_eq!(d.frames_seen, 3, "the stale frame was not counted");
 }
