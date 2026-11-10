@@ -130,6 +130,10 @@ pub enum NoMatchReason {
     NotArmed,
     /// The user has no enrollment; waiting longer cannot help.
     NotEnrolled,
+    /// Face auth is suspended after repeated judged failures
+    /// (`[ipc] face_max_judged_failures`). Fall through to the password; the
+    /// helper pauses before asking again.
+    Suspended,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

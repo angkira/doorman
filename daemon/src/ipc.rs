@@ -374,7 +374,45 @@ async fn handle_authenticate(
     decision.into_response()
 }
 
-/// Decision core of `Authenticate` and `WaitForMatch`; callers build the wire
+/// Decision core of `Authenticate` and `WaitForMatch` behind the face-auth
+/// failure budget (`[ipc] face_*`): while the user is suspended nothing runs
+/// (no camera, no models) and the answer is [`AuthOutcome::Suspended`]; a
+/// completed decision is accounted afterwards (match resets, judged failure
+/// counts). Every entry point goes through here, including each retry of a
+/// `WaitForMatch`.
+async fn run_authenticate(
+    state: &DaemonState,
+    username: &str,
+    strict: Option<(&StrictProfile, std::time::Instant)>,
+    wait: Option<&unlock_wait::WaitTiming>,
+) -> AuthDecision {
+    if let Err(remaining) = state.face_budget.check(username, std::time::Instant::now()) {
+        let retry_after_s = doormand::face_budget::retry_after_secs(remaining);
+        info!(
+            target: doormand::face_budget::AUDIT_TARGET,
+            retry_after_s,
+            reason = doormand::face_budget::FACE_SUSPENDED_CODE,
+            "face auth refused: suspended after repeated failed attempts"
+        );
+        return AuthDecision::bare(AuthOutcome::Suspended { retry_after_s });
+    }
+    let decision = decide(state, username, strict, wait).await;
+    if let Some(cooldown) =
+        state
+            .face_budget
+            .record(username, &decision.outcome, std::time::Instant::now())
+    {
+        warn!(
+            target: doormand::face_budget::AUDIT_TARGET,
+            cooldown_s = cooldown.as_secs(),
+            reason = doormand::face_budget::FACE_SUSPENDED_CODE,
+            "face auth suspended: failure budget used up (password unaffected)"
+        );
+    }
+    decision
+}
+
+/// The decision itself; callers build the wire
 /// response (or the wait outcome) from the returned [`AuthDecision`].
 ///
 /// `strict` is the sudo profile together with the request arrival time: it
@@ -385,7 +423,7 @@ async fn handle_authenticate(
 /// `wait` is set by `WaitForMatch`: only frames captured at or after its
 /// request time are used (the same freshness rule as the strict profile), and
 /// the timing record gets the lock-relative stages.
-async fn run_authenticate(
+async fn decide(
     state: &DaemonState,
     username: &str,
     strict: Option<(&StrictProfile, std::time::Instant)>,

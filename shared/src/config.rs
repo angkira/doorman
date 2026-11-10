@@ -308,6 +308,18 @@ pub struct CameraConfig {
     /// such a device, so the daemon refuses them. Enable only for testing.
     #[serde(default)]
     pub allow_virtual_devices: bool,
+
+    /// Longest a frame may sit between capture and being taken up by an
+    /// authentication attempt; older frames are skipped (a frozen or stalled
+    /// feed can never decide). Milliseconds, `0` disables the guard, otherwise
+    /// 100..=10000. Complements the request-time freshness floor of
+    /// `WaitForMatch`, which drops frames captured before the request.
+    #[serde(default = "default_max_frame_age_ms")]
+    pub max_frame_age_ms: u64,
+}
+
+fn default_max_frame_age_ms() -> u64 {
+    DEFAULT_MAX_FRAME_AGE_MS
 }
 
 impl CameraConfig {
@@ -345,6 +357,14 @@ impl CameraConfig {
                 "camera.native_failure_cooldown_secs = {} is out of range \
                  (0..={MAX_NATIVE_FAILURE_COOLDOWN_SECS})",
                 self.native_failure_cooldown_secs
+            )));
+        }
+        if self.max_frame_age_ms != 0
+            && !(MIN_MAX_FRAME_AGE_MS..=MAX_MAX_FRAME_AGE_MS).contains(&self.max_frame_age_ms)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "camera.max_frame_age_ms = {} is out of range (0 to disable, else {MIN_MAX_FRAME_AGE_MS}..={MAX_MAX_FRAME_AGE_MS})",
+                self.max_frame_age_ms
             )));
         }
         self.fourcc()?;
@@ -464,6 +484,28 @@ pub struct AuthConfig {
     /// it). Enable only if you understand and accept the drift trade-off.
     #[serde(default = "default_adaptive_enroll")]
     pub adaptive_enroll: bool,
+
+    /// `mean` decision mode: the least number of judged-good frames an attempt
+    /// must have collected, otherwise it is rejected (`insufficient_frames`)
+    /// instead of deciding on whatever the deadline left, e.g. one frame on a
+    /// loaded CPU. `0` (default) derives it: `auth_frames` minus 2 tolerated
+    /// drops (8 of 10), at least 1. Otherwise 1..=`auth_frames`. Not used by
+    /// `n_of_m`, which has its own N-of-M requirement.
+    #[serde(default)]
+    pub min_decision_frames: usize,
+}
+
+impl AuthConfig {
+    /// The enforced minimum of `mean` decision frames (see `min_decision_frames`).
+    pub fn effective_min_decision_frames(&self) -> usize {
+        if self.min_decision_frames == 0 {
+            self.auth_frames
+                .saturating_sub(MIN_DECISION_TOLERATED_DROPS)
+                .max(1)
+        } else {
+            self.min_decision_frames
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,6 +572,46 @@ pub struct RecognitionConfig {
     /// Rejects frames that are too dark to embed reliably. `0.0` disables it.
     #[serde(default)]
     pub min_brightness: f32,
+
+    /// What to do when a frame shows more than one face (a second face whose
+    /// box is at least `multi_face_min_area_ratio` of the main face's area and
+    /// whose detector score is at least `multi_face_min_score`). `reject`
+    /// (default): the frame is not accepted, so a photo held next to a live
+    /// face cannot alternate between the two; an attempt left with too few
+    /// frames is rejected as `ambiguous_faces`. `largest`: use the largest
+    /// face instead of the highest-scoring one. `off`: the original behaviour
+    /// (highest-scoring face, others ignored).
+    #[serde(default)]
+    pub multi_face_policy: MultiFacePolicy,
+
+    /// Area of a second face relative to the main face to count. Range (0, 1].
+    #[serde(default = "default_multi_face_min_area_ratio")]
+    pub multi_face_min_area_ratio: f32,
+
+    /// Detector score a second face needs to count. Range [0, 1].
+    #[serde(default = "default_multi_face_min_score")]
+    pub multi_face_min_score: f32,
+}
+
+fn default_multi_face_min_area_ratio() -> f32 {
+    DEFAULT_MULTI_FACE_MIN_AREA_RATIO
+}
+
+fn default_multi_face_min_score() -> f32 {
+    DEFAULT_MULTI_FACE_MIN_SCORE
+}
+
+/// `[recognition] multi_face_policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MultiFacePolicy {
+    /// A frame with a second qualifying face is not accepted.
+    #[default]
+    Reject,
+    /// Use the largest face instead of the highest-scoring one.
+    Largest,
+    /// Original behaviour: the highest-scoring face, others ignored.
+    Off,
 }
 
 impl Default for RecognitionConfig {
@@ -540,6 +622,9 @@ impl Default for RecognitionConfig {
             min_sharpness: default_min_sharpness(),
             min_face_area_frac: default_min_face_area_frac(),
             min_brightness: 0.0,
+            multi_face_policy: MultiFacePolicy::default(),
+            multi_face_min_area_ratio: DEFAULT_MULTI_FACE_MIN_AREA_RATIO,
+            multi_face_min_score: DEFAULT_MULTI_FACE_MIN_SCORE,
         }
     }
 }
@@ -589,6 +674,19 @@ pub struct DecisionConfig {
     /// average and renormalise. Costs one extra recognizer pass per frame.
     #[serde(default)]
     pub flip_tta: bool,
+
+    /// `mean` mode only: every frame that feeds the aggregate must itself
+    /// score at least this cosine against the enrolled templates, otherwise the
+    /// attempt is rejected (`identity_floor`, fail closed). It binds liveness to
+    /// identity: a live face of someone else on the checked frames cannot be
+    /// averaged together with photos of the owner in between. Range
+    /// 0..=`similarity_threshold`; `0` disables. Default 0.30.
+    #[serde(default = "default_frame_identity_floor")]
+    pub frame_identity_floor: f32,
+}
+
+fn default_frame_identity_floor() -> f32 {
+    DEFAULT_FRAME_IDENTITY_FLOOR
 }
 
 impl Default for DecisionConfig {
@@ -599,6 +697,7 @@ impl Default for DecisionConfig {
             window_m: default_window_m(),
             template_score: default_template_score(),
             flip_tta: false,
+            frame_identity_floor: DEFAULT_FRAME_IDENTITY_FLOOR,
         }
     }
 }
@@ -610,6 +709,12 @@ impl DecisionConfig {
             return Err(ConfigError::Invalid(format!(
                 "decision.accept_n = {} and decision.window_m = {} must satisfy 1 <= accept_n <= window_m",
                 self.accept_n, self.window_m
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.frame_identity_floor) {
+            return Err(ConfigError::Invalid(format!(
+                "decision.frame_identity_floor = {} is out of range (0..=1)",
+                self.frame_identity_floor
             )));
         }
         Ok(())
@@ -904,8 +1009,55 @@ pub const DEFAULT_PREARM_MAX_HOLD_SECS: u64 = 5;
 /// Inclusive bounds for `[ipc] prearm_max_hold_secs`.
 pub const MIN_PREARM_MAX_HOLD_SECS: u64 = 1;
 pub const MAX_PREARM_MAX_HOLD_SECS: u64 = 30;
+/// Default for `[decision] frame_identity_floor`: every frame of a `mean`
+/// decision must individually score at least this cosine against the enrolled
+/// templates. Well below the 0.4 match threshold (genuine frames observed at
+/// 0.74-0.82 on the reference host) and well above where impostor frames sit
+/// (near 0), so it never fires on a real face and always on a different one.
+pub const DEFAULT_FRAME_IDENTITY_FLOOR: f32 = 0.30;
+/// Default for `[authentication] min_decision_frames`: `0` derives the minimum
+/// from `auth_frames` minus this many tolerated dropped frames (8 of 10).
+pub const MIN_DECISION_TOLERATED_DROPS: usize = 2;
+/// Default for `[camera] max_frame_age_ms`: a frame is used only if it was
+/// captured at most this long before it is taken up. Above the normal
+/// capture-to-consumption latency (one frame period, 33-200 ms), far below a
+/// frozen feed.
+pub const DEFAULT_MAX_FRAME_AGE_MS: u64 = 1_000;
+/// Inclusive bounds for a non-zero `[camera] max_frame_age_ms` (`0` disables).
+pub const MIN_MAX_FRAME_AGE_MS: u64 = 100;
+pub const MAX_MAX_FRAME_AGE_MS: u64 = 10_000;
+/// Default for `[recognition] multi_face_min_area_ratio`: a second face counts
+/// when its box area is at least this fraction of the main face's area.
+pub const DEFAULT_MULTI_FACE_MIN_AREA_RATIO: f32 = 0.25;
+/// Default for `[recognition] multi_face_min_score`: detector confidence a
+/// second face needs to count (the detector itself already drops below 0.6).
+pub const DEFAULT_MULTI_FACE_MIN_SCORE: f32 = 0.75;
 /// Default cap on simultaneously open command connections per peer uid.
 pub const DEFAULT_MAX_CONNECTIONS_PER_UID: u32 = 8;
+/// Default for `[ipc] face_max_judged_failures`: judged failures that suspend
+/// face auth for a user (`0` disables the budget).
+pub const DEFAULT_FACE_MAX_JUDGED_FAILURES: u32 = 5;
+/// Inclusive upper bound for `[ipc] face_max_judged_failures`.
+pub const MAX_FACE_MAX_JUDGED_FAILURES: u32 = 100;
+/// Default for `[ipc] face_failure_window_secs`: judged failures older than this
+/// no longer count towards the budget.
+pub const DEFAULT_FACE_FAILURE_WINDOW_SECS: u64 = 300;
+/// Inclusive bounds for `[ipc] face_failure_window_secs`.
+pub const MIN_FACE_FAILURE_WINDOW_SECS: u64 = 10;
+pub const MAX_FACE_FAILURE_WINDOW_SECS: u64 = 86_400;
+/// Default for `[ipc] face_cooldown_secs`: escalating suspension lengths
+/// (30 s, 2 min, 10 min). The last entry repeats once the list is used up.
+pub const DEFAULT_FACE_COOLDOWN_SECS: [u64; 3] = [30, 120, 600];
+/// Bounds for `[ipc] face_cooldown_secs`: entries and each entry in seconds.
+pub const MAX_FACE_COOLDOWN_STEPS: usize = 8;
+pub const MIN_FACE_COOLDOWN_SECS: u64 = 1;
+pub const MAX_FACE_COOLDOWN_SECS: u64 = 86_400;
+/// Default for `[ipc] face_budget_quiet_reset_secs`: with no judged failure for
+/// this long, the escalation starts again at the first cooldown.
+pub const DEFAULT_FACE_BUDGET_QUIET_RESET_SECS: u64 = 1_800;
+/// Inclusive bounds for `[ipc] face_budget_quiet_reset_secs`.
+pub const MIN_FACE_BUDGET_QUIET_RESET_SECS: u64 = 60;
+pub const MAX_FACE_BUDGET_QUIET_RESET_SECS: u64 = 604_800;
 
 /// IPC peer-credential policy (`[ipc]`). See docs/ipc-security.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -954,6 +1106,52 @@ pub struct IpcConfig {
     /// cap is 64). Extra connections are dropped. `0` disables the per-uid cap.
     #[serde(default = "default_max_connections_per_uid")]
     pub max_connections_per_uid: u32,
+
+    /// Failure budget of face auth, for EVERY entry point (`Authenticate`, the
+    /// PAM module, `doorman test`, and each `WaitForMatch` retry on the lock
+    /// screen). After this many *judged* failures inside
+    /// `face_failure_window_secs` face auth for that user is suspended for the
+    /// next step of `face_cooldown_secs`. A judged failure is a completed
+    /// decision that rejected (below threshold, liveness rejected, identity
+    /// floor, ambiguous faces); camera problems, timeouts, no face in view and
+    /// an unavailable liveness model are NOT counted. A successful match resets
+    /// the budget. The password path is never affected. Side effect: someone
+    /// who fails on purpose can switch the owner's face unlock off for the
+    /// cooldown (then the password works, and a match resets it). `0` disables
+    /// the budget. Range 0..=100.
+    #[serde(default = "default_face_max_judged_failures")]
+    pub face_max_judged_failures: u32,
+
+    /// Window in which judged failures are counted. Range 10..=86400.
+    #[serde(default = "default_face_failure_window_secs")]
+    pub face_failure_window_secs: u64,
+
+    /// Escalating suspension lengths in seconds, one per consecutive
+    /// suspension; the last entry repeats. Non-decreasing, 1..=8 entries, each
+    /// 1..=86400.
+    #[serde(default = "default_face_cooldown_secs")]
+    pub face_cooldown_secs: Vec<u64>,
+
+    /// With no judged failure for this long the escalation restarts at the
+    /// first cooldown. Range 60..=604800.
+    #[serde(default = "default_face_budget_quiet_reset_secs")]
+    pub face_budget_quiet_reset_secs: u64,
+}
+
+fn default_face_max_judged_failures() -> u32 {
+    DEFAULT_FACE_MAX_JUDGED_FAILURES
+}
+
+fn default_face_failure_window_secs() -> u64 {
+    DEFAULT_FACE_FAILURE_WINDOW_SECS
+}
+
+fn default_face_cooldown_secs() -> Vec<u64> {
+    DEFAULT_FACE_COOLDOWN_SECS.to_vec()
+}
+
+fn default_face_budget_quiet_reset_secs() -> u64 {
+    DEFAULT_FACE_BUDGET_QUIET_RESET_SECS
 }
 
 fn default_prearm_camera() -> bool {
@@ -972,6 +1170,52 @@ impl IpcConfig {
             return Err(ConfigError::Invalid(format!(
                 "ipc.prearm_max_hold_secs = {} is out of range ({MIN_PREARM_MAX_HOLD_SECS}..={MAX_PREARM_MAX_HOLD_SECS})",
                 self.prearm_max_hold_secs
+            )));
+        }
+        self.validate_face_budget()
+    }
+
+    fn validate_face_budget(&self) -> Result<(), ConfigError> {
+        if self.face_max_judged_failures > MAX_FACE_MAX_JUDGED_FAILURES {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.face_max_judged_failures = {} is out of range (0..={MAX_FACE_MAX_JUDGED_FAILURES})",
+                self.face_max_judged_failures
+            )));
+        }
+        if !(MIN_FACE_FAILURE_WINDOW_SECS..=MAX_FACE_FAILURE_WINDOW_SECS)
+            .contains(&self.face_failure_window_secs)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.face_failure_window_secs = {} is out of range ({MIN_FACE_FAILURE_WINDOW_SECS}..={MAX_FACE_FAILURE_WINDOW_SECS})",
+                self.face_failure_window_secs
+            )));
+        }
+        if !(MIN_FACE_BUDGET_QUIET_RESET_SECS..=MAX_FACE_BUDGET_QUIET_RESET_SECS)
+            .contains(&self.face_budget_quiet_reset_secs)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.face_budget_quiet_reset_secs = {} is out of range ({MIN_FACE_BUDGET_QUIET_RESET_SECS}..={MAX_FACE_BUDGET_QUIET_RESET_SECS})",
+                self.face_budget_quiet_reset_secs
+            )));
+        }
+        let steps = &self.face_cooldown_secs;
+        if steps.is_empty() || steps.len() > MAX_FACE_COOLDOWN_STEPS {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.face_cooldown_secs has {} entries (1..={MAX_FACE_COOLDOWN_STEPS} required)",
+                steps.len()
+            )));
+        }
+        if steps
+            .iter()
+            .any(|s| !(MIN_FACE_COOLDOWN_SECS..=MAX_FACE_COOLDOWN_SECS).contains(s))
+        {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.face_cooldown_secs = {steps:?}: every entry must be in {MIN_FACE_COOLDOWN_SECS}..={MAX_FACE_COOLDOWN_SECS}"
+            )));
+        }
+        if steps.windows(2).any(|w| w[0] > w[1]) {
+            return Err(ConfigError::Invalid(format!(
+                "ipc.face_cooldown_secs = {steps:?} must not decrease (escalating cooldowns)"
             )));
         }
         Ok(())
@@ -1001,6 +1245,10 @@ impl Default for IpcConfig {
             prearm_camera: DEFAULT_PREARM_CAMERA,
             prearm_max_hold_secs: DEFAULT_PREARM_MAX_HOLD_SECS,
             max_connections_per_uid: DEFAULT_MAX_CONNECTIONS_PER_UID,
+            face_max_judged_failures: DEFAULT_FACE_MAX_JUDGED_FAILURES,
+            face_failure_window_secs: DEFAULT_FACE_FAILURE_WINDOW_SECS,
+            face_cooldown_secs: default_face_cooldown_secs(),
+            face_budget_quiet_reset_secs: DEFAULT_FACE_BUDGET_QUIET_RESET_SECS,
         }
     }
 }
@@ -1338,6 +1586,7 @@ impl Default for CameraConfig {
             native_failure_cooldown_secs: default_native_failure_cooldown_secs(),
             device_path: None,
             allow_virtual_devices: false,
+            max_frame_age_ms: DEFAULT_MAX_FRAME_AGE_MS,
         }
     }
 }
@@ -1369,6 +1618,7 @@ impl Default for AuthConfig {
             liveness_depth_threshold: default_liveness_depth_threshold(),
             proactive_unlock: default_proactive_unlock(),
             adaptive_enroll: default_adaptive_enroll(),
+            min_decision_frames: 0,
         }
     }
 }
@@ -1448,6 +1698,32 @@ impl Config {
         if !(0.0..=MAX_LUMA).contains(&brightness) {
             return Err(ConfigError::Invalid(format!(
                 "recognition.min_brightness = {brightness} is out of range (0..={MAX_LUMA})"
+            )));
+        }
+        let floor = self.decision.frame_identity_floor;
+        if floor > self.authentication.similarity_threshold {
+            return Err(ConfigError::Invalid(format!(
+                "decision.frame_identity_floor = {floor} must not exceed authentication.similarity_threshold = {}",
+                self.authentication.similarity_threshold
+            )));
+        }
+        let min_frames = self.authentication.min_decision_frames;
+        if min_frames > self.authentication.auth_frames {
+            return Err(ConfigError::Invalid(format!(
+                "authentication.min_decision_frames = {min_frames} is out of range (0 = derived, else 1..=authentication.auth_frames = {})",
+                self.authentication.auth_frames
+            )));
+        }
+        let ratio = self.recognition.multi_face_min_area_ratio;
+        if !(ratio > 0.0 && ratio <= 1.0) {
+            return Err(ConfigError::Invalid(format!(
+                "recognition.multi_face_min_area_ratio = {ratio} is out of range (0, 1]"
+            )));
+        }
+        let score = self.recognition.multi_face_min_score;
+        if !(0.0..=1.0).contains(&score) {
+            return Err(ConfigError::Invalid(format!(
+                "recognition.multi_face_min_score = {score} is out of range (0..=1)"
             )));
         }
         let prune = self.enrollment.prune_cosine;
@@ -1949,5 +2225,84 @@ mod camera_guard_tests {
             assert!(cfg.validate().is_ok());
             assert!(!cfg.ipc.prearm_camera);
         }
+    }
+    #[test]
+    fn face_budget_defaults_and_bounds() {
+        let cfg = Config::default();
+        assert_eq!(cfg.ipc.face_max_judged_failures, 5);
+        assert_eq!(cfg.ipc.face_failure_window_secs, 300);
+        assert_eq!(cfg.ipc.face_cooldown_secs, vec![30, 120, 600]);
+        assert_eq!(cfg.ipc.face_budget_quiet_reset_secs, 1_800);
+        let old: Config = toml::from_str("[ipc]\nwait_for_match_max_ms=1500\n").unwrap();
+        assert_eq!(old.ipc.face_max_judged_failures, 5);
+        assert!(old.validate().is_ok());
+        for bad in [
+            "face_max_judged_failures=101",
+            "face_failure_window_secs=9",
+            "face_failure_window_secs=86401",
+            "face_budget_quiet_reset_secs=59",
+            "face_cooldown_secs=[]",
+            "face_cooldown_secs=[0]",
+            "face_cooldown_secs=[600,30]",
+            "face_cooldown_secs=[1,2,3,4,5,6,7,8,9]",
+            "face_cooldown_secs=[86401]",
+        ] {
+            let cfg: Config = toml::from_str(&format!("[ipc]\n{bad}\n")).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("ipc.face_"), "{bad}: {err}");
+        }
+        for ok in [
+            "face_max_judged_failures=0",
+            "face_max_judged_failures=100",
+            "face_cooldown_secs=[5]",
+            "face_cooldown_secs=[30,30,120]",
+        ] {
+            let cfg: Config = toml::from_str(&format!("[ipc]\n{ok}\n")).unwrap();
+            assert!(cfg.validate().is_ok(), "{ok}");
+        }
+    }
+    #[test]
+    fn mean_mode_hardening_defaults_and_bounds() {
+        let cfg = Config::default();
+        assert_eq!(cfg.decision.frame_identity_floor, 0.30);
+        assert_eq!(cfg.authentication.min_decision_frames, 0);
+        assert_eq!(cfg.authentication.effective_min_decision_frames(), 8);
+        assert_eq!(cfg.camera.max_frame_age_ms, 1_000);
+        assert_eq!(
+            cfg.recognition.multi_face_policy,
+            crate::config::MultiFacePolicy::Reject
+        );
+        assert_eq!(cfg.recognition.multi_face_min_area_ratio, 0.25);
+        assert!(cfg.validate().is_ok());
+        let one: Config = toml::from_str("[authentication]\nauth_frames=1\n").unwrap();
+        assert_eq!(one.authentication.effective_min_decision_frames(), 1);
+        let explicit: Config =
+            toml::from_str("[authentication]\nauth_frames=10\nmin_decision_frames=10\n").unwrap();
+        assert_eq!(explicit.authentication.effective_min_decision_frames(), 10);
+        for bad in [
+            "[decision]\nframe_identity_floor=-0.1",
+            "[decision]\nframe_identity_floor=1.5",
+            "[decision]\nframe_identity_floor=0.5",
+            "[authentication]\nmin_decision_frames=11",
+            "[camera]\nmax_frame_age_ms=99",
+            "[camera]\nmax_frame_age_ms=10001",
+            "[recognition]\nmulti_face_min_area_ratio=0.0",
+            "[recognition]\nmulti_face_min_area_ratio=1.5",
+            "[recognition]\nmulti_face_min_score=1.5",
+        ] {
+            let cfg: Config = toml::from_str(bad).unwrap();
+            assert!(cfg.validate().is_err(), "{bad}");
+        }
+        for ok in [
+            "[decision]\nframe_identity_floor=0.0",
+            "[camera]\nmax_frame_age_ms=0",
+            "[camera]\nmax_frame_age_ms=100",
+            "[recognition]\nmulti_face_policy=\"largest\"",
+            "[recognition]\nmulti_face_policy=\"off\"",
+        ] {
+            let cfg: Config = toml::from_str(ok).unwrap();
+            assert!(cfg.validate().is_ok(), "{ok}");
+        }
+        assert!(toml::from_str::<Config>("[recognition]\nmulti_face_policy=\"x\"").is_err());
     }
 }

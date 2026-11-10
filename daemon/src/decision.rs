@@ -22,7 +22,28 @@ pub enum AuthOutcome {
     NoClearFace,
     LivenessRejected,
     LivenessError,
+    /// Mean mode: a frame that fed the decision did not reach the per-frame
+    /// identity floor (`[decision] frame_identity_floor`). A judged rejection.
+    IdentityFloor,
+    /// More than one face was in view (`[recognition] multi_face_policy =
+    /// "reject"`) and too few single-face frames remained. A judged rejection.
+    AmbiguousFaces,
+    /// The attempt ended with fewer judged-good frames than
+    /// `[authentication] min_decision_frames`. Not a judged failure.
+    InsufficientFrames,
+    /// Face auth for this user is suspended by the failure budget
+    /// (`[ipc] face_max_judged_failures`); no camera was opened.
+    Suspended {
+        retry_after_s: u64,
+    },
 }
+
+/// Stable code for a rejection by the per-frame identity floor.
+pub const IDENTITY_FLOOR_CODE: &str = "identity_floor";
+/// Stable code for a rejection by the multi-face gate.
+pub const AMBIGUOUS_FACES_CODE: &str = "ambiguous_faces";
+/// Stable code for an attempt that ended with too few judged-good frames.
+pub const INSUFFICIENT_FRAMES_CODE: &str = "insufficient_frames";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthDecision {
@@ -35,6 +56,15 @@ pub struct AuthDecision {
     pub frames_seen: usize,
     /// Liveness verdict; `None` when liveness was disabled or never evaluated.
     pub liveness: Option<LivenessOutcome>,
+}
+
+/// Wire reason of the `Denied` answer while face auth is suspended. The code
+/// is stable; scripts and the PAM module fall through to the password path.
+pub fn suspended_reason(retry_after_s: u64) -> String {
+    format!(
+        "face auth suspended [{}]: use the password (retry in {retry_after_s} s)",
+        crate::face_budget::FACE_SUSPENDED_CODE
+    )
 }
 
 /// Success message of `Authenticate` (wire format, unchanged).
@@ -87,6 +117,18 @@ impl AuthDecision {
             (AuthOutcome::LivenessRejected, _) => {
                 failure("Liveness check failed (not a live face).")
             }
+            (AuthOutcome::IdentityFloor, _) => failure(&format!(
+                "Face not recognized [{IDENTITY_FLOOR_CODE}]: a frame did not match the enrolled face."
+            )),
+            (AuthOutcome::AmbiguousFaces, _) => failure(&format!(
+                "More than one face in view [{AMBIGUOUS_FACES_CODE}]; only the enrolled user may be in front of the camera."
+            )),
+            (AuthOutcome::InsufficientFrames, _) => failure(&format!(
+                "Too few usable frames [{INSUFFICIENT_FRAMES_CODE}]; please try again."
+            )),
+            (AuthOutcome::Suspended { retry_after_s }, _) => Response::Denied {
+                reason: suspended_reason(retry_after_s),
+            },
             (AuthOutcome::LivenessError, _) => Response::Failure {
                 reason: format!(
                     "Liveness check unavailable [{LIVENESS_UNAVAILABLE_CODE}]: {unavailable_reason}"
@@ -100,6 +142,9 @@ impl AuthDecision {
         match (&self.outcome, self.similarity) {
             (AuthOutcome::Matched, Some(similarity)) => AttemptOutcome::Matched { similarity },
             (AuthOutcome::NotEnrolled, _) => AttemptOutcome::NotEnrolled,
+            (AuthOutcome::Suspended { retry_after_s }, _) => AttemptOutcome::Suspended {
+                retry_after_s: *retry_after_s,
+            },
             _ => AttemptOutcome::NotMatched,
         }
     }

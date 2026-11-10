@@ -16,6 +16,13 @@ use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+/// Pause after a rejected attempt before the next one starts, so a source that
+/// answers instantly (camera unavailable, suspended-then-expired budget) can
+/// never turn the retry loop into a busy loop that hammers the camera and the
+/// models. Small against an attempt (1-3 s); the failure budget
+/// (`[ipc] face_max_judged_failures`) is what bounds the number of attempts.
+pub const RETRY_PAUSE: Duration = Duration::from_millis(250);
+
 /// Result of one full decision attempt.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttemptOutcome {
@@ -26,6 +33,9 @@ pub enum AttemptOutcome {
     NotMatched,
     /// The user has no enrollment; retrying cannot help.
     NotEnrolled,
+    /// Face auth is suspended by the failure budget; retrying before
+    /// `retry_after_s` is pointless and would only be refused again.
+    Suspended { retry_after_s: u64 },
 }
 
 /// One authentication attempt for `username`. Implementations must apply the
@@ -87,6 +97,8 @@ enum Prearm {
         similarity: f32,
     },
     NotEnrolled,
+    /// The failure budget suspended face auth; nothing to hold or wait for.
+    Suspended,
     /// Hold expired, the gate closed again, or the supervisor is gone. Any
     /// result is discarded; the caller falls back to the standard loop.
     Over,
@@ -113,14 +125,16 @@ async fn prearm_phase(
     enum Done {
         Matched(f32),
         NotEnrolled,
+        Suspended,
     }
     let attempts = async {
         loop {
             match source.attempt(username).await {
                 AttemptOutcome::Matched { similarity } => return Done::Matched(similarity),
                 AttemptOutcome::NotEnrolled => return Done::NotEnrolled,
-                // Never spin: let the hold/gate branches of the select run.
-                AttemptOutcome::NotMatched => tokio::task::yield_now().await,
+                AttemptOutcome::Suspended { .. } => return Done::Suspended,
+                // Never spin: pause, and let the hold/gate branches of the select run.
+                AttemptOutcome::NotMatched => tokio::time::sleep(RETRY_PAUSE).await,
             }
         }
     };
@@ -128,6 +142,7 @@ async fn prearm_phase(
     let finish = |done: Done| match done {
         Done::Matched(similarity) => Prearm::Matched { similarity },
         Done::NotEnrolled => Prearm::NotEnrolled,
+        Done::Suspended => Prearm::Suspended,
     };
 
     // Stage A: the gate is closed. Nothing may be delivered yet.
@@ -148,6 +163,8 @@ async fn prearm_phase(
             Some(false) => return Prearm::Over,
             // NotEnrolled needs no lock to be final; a match must wait for it.
             None if matches!(held, Some(Done::NotEnrolled)) => return Prearm::NotEnrolled,
+            // A refusal needs no lock either, and nothing is delivered by it.
+            None if matches!(held, Some(Done::Suspended)) => return Prearm::Suspended,
             None => {}
         }
     }
@@ -211,6 +228,11 @@ pub async fn wait_for_match(
                         reason: NoMatchReason::NotEnrolled,
                     };
                 }
+                Prearm::Suspended => {
+                    return Response::NoMatch {
+                        reason: NoMatchReason::Suspended,
+                    };
+                }
                 Prearm::Deadline => return Response::NoMatch { reason },
                 Prearm::Over => {}
             }
@@ -257,7 +279,16 @@ pub async fn wait_for_match(
                 AttemptOutcome::NotEnrolled => {
                     return Response::NoMatch { reason: NoMatchReason::NotEnrolled };
                 }
+                AttemptOutcome::Suspended { .. } => {
+                    return Response::NoMatch { reason: NoMatchReason::Suspended };
+                }
             },
+        }
+        // Pause before the next attempt (never a back-to-back retry).
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(deadline) => return Response::NoMatch { reason },
+            _ = tokio::time::sleep(RETRY_PAUSE) => {}
         }
     }
 }
@@ -696,5 +727,107 @@ mod tests {
         )
         .await;
         assert!(matches!(r, Response::Matched { .. }));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_budget_ends_the_wait_at_once_without_retrying() {
+        let (s, calls) = script(vec![
+            AttemptOutcome::Suspended { retry_after_s: 30 },
+            AttemptOutcome::Matched { similarity: 0.9 },
+        ]);
+        let r = wait_for_match(&s, None, "alice", LONG, None, &WaitTiming::new()).await;
+        assert!(
+            matches!(
+                r,
+                Response::NoMatch {
+                    reason: NoMatchReason::Suspended
+                }
+            ),
+            "{r:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspension_during_prearm_is_final_and_needs_no_lock() {
+        let (s, calls) = script(vec![AttemptOutcome::Suspended { retry_after_s: 30 }]);
+        let (_tx, rx) = watch::channel(false);
+        let r = wait_for_match(
+            &s,
+            Some(rx),
+            "alice",
+            LONG,
+            Some(Duration::from_secs(5)),
+            &WaitTiming::new(),
+        )
+        .await;
+        assert!(
+            matches!(
+                r,
+                Response::NoMatch {
+                    reason: NoMatchReason::Suspended
+                }
+            ),
+            "{r:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A source that rejects instantly (camera unavailable) must not turn the
+    /// retry loop into a busy loop: attempts are spaced by `RETRY_PAUSE`.
+    #[tokio::test(start_paused = true)]
+    async fn rejected_attempts_are_spaced_not_back_to_back() {
+        struct Instant_(Arc<AtomicUsize>);
+        #[async_trait]
+        impl DecisionSource for Instant_ {
+            async fn attempt(&self, _u: &str) -> AttemptOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                AttemptOutcome::NotMatched
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let src = Instant_(calls.clone());
+        let r = wait_for_match(
+            &src,
+            None,
+            "alice",
+            Duration::from_secs(5),
+            None,
+            &WaitTiming::new(),
+        )
+        .await;
+        assert!(matches!(r, Response::NoMatch { .. }));
+        // At least 100 ms between attempts, independent of the constant's value.
+        let max = 5_000 / 100;
+        let n = calls.load(Ordering::SeqCst);
+        assert!(n >= 2 && n <= max, "{n} attempts in 5 s (max {max})");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejected_attempts_in_prearm_are_spaced_too() {
+        struct Instant_(Arc<AtomicUsize>);
+        #[async_trait]
+        impl DecisionSource for Instant_ {
+            async fn attempt(&self, _u: &str) -> AttemptOutcome {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                AttemptOutcome::NotMatched
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let src = Instant_(calls.clone());
+        let (_tx, rx) = watch::channel(false);
+        let r = wait_for_match(
+            &src,
+            Some(rx),
+            "alice",
+            Duration::from_secs(5),
+            Some(Duration::from_secs(5)),
+            &WaitTiming::new(),
+        )
+        .await;
+        assert!(matches!(r, Response::NoMatch { .. }));
+        // At least 100 ms between attempts, independent of the constant's value.
+        let max = 5_000 / 100;
+        let n = calls.load(Ordering::SeqCst);
+        assert!(n >= 2 && n <= max, "{n} attempts in 5 s (max {max})");
     }
 }

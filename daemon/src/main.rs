@@ -46,6 +46,9 @@ pub struct DaemonState {
     pub locked: Option<tokio::sync::watch::Receiver<bool>>,
     /// Per-user suspension of the sudo profile (`[pam.sudo]`).
     pub sudo_guard: Arc<doormand::sudo_policy::SudoGuard>,
+    /// Failure budget and cooldown of face auth, shared by every entry point
+    /// (`[ipc] face_*`).
+    pub face_budget: Arc<doormand::face_budget::FaceBudget>,
     /// On-demand camera capture leases. IPC operations that need live frames
     /// (enroll, `test`/PAM auth) increment this; the camera gate keeps the camera ON
     /// while it is > 0, so capture works even when the screen is unlocked and the
@@ -514,6 +517,9 @@ async fn main() -> Result<()> {
         sudo_guard: Arc::new(doormand::sudo_policy::SudoGuard::new(
             config.pam.sudo.max_failures,
             std::time::Duration::from_secs(config.pam.sudo.suspend_secs),
+        )),
+        face_budget: Arc::new(doormand::face_budget::FaceBudget::new(
+            doormand::face_budget::FaceBudgetSettings::from_config(&config.ipc),
         )),
         capture_requests: capture_requests.clone(),
     };

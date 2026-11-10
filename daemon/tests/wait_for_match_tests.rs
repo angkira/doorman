@@ -251,7 +251,9 @@ async fn own_user_gets_exactly_one_matched_and_no_further_attempts() {
 #[tokio::test]
 async fn unmatched_wait_ends_with_timeout() {
     let h = start(self_trusting_cfg(), my_uid(), Mode::Never);
-    let r = exchange(&h.sock, &wait_line("alice", 100)).await;
+    // Longer than two retry pauses, so several attempts fit.
+    let wait_ms = (unlock_wait::RETRY_PAUSE * 3).as_millis() as u64;
+    let r = exchange(&h.sock, &wait_line("alice", wait_ms)).await;
     assert!(
         matches!(
             r.as_slice(),
@@ -313,8 +315,9 @@ async fn each_call_counts_once_against_the_rate_limit() {
     };
     let h = start(cfg, my_uid(), Mode::Never);
     // Many internal attempts per call, but only one rate-limit hit each.
+    let wait_ms = (unlock_wait::RETRY_PAUSE * 3).as_millis() as u64;
     for _ in 0..2 {
-        let r = exchange(&h.sock, &wait_line("alice", 60)).await;
+        let r = exchange(&h.sock, &wait_line("alice", wait_ms)).await;
         assert!(matches!(r.as_slice(), [Response::NoMatch { .. }]), "{r:?}");
     }
     assert!(h.attempts.load(Ordering::SeqCst) > 2);

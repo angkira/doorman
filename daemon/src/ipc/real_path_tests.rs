@@ -210,6 +210,9 @@ async fn build_state(
             config.pam.sudo.max_failures,
             std::time::Duration::from_secs(config.pam.sudo.suspend_secs),
         )),
+        face_budget: Arc::new(doormand::face_budget::FaceBudget::new(
+            doormand::face_budget::FaceBudgetSettings::from_config(&config.ipc),
+        )),
         capture_requests: Arc::new(AtomicUsize::new(0)),
     };
 
@@ -299,4 +302,85 @@ async fn authenticate_without_a_request_time_still_scores_the_buffered_frame() {
     camera.send_replace(Some(frame(3)));
     let decision = run_authenticate(&state, USER, None, None).await;
     assert_eq!(decision.outcome, AuthOutcome::LivenessRejected);
+}
+
+// ---------------------------------------------------------------------------
+// Failure budget (`[ipc] face_*`) through the real decision path
+// ---------------------------------------------------------------------------
+
+use doormand::face_budget::{FaceBudget, FaceBudgetSettings};
+
+fn shared_budget() -> Arc<FaceBudget> {
+    Arc::new(FaceBudget::new(FaceBudgetSettings::from_config(
+        &doorman_shared::IpcConfig::default(),
+    )))
+}
+
+/// One real attempt against `script`, accounted in the shared `budget`.
+async fn attempt_with(budget: &Arc<FaceBudget>, script: &[Scene]) -> (AuthDecision, usize, usize) {
+    let (mut state, depth_calls, _camera, _dir) = build_state(script, script.len(), 0).await;
+    state.face_budget = budget.clone();
+    let decision = run_authenticate(&state, USER, None, None).await;
+    (
+        decision,
+        depth_calls.load(Ordering::SeqCst),
+        state.capture_requests.load(Ordering::SeqCst),
+    )
+}
+
+#[tokio::test]
+async fn five_judged_failures_suspend_face_auth_before_any_camera_or_model_work() {
+    let budget = shared_budget();
+    for n in 1..=5 {
+        let (d, _, _) = attempt_with(&budget, &[LiveImpostor; 5]).await;
+        assert!(
+            doormand::face_budget::is_judged_failure(&d.outcome),
+            "attempt {n}: {:?}",
+            d.outcome
+        );
+    }
+    // Even the owner's genuine face is refused while suspended: no frames are
+    // read and no depth inference runs.
+    let (d, depth, leases) = attempt_with(&budget, &[LiveOwner; 5]).await;
+    assert!(
+        matches!(d.outcome, AuthOutcome::Suspended { retry_after_s } if (1..=30).contains(&retry_after_s)),
+        "{:?}",
+        d.outcome
+    );
+    assert_eq!((d.frames_seen, depth, leases), (0, 0, 0));
+    assert!(matches!(
+        d.into_response(),
+        doorman_shared::Response::Denied { reason } if reason.contains("face_auth_suspended")
+    ));
+}
+
+#[tokio::test]
+async fn four_failures_then_a_match_reset_the_budget() {
+    let budget = shared_budget();
+    for _ in 0..4 {
+        attempt_with(&budget, &[LiveImpostor; 5]).await;
+    }
+    let (d, _, _) = attempt_with(&budget, &[LiveOwner; 5]).await;
+    assert_eq!(d.outcome, AuthOutcome::Matched);
+    // Four more failures do not suspend: the match wiped the earlier four.
+    for _ in 0..4 {
+        attempt_with(&budget, &[LiveImpostor; 5]).await;
+    }
+    let (d, _, _) = attempt_with(&budget, &[LiveOwner; 5]).await;
+    assert_eq!(d.outcome, AuthOutcome::Matched);
+}
+
+#[tokio::test]
+async fn a_disabled_budget_never_suspends() {
+    let budget = Arc::new(FaceBudget::new(FaceBudgetSettings::from_config(
+        &doorman_shared::IpcConfig {
+            face_max_judged_failures: 0,
+            ..Default::default()
+        },
+    )));
+    for _ in 0..8 {
+        attempt_with(&budget, &[LiveImpostor; 5]).await;
+    }
+    let (d, _, _) = attempt_with(&budget, &[LiveOwner; 5]).await;
+    assert_eq!(d.outcome, AuthOutcome::Matched);
 }

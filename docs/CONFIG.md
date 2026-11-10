@@ -42,6 +42,7 @@ or directory is group/world-writable.
 | `auth_frames` | `10` |
 | `liveness_depth_threshold` | `0.05` |
 | `liveness_enabled` | `true` |
+| `min_decision_frames` | `0` |
 | `proactive_unlock` | `false` |
 | `similarity_threshold` | `0.4` |
 | `timeout_secs` | `3` |
@@ -58,6 +59,7 @@ or directory is group/world-writable.
 | `fourcc` | `unset` |
 | `fps` | `30` |
 | `height` | `720` |
+| `max_frame_age_ms` | `1000` |
 | `native_failure_cooldown_secs` | `600` |
 | `native_first_frame_timeout_ms` | `1500` |
 | `native_warmup_frames` | `3` |
@@ -101,6 +103,7 @@ or directory is group/world-writable.
 |---|---|
 | `accept_n` | `3` |
 | `flip_tta` | `false` |
+| `frame_identity_floor` | `0.3` |
 | `mode` | `"mean"` |
 | `template_score` | `"max"` |
 | `window_m` | `5` |
@@ -118,6 +121,10 @@ or directory is group/world-writable.
 | Key | Default |
 |---|---|
 | `admin_uids` | `[]` |
+| `face_budget_quiet_reset_secs` | `1800` |
+| `face_cooldown_secs` | `[30,120,600]` |
+| `face_failure_window_secs` | `300` |
+| `face_max_judged_failures` | `5` |
 | `max_auth_attempts_per_minute` | `20` |
 | `max_connections_per_uid` | `8` |
 | `prearm_camera` | `true` |
@@ -201,6 +208,9 @@ or directory is group/world-writable.
 | `min_brightness` | `0.0` |
 | `min_face_area_frac` | `0.02` |
 | `min_sharpness` | `8.0` |
+| `multi_face_min_area_ratio` | `0.25` |
+| `multi_face_min_score` | `0.75` |
+| `multi_face_policy` | `"reject"` |
 
 ## `[telemetry]`
 

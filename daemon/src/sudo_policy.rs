@@ -41,6 +41,10 @@ pub mod code {
     pub const NO_FRAMES: &str = "no_frames";
     pub const CAMERA_UNAVAILABLE: &str = "camera_unavailable";
     pub const NOT_ENROLLED: &str = "not_enrolled";
+    pub const IDENTITY_FLOOR: &str = crate::decision::IDENTITY_FLOOR_CODE;
+    pub const AMBIGUOUS_FACES: &str = crate::decision::AMBIGUOUS_FACES_CODE;
+    pub const INSUFFICIENT_FRAMES: &str = crate::decision::INSUFFICIENT_FRAMES_CODE;
+    pub const FACE_SUSPENDED: &str = crate::face_budget::FACE_SUSPENDED_CODE;
 }
 
 /// Settings of the strict profile, resolved from the config.
@@ -214,6 +218,10 @@ pub fn outcome_code(outcome: &AuthOutcome) -> &'static str {
         AuthOutcome::NoClearFace => code::NO_CLEAR_FACE,
         AuthOutcome::LivenessRejected => code::LIVENESS_REJECTED,
         AuthOutcome::LivenessError => code::LIVENESS_UNAVAILABLE,
+        AuthOutcome::IdentityFloor => code::IDENTITY_FLOOR,
+        AuthOutcome::AmbiguousFaces => code::AMBIGUOUS_FACES,
+        AuthOutcome::InsufficientFrames => code::INSUFFICIENT_FRAMES,
+        AuthOutcome::Suspended { .. } => code::FACE_SUSPENDED,
     }
 }
 
@@ -227,6 +235,8 @@ pub fn counts_as_failure(outcome: &AuthOutcome) -> bool {
             | AuthOutcome::NoClearFace
             | AuthOutcome::LivenessRejected
             | AuthOutcome::LivenessError
+            | AuthOutcome::IdentityFloor
+            | AuthOutcome::AmbiguousFaces
     )
 }
 

@@ -32,6 +32,10 @@ const KILL_WAIT: Duration = Duration::from_millis(1_000);
 /// Minimum time between `WaitForMatch` calls, so a daemon that answers
 /// instantly can never turn the helper into a busy loop.
 const MIN_CALL_INTERVAL: Duration = Duration::from_millis(500);
+/// Minimum time between calls while the daemon reports face auth suspended
+/// (`NoMatchReason::Suspended`): asking sooner only gets the same refusal. The
+/// locker is untouched, so the password path is unaffected.
+const SUSPENDED_CALL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long past the requested timeout a daemon may stay silent before the
 /// call is abandoned and re-issued.
 const RESPONSE_SLACK: Duration = Duration::from_secs(10);
@@ -257,9 +261,9 @@ fn unlock(args: &WatchArgs) -> Exit {
     }
 }
 
-/// Sleep out the rest of `MIN_CALL_INTERVAL`, returning early if the locker dies.
-fn throttle(started: Instant, pid: i32) {
-    while started.elapsed() < MIN_CALL_INTERVAL && process_alive(pid) {
+/// Sleep out the rest of `interval`, returning early if the locker dies.
+fn throttle(started: Instant, interval: Duration, pid: i32) {
+    while started.elapsed() < interval && process_alive(pid) {
         std::thread::sleep(EXIT_POLL);
     }
 }
@@ -288,6 +292,7 @@ pub fn run(args: &WatchArgs) -> Exit {
 
     loop {
         let started = Instant::now();
+        let mut interval = MIN_CALL_INTERVAL;
         match wait_for_match_once(args) {
             Err(why) => {
                 log!("daemon unreachable: {why}; leaving the locker alone");
@@ -313,6 +318,12 @@ pub fn run(args: &WatchArgs) -> Exit {
                 Response::NoMatch {
                     reason: NoMatchReason::Timeout | NoMatchReason::NotArmed,
                 } => {}
+                Response::NoMatch {
+                    reason: NoMatchReason::Suspended,
+                } => {
+                    log!("face auth is suspended after failed attempts; the password still works");
+                    interval = SUSPENDED_CALL_INTERVAL;
+                }
                 Response::NoMatch {
                     reason: NoMatchReason::NotEnrolled,
                 } => {
@@ -340,7 +351,7 @@ pub fn run(args: &WatchArgs) -> Exit {
                 }
             },
         }
-        throttle(started, pid);
+        throttle(started, interval, pid);
         if !process_alive(pid) {
             log!("locker pid {pid} exited before any match");
             return Exit::LockerGone;

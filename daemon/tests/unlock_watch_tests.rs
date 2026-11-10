@@ -318,3 +318,26 @@ fn pid_that_is_not_the_expected_locker_is_never_signalled() {
         "must refuse before asking the daemon"
     );
 }
+
+/// A suspended face auth leaves the locker alone (the password still works),
+/// and the helper asks again only after a pause, not in a tight loop.
+#[test]
+fn suspended_face_auth_leaves_the_locker_alone_and_backs_off() {
+    let mut locker = Locker::spawn(false);
+    let daemon = FakeDaemon::start(vec![no_match("suspended"), matched("alice")]);
+    let started = Instant::now();
+    let out = run_watch(
+        &daemon.socket,
+        locker.pid(),
+        &["--locker-name", LOCKER_COMM],
+    );
+    assert_eq!(code(&out), EXIT_UNLOCKED, "{}", stderr(&out));
+    assert!(locker.wait_exit(Duration::from_secs(2)));
+    assert_eq!(daemon.requests.lock().unwrap().len(), 2);
+    assert!(
+        started.elapsed() >= Duration::from_secs(4),
+        "the helper must pause while suspended, took {:?}",
+        started.elapsed()
+    );
+    assert!(stderr(&out).contains("suspended"), "{}", stderr(&out));
+}
