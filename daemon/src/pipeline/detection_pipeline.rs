@@ -1,5 +1,5 @@
 use super::types::{DetectionResult, Face, RawFrame};
-use crate::{ml::MLPipeline, debug_stream::DebugStreamBroadcaster};
+use crate::{debug_stream::DebugStreamBroadcaster, ml::MLPipeline};
 use doorman_shared::StreamMessage;
 use image::GenericImageView;
 use std::sync::Arc;
@@ -63,8 +63,8 @@ pub async fn run_detection_pipeline(
                     // and is the AUTH-only anti-spoofing check (ipc::handle_authenticate).
                     // Preview is a display overlay, not an unlock decision — running
                     // depth here made it crawl (~2 fps) with rare recognition.
-                    match ml.detect_face(&*frame).await {
-                        Ok(Some(face)) => match ml.extract_embedding(&*frame, &face).await {
+                    match ml.detect_face(&frame).await {
+                        Ok(Some(face)) => match ml.extract_embedding(&frame, &face).await {
                             Ok(emb) => Ok(Some((face, emb))),
                             Err(e) => Err(e),
                         },
@@ -73,14 +73,15 @@ pub async fn run_detection_pipeline(
                     }
                 } else {
                     // Fast detection only (no embedding)
-                    match ml.detect_only(&*frame).await {
+                    match ml.detect_only(&frame).await {
                         Ok(Some(face)) => Ok(Some((face, Vec::new()))), // Empty embedding
                         Ok(None) => Ok(None),
                         Err(e) => Err(e),
                     }
                 }
             })
-        }).await;
+        })
+        .await;
 
         // Unwrap the nested Result from spawn_blocking
         let result = match result {
@@ -89,9 +90,14 @@ pub async fn run_detection_pipeline(
                 warn!("spawn_blocking join error on frame {}: {}", sequence, e);
                 let (camera_width, camera_height) = camera_dimensions;
                 let _ = result_tx.try_send(DetectionResult {
-                    sequence, face: None, embedding: None,
-                    processing_time: start.elapsed(), frame_width: camera_width, frame_height: camera_height,
-                    frame: None, ml_face: None,
+                    sequence,
+                    face: None,
+                    embedding: None,
+                    processing_time: start.elapsed(),
+                    frame_width: camera_width,
+                    frame_height: camera_height,
+                    frame: None,
+                    ml_face: None,
                 });
                 continue;
             }
@@ -166,29 +172,36 @@ pub async fn run_detection_pipeline(
             let w_px = w_norm * camera_width as f32;
             let h_px = h_norm * camera_height as f32;
 
-            let bbox_pixels = (
-                x_px as u32,
-                y_px as u32,
-                w_px as u32,
-                h_px as u32,
+            let bbox_pixels = (x_px as u32, y_px as u32, w_px as u32, h_px as u32);
+            debug!(
+                "Face bbox normalized: x={:.3}, y={:.3}, w={:.3}, h={:.3}",
+                x_norm, y_norm, w_norm, h_norm
             );
-            debug!("Face bbox normalized: x={:.3}, y={:.3}, w={:.3}, h={:.3}", x_norm, y_norm, w_norm, h_norm);
-            debug!("Converted to pixels ({}x{}): x={:.1}, y={:.1}, w={:.1}, h={:.1}", camera_width, camera_height, x_px, y_px, w_px, h_px);
+            debug!(
+                "Converted to pixels ({}x{}): x={:.1}, y={:.1}, w={:.1}, h={:.1}",
+                camera_width, camera_height, x_px, y_px, w_px, h_px
+            );
             debug!("  Top-left corner: ({:.1}, {:.1})", x_px, y_px);
-            debug!("  Bottom-right corner: ({:.1}, {:.1})", x_px + w_px, y_px + h_px);
-            info!("Broadcasting detection: bbox=({}, {}, {}, {}) = top_left + size, confidence={:.3}",
-                bbox_pixels.0, bbox_pixels.1, bbox_pixels.2, bbox_pixels.3, face.confidence);
+            debug!(
+                "  Bottom-right corner: ({:.1}, {:.1})",
+                x_px + w_px,
+                y_px + h_px
+            );
+            info!(
+                "Broadcasting detection: bbox=({}, {}, {}, {}) = top_left + size, confidence={:.3}",
+                bbox_pixels.0, bbox_pixels.1, bbox_pixels.2, bbox_pixels.3, face.confidence
+            );
             bc.broadcast(StreamMessage::Detection {
                 timestamp_ms: timestamp.elapsed().as_millis() as u64,
                 detection: doorman_shared::DetectionInfo {
                     bbox: Some(bbox_pixels),
                     frame_size: Some(camera_dimensions),
                     confidence: Some(face.confidence),
-                    recognized_user: None,  // Will be set by recognition pipeline
+                    recognized_user: None, // Will be set by recognition pipeline
                     similarity: None,
                     frame_jpeg_base64: None,
                 },
-                system_locked: false,  // Will be updated by recognition pipeline
+                system_locked: false, // Will be updated by recognition pipeline
                 processing_time_ms: processing_time.as_millis() as u32,
             });
         }
@@ -202,7 +215,7 @@ pub async fn run_detection_pipeline(
         // On failure we still forward the detection (box keeps tracking) but
         // drop the embedding so it never enters the aggregation window.
         let mut embedding = Some(embedding);
-        if need_embedding && embedding.as_ref().map_or(false, |e| !e.is_empty()) {
+        if need_embedding && embedding.as_ref().is_some_and(|e| !e.is_empty()) {
             let (_, _, w_norm, h_norm) = face.bbox;
             let area_frac = (w_norm * h_norm).abs();
             let area_ok = min_face_area_frac <= 0.0 || area_frac >= min_face_area_frac;
@@ -221,7 +234,10 @@ pub async fn run_detection_pipeline(
             };
 
             if !(area_ok && sharp_ok) {
-                debug!("Quality gate rejected frame {} (dropping embedding)", sequence);
+                debug!(
+                    "Quality gate rejected frame {} (dropping embedding)",
+                    sequence
+                );
                 embedding = None;
             }
         }
@@ -231,7 +247,7 @@ pub async fn run_detection_pipeline(
         // embedding frames, so the recognition stage can run the FATAL depth
         // liveness gate before a proactive unlock (Stage B). Detect-only / dropped
         // frames carry neither and can never trigger an unlock.
-        let carry_liveness = embedding.as_ref().map_or(false, |e| !e.is_empty());
+        let carry_liveness = embedding.as_ref().is_some_and(|e| !e.is_empty());
         let (camera_width, camera_height) = camera_dimensions;
         let _ = result_tx.try_send(DetectionResult {
             sequence,
@@ -243,8 +259,16 @@ pub async fn run_detection_pipeline(
             processing_time,
             frame_width: camera_width,
             frame_height: camera_height,
-            frame: if carry_liveness { Some(frame_for_quality.clone()) } else { None },
-            ml_face: if carry_liveness { Some(face.clone()) } else { None },
+            frame: if carry_liveness {
+                Some(frame_for_quality.clone())
+            } else {
+                None
+            },
+            ml_face: if carry_liveness {
+                Some(face.clone())
+            } else {
+                None
+            },
         });
     }
 

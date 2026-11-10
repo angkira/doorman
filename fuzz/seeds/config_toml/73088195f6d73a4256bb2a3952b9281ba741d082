@@ -1,0 +1,17 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lioorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camerrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in cod= 256
+image_height = 256
+filer_type = , MIT
+#   - Recogn

@@ -1,0 +1,8 @@
+[ipc]
+admin_uids = [# doorman Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode ov?errides with XDG.
+socal-binary
+                    """"""" [0, 10,0]eocn555555555 vdeo:ax_co l

@@ -69,21 +69,9 @@ fn main() -> Result<()> {
     let user_mode = std::env::args().any(|a| a == "--user");
     let config_file = arg_value("--config").map(PathBuf::from);
 
-    // Load config (same precedence as the daemon: --config > DOORMAN_CONFIG >
-    // standard locations), so models_dir / socket dir match the daemon.
-    let mut config = if let Some(p) = config_file {
-        Config::load_from(&p).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load --config: {} — using defaults", e);
-            Config::default()
-        })
-    } else if let Ok(p) = std::env::var("DOORMAN_CONFIG") {
-        Config::load_from(&PathBuf::from(p)).unwrap_or_else(|e| {
-            tracing::warn!("Failed to load DOORMAN_CONFIG: {} — using defaults", e);
-            Config::default()
-        })
-    } else {
-        Config::load().unwrap_or_default()
-    };
+    // Load config (same precedence and root trust rules as the daemon).
+    let mut config = Config::load_with(config_file.as_deref())
+        .map_err(|e| anyhow::anyhow!("refusing to start: invalid configuration: {e}"))?;
 
     // Mirror the daemon's --user path rewriting so the sidecar's socket + models
     // dir land in the SAME place the daemon expects.
@@ -95,8 +83,10 @@ fn main() -> Result<()> {
                 .to_string();
         }
         if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-            config.daemon.data_dir =
-                PathBuf::from(data).join("doorman").to_string_lossy().to_string();
+            config.daemon.data_dir = PathBuf::from(data)
+                .join("doorman")
+                .to_string_lossy()
+                .to_string();
         } else if let Some(home) = std::env::var_os("HOME") {
             config.daemon.data_dir = PathBuf::from(home)
                 .join(".local/share/doorman")
@@ -118,15 +108,14 @@ fn main() -> Result<()> {
     let default_sock = {
         let cmd = std::path::Path::new(&config.daemon.socket_path);
         match cmd.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => dir
-                .join("doorman-depth.sock")
-                .to_string_lossy()
-                .to_string(),
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                dir.join("doorman-depth.sock").to_string_lossy().to_string()
+            }
             _ => depth_ipc::DEFAULT_DEPTH_SOCKET.to_string(),
         }
     };
-    let socket_path = arg_value("--socket")
-        .unwrap_or_else(|| depth_ipc::resolve_socket_path(&default_sock));
+    let socket_path =
+        arg_value("--socket").unwrap_or_else(|| depth_ipc::resolve_socket_path(&default_sock));
 
     // Depth EP: --depth-ep flag > DOORMAN_DEPTH_EP env > "cpu" default.
     let depth_ep = arg_value("--depth-ep")
@@ -183,7 +172,7 @@ fn run(config: &Config, socket_path: &str, depth_ep: &str) -> Result<()> {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
-                if let Err(e) = handle_conn(stream, depth.as_ref()) {
+                if let Err(e) = handle_conn(stream, depth.as_ref(), &config.liveness) {
                     tracing::warn!("connection error: {}", e);
                 }
             }
@@ -197,6 +186,7 @@ fn run(config: &Config, socket_path: &str, depth_ep: &str) -> Result<()> {
 fn handle_conn(
     mut stream: UnixStream,
     depth: Option<&DepthSession>,
+    liveness: &doorman_shared::config::LivenessConfig,
 ) -> Result<()> {
     use doormand::ml::Face;
 
@@ -233,11 +223,12 @@ fn handle_conn(
         confidence: 1.0,
         frame_dimensions: (req.width, req.height),
         landmarks: None,
+        other_faces: Vec::new(),
     };
 
     let resp = match depth {
         None => depth_ipc::encode_resp(depth_ipc::RESP_NONE, 0.0),
-        Some(session) => match ort_backend::compute_depth_relief(session, &img, &face) {
+        Some(session) => match ort_backend::compute_depth_relief(session, &img, &face, liveness) {
             Ok(relief) => {
                 tracing::debug!("relief={:.4} for bbox={:?}", relief, req.bbox);
                 depth_ipc::encode_resp(depth_ipc::RESP_OK, relief)
@@ -255,7 +246,5 @@ fn handle_conn(
 
 #[cfg(not(feature = "_ort"))]
 fn run(_config: &Config, _socket_path: &str, _depth_ep: &str) -> Result<()> {
-    anyhow::bail!(
-        "doorman-depthd built without an ORT backend. Build with --features backend-ort"
-    )
+    anyhow::bail!("doorman-depthd built without an ORT backend. Build with --features backend-ort")
 }

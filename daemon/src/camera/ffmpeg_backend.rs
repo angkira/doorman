@@ -14,6 +14,7 @@
 //! permission, otherwise ffmpeg will error out when opening the device.
 
 use anyhow::{anyhow, Result};
+use doorman_shared::config::CameraFourcc;
 use doorman_shared::Config;
 use image::{DynamicImage, ImageBuffer, Rgb};
 use std::io::Read;
@@ -39,11 +40,61 @@ impl FfmpegCamera {
         which_ffmpeg().is_some()
     }
 
-    fn spawn_capture(width: u32, height: u32, fps: u32, device_index: u32) -> Result<Child> {
+    /// Resolve the configured node and refuse virtual devices (best effort:
+    /// sysfs only, see `device_guard`). macOS selects by AVFoundation index and
+    /// has no sysfs, so only Linux is checked.
+    fn checked_device_index(config: &Config) -> Result<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            use super::device_guard::{
+                enforce_sysfs, resolve_node, RealNodeFs, DEV_ROOT, SYSFS_VIDEO4LINUX,
+            };
+            let node = resolve_node(
+                config.camera.device_path.as_deref(),
+                config.camera.device_index,
+                std::path::Path::new(DEV_ROOT),
+                &RealNodeFs,
+            )?;
+            enforce_sysfs(
+                &node,
+                std::path::Path::new(SYSFS_VIDEO4LINUX),
+                config.camera.allow_virtual_devices,
+            )?;
+            Ok(node.index)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(config.camera.device_index)
+        }
+    }
+
+    fn spawn_capture(
+        width: u32,
+        height: u32,
+        fps: u32,
+        device_index: u32,
+        fourcc: Option<CameraFourcc>,
+    ) -> Result<Child> {
         let ffmpeg = which_ffmpeg().ok_or_else(|| {
             anyhow!("ffmpeg CLI not found on PATH (macOS: `brew install ffmpeg`)")
         })?;
 
+        let mut cmd = Self::capture_command(&ffmpeg, width, height, fps, device_index, fourcc)?;
+        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+
+        debug!("Spawning ffmpeg live capture: {:?}", cmd);
+        cmd.spawn()
+            .map_err(|e| anyhow!("Failed to spawn ffmpeg: {}", e))
+    }
+
+    fn capture_command(
+        ffmpeg: &str,
+        width: u32,
+        height: u32,
+        fps: u32,
+        device_index: u32,
+        fourcc: Option<CameraFourcc>,
+    ) -> Result<Command> {
         let mut cmd = Command::new(ffmpeg);
 
         // Platform-gated input device.
@@ -62,9 +113,9 @@ impl FfmpegCamera {
 
         #[cfg(target_os = "linux")]
         {
-            cmd.arg("-f")
-                .arg("v4l2")
-                .arg("-framerate")
+            cmd.arg("-f").arg("v4l2");
+            cmd.args(v4l2_input_format_args(fourcc));
+            cmd.arg("-framerate")
                 .arg(fps.to_string())
                 .arg("-video_size")
                 .arg(format!("{}x{}", width, height))
@@ -74,7 +125,7 @@ impl FfmpegCamera {
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (fps, device_index);
+            let _ = (fps, device_index, fourcc);
             return Err(anyhow!(
                 "ffmpeg live capture is only wired for macOS and Linux"
             ));
@@ -87,13 +138,8 @@ impl FfmpegCamera {
             .arg("rgb24")
             .arg("-f")
             .arg("rawvideo")
-            .arg("pipe:1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-
-        debug!("Spawning ffmpeg live capture: {:?}", cmd);
-        cmd.spawn()
-            .map_err(|e| anyhow!("Failed to spawn ffmpeg: {}", e))
+            .arg("pipe:1");
+        Ok(cmd)
     }
 }
 
@@ -108,14 +154,15 @@ impl CameraBackend for FfmpegCamera {
         let width = config.camera.width;
         let height = config.camera.height;
         let fps = config.camera.fps;
-        let device_index = config.camera.device_index;
+        let device_index = Self::checked_device_index(config)?;
 
         info!(
             "Initializing ffmpeg webcam backend (device {}, {}x{} @ {}fps)",
             device_index, width, height, fps
         );
 
-        let process = Self::spawn_capture(width, height, fps, device_index)?;
+        let fourcc = config.camera.fourcc()?;
+        let process = Self::spawn_capture(width, height, fps, device_index, fourcc)?;
 
         Ok(Self {
             width,
@@ -180,6 +227,18 @@ impl Drop for FfmpegCamera {
     }
 }
 
+/// ffmpeg V4L2 input-side flags selecting the device pixel format. MJPEG is
+/// decoded by ffmpeg, so the output stays rawvideo rgb24 and nothing downstream
+/// changes. No flag is added for YUYV or an unset fourcc (ffmpeg's own default,
+/// the historical behaviour).
+#[cfg(target_os = "linux")]
+fn v4l2_input_format_args(fourcc: Option<CameraFourcc>) -> Vec<&'static str> {
+    match fourcc {
+        Some(CameraFourcc::Mjpeg) => vec!["-input_format", "mjpeg"],
+        Some(CameraFourcc::Yuyv) | None => Vec::new(),
+    }
+}
+
 /// Locate the `ffmpeg` executable. Honors an explicit PATH lookup plus the
 /// common Homebrew location on macOS where login-shell PATH may not apply.
 fn which_ffmpeg() -> Option<String> {
@@ -194,11 +253,52 @@ fn which_ffmpeg() -> Option<String> {
     }
 
     // 2. Common fixed locations.
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"] {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ] {
         if std::path::Path::new(candidate).exists() {
             return Some(candidate.to_string());
         }
     }
 
     None
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn args(fourcc: Option<CameraFourcc>) -> Vec<String> {
+        FfmpegCamera::capture_command("ffmpeg", 640, 480, 30, 0, fourcc)
+            .unwrap()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn position(args: &[String], needle: &str) -> usize {
+        args.iter().position(|a| a == needle).unwrap()
+    }
+
+    #[test]
+    fn mjpeg_puts_input_flags_before_input_and_keeps_rgb24_output() {
+        let a = args(Some(CameraFourcc::Mjpeg));
+        let input = position(&a, "-i");
+        assert_eq!(a[position(&a, "-input_format") + 1], "mjpeg");
+        assert!(position(&a, "-input_format") < input);
+        assert_eq!(a[position(&a, "-video_size") + 1], "640x480");
+        assert!(position(&a, "-video_size") < input);
+        assert_eq!(a[position(&a, "-framerate") + 1], "30");
+        assert!(position(&a, "-framerate") < input);
+        assert_eq!(a[position(&a, "-pix_fmt") + 1], "rgb24");
+        assert_eq!(a[position(&a, "-f") + 1], "v4l2");
+    }
+
+    #[test]
+    fn unset_or_yuyv_fourcc_adds_no_input_format() {
+        assert!(!args(None).contains(&"-input_format".to_string()));
+        assert!(!args(Some(CameraFourcc::Yuyv)).contains(&"-input_format".to_string()));
+    }
 }

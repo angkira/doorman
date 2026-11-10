@@ -1,11 +1,27 @@
 // Public modules for integration tests and examples
+pub mod calibration;
 pub mod camera;
+pub mod config_edit;
 pub mod dataset;
+pub mod dataset_purge;
+pub mod decision;
+pub mod face_budget;
+pub mod frame_policy;
+pub mod fuzz_entry;
+pub mod ipc_policy;
+pub mod liveness;
 pub mod ml;
+pub mod model_integrity;
+pub mod pad_protocol;
+pub mod pad_stats;
 pub mod storage;
+pub mod sudo_policy;
+pub mod test_report;
+pub mod timing;
 pub mod training;
+pub mod unlock_wait;
 
 // Re-export commonly used types
 pub use camera::Camera;
-pub use ml::{MLPipeline, Face};
+pub use ml::{Face, MLPipeline};
 pub use storage::Storage;

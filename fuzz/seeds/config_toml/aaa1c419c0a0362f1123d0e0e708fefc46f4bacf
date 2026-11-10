@@ -1,0 +1,27 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels.recognizer_input_height) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.[authentication]
+similarity_threshold ='redential policy (SO_PEERCRED). See docsi/cs-epcur=ty.md.
+# Extra nativened by the `doorman` usermodels.recognizer_input_height) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.[authentication]
+similarity_threshold ='redential policy (SO_PEERCRED). See docsi/cs-epcur=ty.md.
+# Extra native resolith FFmpeg test)
+height = 262
+fps = 30
+# video_file = "data/test.mp4"  #  = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold ='redential policy (SO_PEERCRED). See docs/ipc-secur=ty.md.
+auth_frames = 10
+timeout_secs = *
+
+[ipc]
+# IPC peer-credoren

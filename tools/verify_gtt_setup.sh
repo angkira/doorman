@@ -18,7 +18,7 @@ echo ""
 echo "2. TTM Configuration:"
 if [ -f /etc/modprobe.d/ttm.conf ]; then
     echo "   ✓ /etc/modprobe.d/ttm.conf exists"
-    cat /etc/modprobe.d/ttm.conf | grep -v "^#"
+    grep -v "^#" /etc/modprobe.d/ttm.conf
 else
     echo "   ✗ /etc/modprobe.d/ttm.conf NOT found"
     echo "   Run: ./tools/enable_gtt_memory.sh"
@@ -56,6 +56,7 @@ echo ""
 # Check ONNX Runtime
 echo "6. ONNX Runtime with ROCm:"
 if [ -d "$HOME/Home/doorman/.venv" ]; then
+    # shellcheck disable=SC1091 # per-user venv path unknown at lint time
     source "$HOME/Home/doorman/.venv/bin/activate"
     python3 -c "import onnxruntime as ort; print('   ✓ ONNX Runtime version:', ort.__version__); print('   Available providers:', ort.get_available_providers())" 2>/dev/null || echo "   ✗ Failed to import onnxruntime"
 else

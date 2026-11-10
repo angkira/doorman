@@ -59,6 +59,7 @@ echo "  features: $features"
 echo "  staging: $pkgdir"
 
 cargo build \
+  --locked \
   --release \
   -p doormand \
   --no-default-features \
@@ -66,7 +67,7 @@ cargo build \
   --bin doormand \
   --bin doorman
 
-cargo build --release -p pam_doorman
+cargo build --locked --release -p pam_doorman
 
 install -d -m 0755 "$pkgdir/DEBIAN"
 install -d -m 0755 "$pkgdir/usr/bin"

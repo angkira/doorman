@@ -1,0 +1,19 @@
+# doorman Configuration
+
+[daemon]
+# ableroup = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame pmed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

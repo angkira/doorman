@@ -1,0 +1,21 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=door= 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% false-accept under Phase-1 aggregation. See docs/ts.
+#
+# NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA 4.0 (n video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backe retained for forward-compat and are not consume cap is 64).
+max_connections_per_uid = 8
+# Upperinput_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

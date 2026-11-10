@@ -19,9 +19,21 @@ debug_mode   = false
 # V4L2 device index (/dev/video0 -> 0). The lean Linux build uses the
 # camera-v4l2 or camera-gstreamer backend selected at compile time.
 device_index = 0
+# Pin the physical camera by a stable node instead of the index, e.g.
+# device_path = "/dev/v4l/by-id/usb-Vendor_Camera-video-index0"
+# Virtual devices (v4l2loopback, vivid) are refused unless this is true;
+# keep it false in production.
+allow_virtual_devices = false
 width  = 1280
 height = 720
 fps    = 30
+# "auto" = native V4L2 (accepted only after a real first frame), then ffmpeg.
+# "ffmpeg" skips the native backend; "native" disables the ffmpeg fallback.
+backend = "auto"
+# Native backend: buffers dropped after STREAMON before a frame may count (0..=10).
+# native_warmup_frames = 3
+# After a native failure, go straight to ffmpeg for this many seconds (0 = off).
+# native_failure_cooldown_secs = 600
 
 [ml]
 backend    = "ort"
@@ -50,7 +62,75 @@ min_face_area_frac   = 0.005
 # persist detector-positive raw face frames before recognition, capped here.
 logging_enabled = false
 keep_raw_frames = false
-raw_frame_bundle_size = 10
-max_capture_packs_per_day = 500
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
 raw_frame_jpeg_quality = 92
 max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+# Raw frames of SUCCESSFUL unlocks are not stored, even with keep_raw_frames = true:
+# a sharp photo of the owner from the unlocking sensor is the best replay material.
+# Set true only while collecting genuine samples for calibration.
+# capture_successful_unlocks = false
+# Automatic deletion of capture packs older than N days (at start, then daily).
+# UNSET (default) deletes nothing; 0 keeps forever. Attempt/label shards are never touched.
+# raw_frames_retention_days = 7
+
+[ipc]
+# Face unlock waiting (docs/unlock-path.md). Pre-arm starts the camera and the
+# full recognition when the unlock helper asks, in parallel with the compositor
+# finishing the lock. The result is still delivered only after the session is
+# reported locked, and only from frames captured after the request. This changes
+# timing, not the decision. Set false to keep the camera off until locked.
+# prearm_camera = true
+# Longest the camera is held without the lock being confirmed (1..=30 s).
+# prearm_max_hold_secs = 5
+# Failure budget of face auth, for every entry point incl. each lock-screen retry.
+# After this many JUDGED failures (a completed rejection; not camera errors,
+# timeouts or no face) within the window, face auth is suspended with escalating
+# cooldowns; the password always works and a match resets the budget. A person who
+# fails on purpose can switch YOUR face unlock off for the cooldown (not the password).
+# face_max_judged_failures = 5        # 0 disables, max 100
+# face_failure_window_secs = 300      # 10..=86400
+# face_cooldown_secs = [30, 120, 600] # non-decreasing, 1..=8 entries, last repeats
+# face_budget_quiet_reset_secs = 1800 # no failure for this long: start at the first cooldown
+
+# Mean-mode hardening (Round 9a); see docs/THREAT-MODEL.md "Round 9a controls".
+# [decision]
+# frame_identity_floor = 0.30   # every frame must reach this cosine alone; 0 disables
+# [authentication]
+# min_decision_frames = 0       # 0 = auth_frames - 2 (8 of 10); else 1..=auth_frames
+# [recognition]
+# multi_face_policy = "reject"  # reject | largest | off
+# multi_face_min_area_ratio = 0.25
+# multi_face_min_score = 0.75
+# [camera]
+# max_frame_age_ms = 1000       # 0 disables; else 100..=10000
+# [models]
+# allow_unverified_models = false  # true accepts model files that differ from the manifest
+# manifest_path = "/etc/doorman/models.sha256"  # extra hashes, root-owned (doorman models verify --print-manifest)
+
+# Shadow PAD logging (Round 9b-1; docs/PAD-PROTOCOL.md). Calibration data only:
+# when on, every attempt appends ONE JSON line of aggregates (similarity and depth
+# relief distribution, frame counters, quality metrics, a MiniFASNet score) to the
+# path below. No frames, embeddings or names. It never influences the decision; the
+# record and the extra MiniFASNet pass run after the decision. Turn off again by
+# setting false (or deleting the key) and restarting doormand.
+# [liveness]
+# shadow_pad_logging = false
+# [telemetry]
+# shadow_pad_log_path = "/run/doorman/shadow-pad.jsonl"   # mode 0640, rotated at timing_log_max_bytes
+
+# Calibration mode (Round 9b-2a). It is NEVER switched on from this file: a root
+# user starts it at run time with `sudo doorman calibrate`; it lasts at most
+# max_ttl_secs, is not persisted and ends with a daemon restart. While it is on,
+# the failure budget is frozen and shadow PAD logging is forced on; nothing else
+# changes. These keys only set its limits.
+# [calibration]
+# default_ttl_secs = 2700    # 45 min
+# max_ttl_secs = 7200        # 120 min (hard ceiling, cannot be raised)
+# warn_interval_secs = 300   # "CALIBRATION MODE ACTIVE" WARN log interval
+# Lock-screen attempts (WaitForMatch, pre-arm retries) are left out of the shadow
+# log unless this is true; every record has a `source` (test, sudo, lock_screen).
+# [liveness]
+# shadow_pad_include_lockscreen = false

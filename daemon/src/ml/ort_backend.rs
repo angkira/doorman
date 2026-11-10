@@ -5,9 +5,13 @@ use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "_ort")]
 use async_trait::async_trait;
 #[cfg(feature = "_ort")]
+use doorman_shared::config::{LivenessConfig, ReliefStat};
+#[cfg(feature = "_ort")]
 use doorman_shared::Config;
 #[cfg(feature = "_ort")]
 use image::DynamicImage;
+#[cfg(feature = "_ort")]
+use image::GenericImageView;
 #[cfg(feature = "_ort")]
 use ort::session::{builder::GraphOptimizationLevel, Session};
 #[cfg(feature = "_ort")]
@@ -18,8 +22,6 @@ use std::path::Path;
 use std::sync::Mutex;
 #[cfg(feature = "_ort")]
 use tracing::{info, warn};
-#[cfg(feature = "_ort")]
-use image::GenericImageView;
 
 #[cfg(feature = "_ort")]
 macro_rules! ort_try {
@@ -43,6 +45,10 @@ pub struct OrtBackend {
     depth_source: DepthSource,
     recognizer_pool: Vec<Mutex<Session>>,
     pool_index: AtomicUsize,
+    /// `[decision] flip_tta`: also embed the mirrored aligned crop and average.
+    flip_tta: bool,
+    /// `[liveness]`: depth input size and relief statistic.
+    liveness: LivenessConfig,
 }
 
 /// Source of the depth-relief PAD pass. See `OrtBackend::depth_source`.
@@ -122,8 +128,10 @@ fn rocm_runtime_has_device() -> bool {
 ///   2. `ml.gpu_uuid` names a specific GPU — we never auto-pick by index, so the
 ///      daemon can't bind an off-limits card (e.g. a dGPU) it wasn't told to use,
 ///   3. the HIP runtime actually sees that device (pre-flight).
+///
 /// Otherwise the daemon runs on CPU (logging the reason once). The decision is
 /// cached so the per-model calls don't re-log.
+///
 /// Export the config-driven GPU binding env vars BEFORE any HIP init: select the
 /// ROCm GPU by its STABLE UUID (`ml.gpu_uuid` → `ROCR_VISIBLE_DEVICES`) and apply
 /// an optional `ml.hsa_gfx_version` override. Index-independent and operator-owned
@@ -137,9 +145,17 @@ fn apply_gpu_env(config: &Config) {
     }
     if let Some(uuid) = config.ml.gpu_uuid.as_deref().filter(|s| !s.is_empty()) {
         std::env::set_var("ROCR_VISIBLE_DEVICES", uuid);
-        info!("Config gpu_uuid → ROCR_VISIBLE_DEVICES={} (ROCm bound to this GPU only)", uuid);
+        info!(
+            "Config gpu_uuid → ROCR_VISIBLE_DEVICES={} (ROCm bound to this GPU only)",
+            uuid
+        );
     }
-    if let Some(v) = config.ml.hsa_gfx_version.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(v) = config
+        .ml
+        .hsa_gfx_version
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
         std::env::set_var("HSA_OVERRIDE_GFX_VERSION", v);
         info!("Config hsa_gfx_version → HSA_OVERRIDE_GFX_VERSION={}", v);
     }
@@ -167,10 +183,32 @@ fn rocm_ep_selected(config: &Config) -> bool {
     })
 }
 
+/// Which ONNX Runtime is loaded, for startup logs and benchmark reports.
+///
+/// `backend-ort`/`-cuda` statically link the runtime that ort-sys downloads at
+/// build time (bundled); `backend-ort-rocm` loads a system libonnxruntime.so
+/// chosen via ORT_DYLIB_PATH. The build string carries the runtime's version and
+/// `/proc/self/maps` names the library file that was actually mapped (the
+/// `ort::info()` call comes first so a lazily `dlopen`ed library is loaded).
+#[cfg(feature = "_ort")]
+pub fn runtime_info() -> String {
+    let linkage = if cfg!(feature = "backend-ort-rocm") {
+        "system libonnxruntime.so (ort load-dynamic)"
+    } else {
+        "bundled (ort download-binaries)"
+    };
+    let version = ort::info();
+    format!(
+        "{linkage}; {version}; {}",
+        super::ort_probe::describe_loaded_onnxruntime()
+    )
+}
+
 #[cfg(feature = "_ort")]
 impl OrtBackend {
-        pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
+    pub fn new(models_dir: &Path, config: &Config) -> Result<Self> {
         info!("Initializing ONNX Runtime backend with session pooling...");
+        info!("ONNX Runtime: {}", runtime_info());
         info!("Device: {}", config.ml.device);
 
         // GPU-aware pool size: a single GPU session already opens its own
@@ -215,13 +253,23 @@ impl OrtBackend {
         for i in 0..pool_size {
             match Self::load_model(&liveness_path, config) {
                 Ok(model) => liveness_pool.push(Mutex::new(model)),
-                Err(e) => warn!("✗ Failed to load liveness {} session {}: {}", liveness_cfg.model_file, i, e),
+                Err(e) => warn!(
+                    "✗ Failed to load liveness {} session {}: {}",
+                    liveness_cfg.model_file, i, e
+                ),
             }
         }
         if !liveness_pool.is_empty() {
-            info!("✓ Loaded {} sessions for liveness model {}", liveness_pool.len(), liveness_cfg.model_file);
+            info!(
+                "✓ Loaded {} sessions for liveness model {}",
+                liveness_pool.len(),
+                liveness_cfg.model_file
+            );
         } else {
-            warn!("✗ Liveness model {} unavailable — liveness will be skipped", liveness_cfg.model_file);
+            warn!(
+                "✗ Liveness model {} unavailable — liveness will be skipped",
+                liveness_cfg.model_file
+            );
         }
 
         // Resolve the FATAL depth-relief PAD source.
@@ -256,9 +304,8 @@ impl OrtBackend {
             gpu
         };
         let depth_source = if is_gpu {
-            let sock = super::depth_ipc::resolve_socket_path(
-                &Self::default_depth_socket_for(config),
-            );
+            let sock =
+                super::depth_ipc::resolve_socket_path(&Self::default_depth_socket_for(config));
             info!(
                 "Depth-PAD: GPU device '{}' → using out-of-process depth sidecar at {} (in-process CPU depth co-load would SEGV under the GPU EP)",
                 config.ml.device, sock
@@ -276,19 +323,30 @@ impl OrtBackend {
             for i in 0..pool_size {
                 match Self::load_model(&depth_path, &depth_cpu_config) {
                     Ok(model) => depth_pool.push(Mutex::new(model)),
-                    Err(e) => warn!("✗ Failed to load depth-PAD {} session {}: {}", depth_cfg.model_file, i, e),
+                    Err(e) => warn!(
+                        "✗ Failed to load depth-PAD {} session {}: {}",
+                        depth_cfg.model_file, i, e
+                    ),
                 }
             }
             if !depth_pool.is_empty() {
-                info!("✓ Loaded {} in-process CPU sessions for depth-PAD model {}", depth_pool.len(), depth_cfg.model_file);
+                info!(
+                    "✓ Loaded {} in-process CPU sessions for depth-PAD model {}",
+                    depth_pool.len(),
+                    depth_cfg.model_file
+                );
             } else {
-                warn!("✗ Depth-PAD model {} unavailable — depth liveness gate will be skipped", depth_cfg.model_file);
+                warn!(
+                    "✗ Depth-PAD model {} unavailable — depth liveness gate will be skipped",
+                    depth_cfg.model_file
+                );
             }
             DepthSource::InProcess(depth_pool)
         };
 
         // Load recognizer pool
-        let recognizer_path = models_dir.join(super::model_config::RecognizerConfig::EDGEFACE.model_file);
+        let recognizer_path =
+            models_dir.join(super::model_config::RecognizerConfig::EDGEFACE.model_file);
         let mut recognizer_pool = Vec::new();
         for i in 0..pool_size {
             match Self::load_model(&recognizer_path, config) {
@@ -301,14 +359,20 @@ impl OrtBackend {
             }
         }
         if !recognizer_pool.is_empty() {
-            info!("✓ Loaded {} face recognizer sessions", recognizer_pool.len());
+            info!(
+                "✓ Loaded {} face recognizer sessions",
+                recognizer_pool.len()
+            );
         }
 
         info!(
             "ORT backend: loaded {}/{} detector, {}/{} liveness, {}/{} recognizer sessions",
-            detector_pool.len(), pool_size,
-            liveness_pool.len(), pool_size,
-            recognizer_pool.len(), pool_size
+            detector_pool.len(),
+            pool_size,
+            liveness_pool.len(),
+            pool_size,
+            recognizer_pool.len(),
+            pool_size
         );
 
         Ok(Self {
@@ -317,6 +381,8 @@ impl OrtBackend {
             depth_source,
             recognizer_pool,
             pool_index: AtomicUsize::new(0),
+            flip_tta: config.decision.flip_tta,
+            liveness: config.liveness.clone(),
         })
     }
 
@@ -329,15 +395,12 @@ impl OrtBackend {
         let cmd_sock = std::path::Path::new(&config.daemon.socket_path);
         if let Some(dir) = cmd_sock.parent() {
             if !dir.as_os_str().is_empty() {
-                return dir
-                    .join("doorman-depth.sock")
-                    .to_string_lossy()
-                    .to_string();
+                return dir.join("doorman-depth.sock").to_string_lossy().to_string();
             }
         }
         super::depth_ipc::DEFAULT_DEPTH_SOCKET.to_string()
     }
-    
+
     /// Query the depth sidecar for one frame+bbox over its Unix socket.
     ///
     /// Returns `Ok(Some(relief))` on `RESP_OK`, `Ok(None)` on `RESP_NONE` (sidecar
@@ -346,11 +409,7 @@ impl OrtBackend {
     /// (`MLPipeline::liveness_gate`) treats both `Ok(None)` and `Err` as a
     /// fail-safe REJECT when liveness is enabled, so an unreachable sidecar can
     /// never silently bypass the PAD gate.
-    fn query_depth_sidecar(
-        sock: &str,
-        image: &DynamicImage,
-        face: &Face,
-    ) -> Result<Option<f32>> {
+    fn query_depth_sidecar(sock: &str, image: &DynamicImage, face: &Face) -> Result<Option<f32>> {
         use super::depth_ipc;
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
@@ -381,7 +440,10 @@ impl OrtBackend {
         match status {
             depth_ipc::RESP_OK => Ok(Some(relief)),
             depth_ipc::RESP_NONE => Ok(None),
-            _ => Err(anyhow!("depth sidecar reported an inference error (status={})", status)),
+            _ => Err(anyhow!(
+                "depth sidecar reported an inference error (status={})",
+                status
+            )),
         }
     }
 
@@ -413,7 +475,6 @@ impl OrtBackend {
         }
     }
 
-
     fn load_model(path: &Path, config: &Config) -> Result<Session> {
         let threads = if config.ml.cpu_threads > 0 {
             config.ml.cpu_threads as usize
@@ -421,8 +482,8 @@ impl OrtBackend {
             4
         };
 
-        let builder = Session::builder()
-            .map_err(|e| anyhow!("Failed to create session builder: {}", e))?;
+        let builder =
+            Session::builder().map_err(|e| anyhow!("Failed to create session builder: {}", e))?;
         // ort 2.0.0-rc.12 targets ORT 1.24; the ROCm load-dynamic path links ORT 1.22.x
         // (the last ORT with the ROCm EP), which rejects rc.12's graph-optimization-level
         // call ("graph_optimization_level is not valid"). Apply it best-effort: on a 1.24
@@ -431,8 +492,12 @@ impl OrtBackend {
         let builder = match builder.with_optimization_level(GraphOptimizationLevel::Level3) {
             Ok(b) => b,
             Err(e) => {
-                warn!("Graph optimization level not applied (ORT runtime rejected it): {}", e);
-                Session::builder().map_err(|e| anyhow!("Failed to create session builder: {}", e))?
+                warn!(
+                    "Graph optimization level not applied (ORT runtime rejected it): {}",
+                    e
+                );
+                Session::builder()
+                    .map_err(|e| anyhow!("Failed to create session builder: {}", e))?
             }
         };
         let builder = builder
@@ -443,12 +508,11 @@ impl OrtBackend {
         #[cfg(feature = "backend-ort-cuda")]
         let builder = if config.ml.device == "cuda" || config.ml.device == "gpu" {
             info!("Configuring CUDA execution provider for {:?}", path);
-            builder.with_execution_providers([
-                ort::execution_providers::CUDA::default()
+            builder
+                .with_execution_providers([ort::execution_providers::CUDA::default()
                     .with_device_id(config.ml.gpu_device_id)
-                    .build(),
-            ])
-            .map_err(|e| anyhow!("Failed to set CUDA EP: {}", e))?
+                    .build()])
+                .map_err(|e| anyhow!("Failed to set CUDA EP: {}", e))?
         } else {
             builder
         };
@@ -469,12 +533,11 @@ impl OrtBackend {
                 info!("Set HSA_OVERRIDE_GFX_VERSION=11.0.3 for gfx1103 support (override via ml.hsa_gfx_version or systemd)");
             }
             info!("Configuring ROCm execution provider for {:?}", path);
-            builder.with_execution_providers([
-                ort::execution_providers::ROCm::default()
+            builder
+                .with_execution_providers([ort::execution_providers::ROCm::default()
                     .with_device_id(config.ml.gpu_device_id)
-                    .build(),
-            ])
-            .map_err(|e| anyhow!("Failed to set ROCm EP: {}", e))?
+                    .build()])
+                .map_err(|e| anyhow!("Failed to set ROCm EP: {}", e))?
         } else {
             // device=cpu, or a GPU device whose configured card isn't usable —
             // rocm_ep_selected() already logged the reason once. Run on CPU.
@@ -499,10 +562,11 @@ impl OrtBackend {
                 //   CoreMLExecutionProvider -> CoreML
                 //   CoreMLComputeUnits       -> ComputeUnits
                 //   CoreMLModelFormat        -> ModelFormat
-                use ort::execution_providers::coreml::{
-                    ComputeUnits, CoreML, ModelFormat,
-                };
-                info!("Configuring CoreML execution provider (device='{}') for {:?}", dev, path);
+                use ort::execution_providers::coreml::{ComputeUnits, CoreML, ModelFormat};
+                info!(
+                    "Configuring CoreML execution provider (device='{}') for {:?}",
+                    dev, path
+                );
                 let cache_dir = std::env::temp_dir().join("doorman_coreml_cache");
                 let _ = std::fs::create_dir_all(&cache_dir);
                 let coreml = CoreML::default()
@@ -566,26 +630,20 @@ pub fn depth_preprocess(image: &DynamicImage, size: u32) -> Vec<f32> {
 /// Compute the depth-relief PAD score from a depth map and a normalized face bbox.
 ///
 /// `depth` is the per-pixel inverse-depth vector (length ≥ d_h × d_w) in row-major
-/// order. Maps the face bbox into depth-map coordinates, computes
-/// `relief = std(face_depth) / (depth_range + eps)` clamped to `[0, 1]`.
+/// order. Maps the face bbox into depth-map coordinates, gathers that patch and
+/// scores it with `stat` (see `liveness::relief_from_patch`; `minmax` is
+/// `std(face_depth) / (depth_range + eps)` clamped to `[0, 1]`).
 ///
 /// When the face-region crop is empty (degenerate bbox) the whole-map depth values
 /// are used, producing a near-zero relief.
 #[cfg(feature = "_ort")]
-pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face) -> f32 {
-    // Global depth range over the whole map.
-    let mut gmin = f32::INFINITY;
-    let mut gmax = f32::NEG_INFINITY;
-    for &v in depth.iter() {
-        if v < gmin {
-            gmin = v;
-        }
-        if v > gmax {
-            gmax = v;
-        }
-    }
-    let global_range = (gmax - gmin) + 1e-8;
-
+pub fn relief_from_depth_map(
+    stat: ReliefStat,
+    depth: &[f32],
+    d_h: usize,
+    d_w: usize,
+    face: &Face,
+) -> f32 {
     // Map the normalized face bbox into depth-map pixel coordinates.
     let (nx, ny, nw, nh) = face.bbox;
     let x0 = ((nx.clamp(0.0, 1.0)) * d_w as f32) as usize;
@@ -595,7 +653,7 @@ pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face)
     let x1 = x1.min(d_w);
     let y1 = y1.min(d_h);
 
-    // Collect the face-region depth values; fall back to whole map if empty.
+    // Collect the face-region depth values (empty for a degenerate bbox).
     let mut face_vals: Vec<f32> = Vec::new();
     if x1 > x0 && y1 > y0 {
         for y in y0..y1 {
@@ -605,19 +663,7 @@ pub fn relief_from_depth_map(depth: &[f32], d_h: usize, d_w: usize, face: &Face)
             }
         }
     }
-    let face_vals = if face_vals.is_empty() {
-        depth.to_vec()
-    } else {
-        face_vals
-    };
-
-    // std(face_depth).
-    let count = face_vals.len() as f32;
-    let mean = face_vals.iter().sum::<f32>() / count;
-    let var = face_vals.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / count;
-    let std = var.sqrt();
-
-    (std / global_range).clamp(0.0, 1.0)
+    crate::liveness::relief_from_patch(stat, &face_vals, None, &depth[..d_h * d_w])
 }
 
 /// Run the Depth-Anything-V2 depth pass on `session` for `image` and compute the
@@ -637,19 +683,14 @@ pub fn compute_depth_relief(
     session: &Mutex<Session>,
     image: &DynamicImage,
     face: &Face,
+    liveness: &LivenessConfig,
 ) -> Result<f32> {
-    use super::model_config::DepthPadConfig;
-
-    let cfg = DepthPadConfig::DEPTH_ANYTHING_V2;
-    let size = cfg.input_size;
+    let size = liveness.depth_input_size;
 
     let input = depth_preprocess(image, size);
 
-    let input_tensor = Value::from_array((
-        [1usize, 3, size as usize, size as usize],
-        input,
-    ))
-    .map_err(|e| anyhow!("ORT error: {}", e))?;
+    let input_tensor = Value::from_array(([1usize, 3, size as usize, size as usize], input))
+        .map_err(|e| anyhow!("ORT error: {}", e))?;
 
     let mut lock = session.lock().unwrap();
     // The model's input is named `pixel_values`.
@@ -671,14 +712,15 @@ pub fn compute_depth_relief(
         _ => return Err(anyhow!("Unexpected depth output shape {:?}", dims)),
     };
     if d_h == 0 || d_w == 0 || depth.len() < d_h * d_w {
-        return Err(anyhow!("Depth output too small: shape {:?} len {}", dims, depth.len()));
+        return Err(anyhow!(
+            "Depth output too small: shape {:?} len {}",
+            dims,
+            depth.len()
+        ));
     }
 
-    let relief = relief_from_depth_map(&depth, d_h, d_w, face);
-    tracing::debug!(
-        "Depth-PAD relief={:.4} depth_grid={}x{}",
-        relief, d_w, d_h
-    );
+    let relief = relief_from_depth_map(liveness.relief_stat, &depth, d_h, d_w, face);
+    tracing::debug!("Depth-PAD relief={:.4} depth_grid={}x{}", relief, d_w, d_h);
     Ok(relief)
 }
 
@@ -719,7 +761,11 @@ pub fn load_depth_session_rocm(models_dir: &Path, config: &Config) -> Result<Dep
 /// effect when the binary was built with `backend-ort-rocm`.
 #[cfg(feature = "_ort")]
 #[allow(dead_code)]
-fn load_depth_session_for_ep(models_dir: &Path, config: &Config, device: &str) -> Result<DepthSession> {
+fn load_depth_session_for_ep(
+    models_dir: &Path,
+    config: &Config,
+    device: &str,
+) -> Result<DepthSession> {
     let depth_cfg = super::model_config::DepthPadConfig::DEPTH_ANYTHING_V2;
     let depth_path = models_dir.join(depth_cfg.model_file);
     let mut ep_config = config.clone();
@@ -727,8 +773,12 @@ fn load_depth_session_for_ep(models_dir: &Path, config: &Config, device: &str) -
     // Bind ROCm to the configured GPU by UUID before HIP init (sidecar path).
     #[cfg(feature = "backend-ort-rocm")]
     apply_gpu_env(&ep_config);
-    let session = OrtBackend::load_model(&depth_path, &ep_config)
-        .with_context(|| format!("Failed to load depth model {:?} on {} EP", depth_path, device))?;
+    let session = OrtBackend::load_model(&depth_path, &ep_config).with_context(|| {
+        format!(
+            "Failed to load depth model {:?} on {} EP",
+            depth_path, device
+        )
+    })?;
     Ok(Mutex::new(session))
 }
 
@@ -818,12 +868,7 @@ impl OrtBackend {
         }
 
         // Letterbox-resize to `size` (no-op aspect change for a square crop).
-        image::imageops::resize(
-            &square,
-            size,
-            size,
-            image::imageops::FilterType::Lanczos3,
-        )
+        image::imageops::resize(&square, size, size, image::imageops::FilterType::Lanczos3)
     }
 
     fn bbox_crop_resize(image: &DynamicImage, face: &Face, size: u32) -> image::RgbImage {
@@ -831,8 +876,12 @@ impl OrtBackend {
         let (nx, ny, nw, nh) = face.bbox;
         let x = (nx.clamp(0.0, 1.0) * img_w as f32) as u32;
         let y = (ny.clamp(0.0, 1.0) * img_h as f32) as u32;
-        let w = ((nw.clamp(0.0, 1.0) * img_w as f32) as u32).max(1).min(img_w.saturating_sub(x).max(1));
-        let h = ((nh.clamp(0.0, 1.0) * img_h as f32) as u32).max(1).min(img_h.saturating_sub(y).max(1));
+        let w = ((nw.clamp(0.0, 1.0) * img_w as f32) as u32)
+            .max(1)
+            .min(img_w.saturating_sub(x).max(1));
+        let h = ((nh.clamp(0.0, 1.0) * img_h as f32) as u32)
+            .max(1)
+            .min(img_h.saturating_sub(y).max(1));
         image
             .crop_imm(x, y, w, h)
             .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
@@ -867,13 +916,24 @@ impl MLBackend for OrtBackend {
 
         // Collect the per-stride output slices by name. The slices borrow from
         // `outputs`, which outlives the decode call below.
-        let mut stride_views: Vec<StrideOutputs> = Vec::with_capacity(DetectorConfig::YUNET_STRIDES.len());
+        let mut stride_views: Vec<StrideOutputs> =
+            Vec::with_capacity(DetectorConfig::YUNET_STRIDES.len());
         for &stride in DetectorConfig::YUNET_STRIDES.iter() {
-            let (_, cls) = ort_try!(outputs[format!("cls_{}", stride).as_str()].try_extract_tensor::<f32>());
-            let (_, obj) = ort_try!(outputs[format!("obj_{}", stride).as_str()].try_extract_tensor::<f32>());
-            let (_, bbox) = ort_try!(outputs[format!("bbox_{}", stride).as_str()].try_extract_tensor::<f32>());
-            let (_, kps) = ort_try!(outputs[format!("kps_{}", stride).as_str()].try_extract_tensor::<f32>());
-            stride_views.push(StrideOutputs { stride, cls, obj, bbox, kps });
+            let (_, cls) =
+                ort_try!(outputs[format!("cls_{}", stride).as_str()].try_extract_tensor::<f32>());
+            let (_, obj) =
+                ort_try!(outputs[format!("obj_{}", stride).as_str()].try_extract_tensor::<f32>());
+            let (_, bbox) =
+                ort_try!(outputs[format!("bbox_{}", stride).as_str()].try_extract_tensor::<f32>());
+            let (_, kps) =
+                ort_try!(outputs[format!("kps_{}", stride).as_str()].try_extract_tensor::<f32>());
+            stride_views.push(StrideOutputs {
+                stride,
+                cls,
+                obj,
+                bbox,
+                kps,
+            });
         }
 
         let dets = yunet_decoder::decode(
@@ -885,37 +945,53 @@ impl MLBackend for OrtBackend {
         );
         let dets = yunet_decoder::nms(dets, cfg.iou_threshold);
 
-        // Single-user behavior: pick the highest-scoring face.
-        let best = dets
+        // The highest-scoring face is the main one; the rest are reported so the
+        // caller can apply `[recognition] multi_face_policy`.
+        let mut faces: Vec<Face> = dets
             .into_iter()
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
-
-        match best {
-            Some(d) => {
+            .map(|d| {
                 // Clamp the normalized bbox to the frame.
                 let (mut x, mut y, w, h) = d.bbox;
                 x = x.clamp(0.0, 1.0);
                 y = y.clamp(0.0, 1.0);
                 let w = w.clamp(0.0, 1.0 - x);
                 let h = h.clamp(0.0, 1.0 - y);
-
-                tracing::debug!(
-                    "YuNet detection: score={:.3} bbox_norm=({:.3},{:.3},{:.3},{:.3}) frame={}x{}",
-                    d.score, x, y, w, h, orig_width, orig_height
-                );
-
-                Ok(Some(Face {
+                Face {
                     bbox: (x, y, w, h),
                     confidence: d.score,
                     frame_dimensions: (orig_width, orig_height),
                     landmarks: Some(d.landmarks),
-                }))
-            }
-            None => {
-                tracing::debug!("YuNet: no face above threshold {:.2}", cfg.confidence_threshold);
-                Ok(None)
-            }
+                    other_faces: Vec::new(),
+                }
+            })
+            .collect();
+        faces.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if faces.is_empty() {
+            tracing::debug!(
+                "YuNet: no face above threshold {:.2}",
+                cfg.confidence_threshold
+            );
+            return Ok(None);
         }
+        let mut main = faces.remove(0);
+        tracing::debug!(
+            "YuNet detection: score={:.3} bbox_norm=({:.3},{:.3},{:.3},{:.3}) frame={}x{} other_faces={}",
+            main.confidence,
+            main.bbox.0,
+            main.bbox.1,
+            main.bbox.2,
+            main.bbox.3,
+            orig_width,
+            orig_height,
+            faces.len()
+        );
+        main.other_faces = faces;
+        Ok(Some(main))
     }
 
     /// MiniFASNetV2-SE anti-spoofing (facenox/face-antispoof-onnx, 128x128).
@@ -972,7 +1048,10 @@ impl MLBackend for OrtBackend {
         let (_, logits) = ort_try!(outputs[0].try_extract_tensor::<f32>());
 
         if logits.len() <= cfg.real_class_index || logits.len() <= cfg.spoof_class_index {
-            warn!("Liveness skipped: unexpected MiniFASNetV2-SE output len {}", logits.len());
+            warn!(
+                "Liveness skipped: unexpected MiniFASNetV2-SE output len {}",
+                logits.len()
+            );
             return Ok(true);
         }
         let real_logit = logits[cfg.real_class_index];
@@ -992,6 +1071,50 @@ impl MLBackend for OrtBackend {
             if is_real { "REAL" } else { "SPOOF" }
         );
         Ok(is_real)
+    }
+
+    /// Shadow-only MiniFASNetV2-SE score: the same crop and preprocessing as
+    /// `check_liveness`, returning `real_logit - spoof_logit` instead of a
+    /// verdict. A missing model or session is `Ok(None)`, never a pass.
+    async fn minifasnet_logit_diff(
+        &self,
+        image: &DynamicImage,
+        face: &Face,
+    ) -> Result<Option<f32>> {
+        use super::model_config::LivenessConfig;
+
+        if self.liveness_pool.is_empty() {
+            return Ok(None);
+        }
+        let cfg = LivenessConfig::MINIFASNET;
+        let size = cfg.input_size;
+        let Some(session) = self.get_next_session(&self.liveness_pool) else {
+            return Ok(None);
+        };
+        let crop = Self::antispoof_square_crop(image, face, cfg.bbox_expansion_factor, size);
+        let n = (size * size) as usize;
+        let mut input = vec![0.0f32; 3 * n];
+        let (r_off, g_off, b_off) = (0, n, 2 * n);
+        for (i, px) in crop.pixels().enumerate() {
+            input[r_off + i] = px[0] as f32 / 255.0;
+            input[g_off + i] = px[1] as f32 / 255.0;
+            input[b_off + i] = px[2] as f32 / 255.0;
+        }
+        let input_tensor = ort_try!(Value::from_array((
+            [1usize, 3, size as usize, size as usize],
+            input
+        )));
+        let mut lock = session
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MiniFASNet session lock poisoned"))?;
+        let outputs = ort_try!(lock.run(ort::inputs![input_tensor]));
+        let (_, logits) = ort_try!(outputs[0].try_extract_tensor::<f32>());
+        if logits.len() <= cfg.real_class_index || logits.len() <= cfg.spoof_class_index {
+            anyhow::bail!("unexpected MiniFASNetV2-SE output length {}", logits.len());
+        }
+        Ok(Some(
+            logits[cfg.real_class_index] - logits[cfg.spoof_class_index],
+        ))
     }
 
     /// Monocular-depth face relief PAD score (Depth-Anything-V2).
@@ -1014,7 +1137,7 @@ impl MLBackend for OrtBackend {
                     Some(s) => s,
                     None => return Ok(None),
                 };
-                let relief = compute_depth_relief(session, image, face)?;
+                let relief = compute_depth_relief(session, image, face, &self.liveness)?;
                 Ok(Some(relief))
             }
             // GPU device: delegate the depth pass to the out-of-process sidecar.
@@ -1067,6 +1190,30 @@ impl MLBackend for OrtBackend {
             None => Self::bbox_crop_resize(image, face, SIZE),
         };
 
+        let embedding = Self::embed_aligned(recognizer, &aligned)?;
+        if self.flip_tta {
+            let mirrored = Self::embed_aligned(recognizer, &super::tta::flip_horizontal(&aligned))?;
+            return Ok(super::tta::average_normalized(&embedding, &mirrored));
+        }
+        Ok(embedding)
+    }
+
+    fn is_ready(&self) -> bool {
+        // Liveness is a non-fatal convenience check and does NOT gate readiness.
+        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
+    }
+
+    fn name(&self) -> &'static str {
+        "ONNX Runtime"
+    }
+}
+
+#[cfg(feature = "_ort")]
+impl OrtBackend {
+    /// Run the recognizer on one aligned 112x112 RGB crop and return the
+    /// L2-normalised embedding.
+    fn embed_aligned(recognizer: &Mutex<Session>, aligned: &image::RgbImage) -> Result<Vec<f32>> {
+        const SIZE: u32 = 112;
         // Preprocess: RGB, (x - 127.5)/127.5, NCHW planar.
         let n = (SIZE * SIZE) as usize;
         let mut input = vec![0.0f32; 3 * n];
@@ -1085,7 +1232,7 @@ impl MLBackend for OrtBackend {
         let outputs = ort_try!(recognizer_lock.run(ort::inputs![input_tensor]));
 
         let (_, embedding_data) = ort_try!(outputs[0].try_extract_tensor::<f32>());
-        let embedding: Vec<f32> = embedding_data.iter().copied().collect();
+        let embedding: Vec<f32> = embedding_data.to_vec();
 
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         let normalized = if norm > 0.0 {
@@ -1095,14 +1242,5 @@ impl MLBackend for OrtBackend {
         };
 
         Ok(normalized)
-    }
-
-    fn is_ready(&self) -> bool {
-        // Liveness is a non-fatal convenience check and does NOT gate readiness.
-        !self.detector_pool.is_empty() && !self.recognizer_pool.is_empty()
-    }
-
-    fn name(&self) -> &'static str {
-        "ONNX Runtime"
     }
 }

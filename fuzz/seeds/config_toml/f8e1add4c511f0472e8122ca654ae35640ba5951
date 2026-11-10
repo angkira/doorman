@@ -1,0 +1,18 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Li)
+device = "cpu"
+
+cpu_threads = 1  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshodd = 0.75  #cation gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1dmin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sive in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detex), 640x640, MIT
+#   - Recogn

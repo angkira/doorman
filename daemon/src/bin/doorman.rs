@@ -32,7 +32,8 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use doorman_shared::{
-    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage, UserInfo,
+    DaemonInfo, EnrollmentPhase, Request, RequestEnvelope, Response, ResponseData, StreamMessage,
+    UserInfo,
 };
 
 // Self-contained installer (doctor / install / uninstall). Kept in a sibling
@@ -41,6 +42,14 @@ use doorman_shared::{
 #[path = "../install.rs"]
 mod install;
 use install::{DesktopChoice, EpChoice, InstallOpts, PamScope, UninstallOpts};
+
+// Terminal side of `calibrate`, `pad run` and `config get|set|unset`.
+#[path = "../cli_pad.rs"]
+mod cli_pad;
+
+// Event-driven unlock helper for screen lockers (`doorman unlock-watch`).
+#[path = "../unlock_watch.rs"]
+mod unlock_watch;
 
 /// Default runtime directory when neither `--socket`/`--runtime-dir` nor
 /// `$XDG_RUNTIME_DIR` is set. Matches how the daemon is run on this Mac.
@@ -80,11 +89,113 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ConfigAction {
+    /// Parse and validate the config and report unknown or deprecated keys.
+    /// Exit codes: 0 ok, 1 invalid, 2 valid but unknown/deprecated keys.
+    Check {
+        /// Config file to check (default: the file the daemon would load).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Print every config key with its default as Markdown (docs/CONFIG.md).
+    DumpDefaults,
+    /// Show the effective value of a key (or of every key of a section).
+    Get {
+        /// Dotted key, for example `ipc.face_cooldown_secs`, or a section.
+        key: String,
+        /// Config file (default: the file the daemon would load).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Set a key in /etc/doorman/doorman.toml (root). The key and value are
+    /// validated like the daemon does, comments are kept, the file is replaced
+    /// atomically after a backup. Never restarts anything.
+    Set {
+        /// Dotted key, for example `ipc.face_max_judged_failures`.
+        key: String,
+        /// TOML value: `7`, `true`, `"text"` (a bare word works for strings), `[10, 30, 120]`.
+        value: String,
+        /// Edit this file instead of the system config.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// Remove a key from /etc/doorman/doorman.toml (root) so its default applies.
+    Unset {
+        key: String,
+        /// Edit this file instead of the system config.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PadAction {
+    /// Guided presentation-attack screening against the live camera: genuine
+    /// baseline, phone photo / video, print, mixed, lighting, glasses, yaw,
+    /// distance. Needs no root. Run `sudo doorman calibrate` first for a
+    /// session without pauses. Screening, not certification.
+    Run {
+        /// Enrolled user to test (default: you).
+        #[arg(long)]
+        user: Option<String>,
+        /// Short smoke run: 3 genuine, 2 per attack class, 2 per condition.
+        #[arg(long)]
+        quick: bool,
+        /// Result file prefix (default: ~/doorman-pad-<date>).
+        #[arg(long, value_name = "PREFIX")]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModelsAction {
+    /// Hash the model files the daemon loads and compare them with the
+    /// integrity manifest (built-in, plus `[models] manifest_path`). Read-only,
+    /// needs no daemon. Exit codes: 0 all verified, 1 mismatch or error,
+    /// 2 no mismatch but some files unlisted or missing.
+    Verify {
+        /// Models directory (default: `[ml] models_dir`).
+        #[arg(long, value_name = "DIR")]
+        models_dir: Option<PathBuf>,
+        /// Extra manifest to merge over the built-in one (default:
+        /// `[models] manifest_path`).
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+        /// Print the loaded files in `sha256sum` format (for a user manifest)
+        /// instead of verifying. Only run it on files you trust.
+        #[arg(long)]
+        print_manifest: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DatasetAction {
+    /// Delete dataset files (attempt/label shards, capture packs) older than N days.
+    /// Root only; never run automatically.
+    Purge {
+        /// Delete entries whose UTC day is more than this many days old
+        /// (default: `[dataset] retention_days`).
+        #[arg(long, value_name = "DAYS")]
+        older_than: Option<u32>,
+        /// List what would be deleted and delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Data directory containing dataset/ (default: `[daemon] data_dir`).
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Enroll a new user (records from the daemon's current camera source).
     Enroll {
         /// Username to enroll.
         username: String,
+        /// Add templates (for example another lighting condition) to the
+        /// existing ones without evicting any.
+        #[arg(long)]
+        add: bool,
     },
     /// List all enrolled users.
     List,
@@ -96,14 +207,55 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// Authenticate a user against the live camera (alias: auth).
+    /// Authenticate a user against the live camera (alias: auth). Exit code: 0
+    /// recognized, 2 not recognized (output starts with `!recognized:`), 1 error.
     #[command(alias = "auth")]
     Test {
         /// Username to authenticate.
         username: String,
     },
-    /// Show daemon status (version, uptime, camera, models, enrolled users).
+    /// Show daemon status (version, uptime, camera, models, enrolled users,
+    /// calibration mode).
     Status,
+    /// Calibration mode for measuring presentation attacks: root only, time
+    /// limited, never persisted. `sudo doorman calibrate` starts it (default 45
+    /// minutes), `--end` ends it, `--status` shows it (any user).
+    Calibrate {
+        /// Session length: 45m, 2700s, 1h30m (bare number = minutes). Max 120m.
+        #[arg(long, value_name = "TIME", conflicts_with_all = ["end", "status"])]
+        ttl: Option<String>,
+        /// End calibration mode now.
+        #[arg(long, conflicts_with = "status")]
+        end: bool,
+        /// Show whether calibration mode is active and for how long.
+        #[arg(long)]
+        status: bool,
+    },
+    /// Presentation-attack screening (see `doorman pad run --help`).
+    Pad {
+        #[command(subcommand)]
+        action: PadAction,
+    },
+    /// Unlock a screen locker on face match: waits on the daemon (WaitForMatch)
+    /// and SIGTERMs the given locker PID. Exit codes: see docs/unlock-path.md.
+    UnlockWatch {
+        /// User whose face unlocks the session.
+        #[arg(long)]
+        user: String,
+        /// PID of the locker process the lock script started.
+        #[arg(long, value_name = "PID")]
+        locker_pid: i32,
+        /// Expected process name of the locker (/proc/<pid>/comm); nothing is
+        /// signalled if the PID now belongs to another process.
+        #[arg(long, value_name = "NAME")]
+        locker_name: Option<String>,
+        /// Length of one WaitForMatch call; calls are re-issued while the locker lives.
+        #[arg(long, value_name = "MS", default_value_t = unlock_watch::DEFAULT_WAIT_TIMEOUT_MS)]
+        timeout_ms: u64,
+        /// Time the locker gets to exit after SIGTERM before SIGKILL.
+        #[arg(long, value_name = "MS", default_value_t = unlock_watch::DEFAULT_TERM_GRACE_MS)]
+        term_grace_ms: u64,
+    },
     /// Build an offline self-improvement candidate from the attempt-log dataset.
     Train {
         /// Data directory containing dataset/attempts-*.jsonl and labels-*.jsonl.
@@ -143,9 +295,26 @@ enum Command {
         #[arg(long, default_value_t = 0.01)]
         max_frr_regression: f32,
     },
+    /// Manage stored dataset files (see docs/datasets.md).
+    Dataset {
+        #[command(subcommand)]
+        action: DatasetAction,
+    },
+    /// Verify the model files against the integrity manifest (docs/MODELS.md).
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
+    /// Validate or document the daemon config (see docs/CONFIG.md).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
-    /// Install doorman: daemon service, models, config, and (opt-in) PAM integration.
+    /// From-source developer installer (rebuilds from a checkout; daemon service,
+    /// models, config, opt-in PAM). Not for upgrading a packaged (.deb) install:
+    /// use the package for that.
     Install {
         /// Print every planned action and mutate nothing.
         #[arg(long)]
@@ -153,19 +322,23 @@ enum Command {
         /// Skip the confirmation prompt.
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Auto-detect the execution provider (default).
-        #[arg(long, conflicts_with_all = ["cpu", "rocm", "ncnn"])]
+        /// Default: CPU on Linux (CoreML on macOS). A GPU is never picked
+        /// automatically; use --rocm, --cuda or --ncnn to opt in.
+        #[arg(long, conflicts_with_all = ["cpu", "rocm", "cuda", "ncnn"])]
         auto: bool,
         /// Force the CPU backend.
-        #[arg(long, conflicts_with_all = ["auto", "rocm", "ncnn"])]
+        #[arg(long, conflicts_with_all = ["auto", "rocm", "cuda", "ncnn"])]
         cpu: bool,
-        /// Force the AMD ROCm backend (iGPU).
-        #[arg(long, conflicts_with_all = ["auto", "cpu", "ncnn"])]
+        /// Opt in to the AMD ROCm backend (iGPU).
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "cuda", "ncnn"])]
         rocm: bool,
+        /// Opt in to the NVIDIA CUDA backend.
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm", "ncnn"])]
+        cuda: bool,
         /// Force the ncnn-Vulkan hybrid: depth-liveness on the iGPU via Vulkan,
         /// detection + recognition on the CPU (ORT). Builds libncnn + converts the
         /// depth model at install time.
-        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm"])]
+        #[arg(long, conflicts_with_all = ["auto", "cpu", "rocm", "cuda"])]
         ncnn: bool,
         /// Integrate with screen unlock only (default, safest).
         #[arg(long, conflicts_with_all = ["login", "sudo", "no_pam"])]
@@ -249,6 +422,30 @@ fn default_runtime_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(FALLBACK_RUNTIME_DIR))
 }
 
+fn is_root() -> bool {
+    doorman_shared::config_trust::effective_uid() == 0
+}
+
+/// A request sender for the `cli_pad` commands: refusals come back as errors
+/// with the daemon's own reason.
+fn transport(sockets: &Sockets) -> impl Fn(&Request, Duration) -> Result<Response, String> {
+    let socket = sockets.command.clone();
+    move |request, timeout| match send_request_raw(&socket, request, timeout) {
+        Ok(Response::Denied { reason }) => Err(format!("denied by daemon: {reason}")),
+        Ok(other) => Ok(other),
+        Err(CliError(msg)) => Err(msg),
+    }
+}
+
+/// Turn a `cli_pad` result into the CLI's error handling and exit code.
+fn exit_with(result: Result<i32, String>) -> Result<(), CliError> {
+    match result {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(e) => Err(CliError::new(e)),
+    }
+}
+
 /// A flat error with a friendly, actionable message.
 struct CliError(String);
 
@@ -263,16 +460,61 @@ fn main() {
     let sockets = Sockets::resolve(cli.socket.clone(), cli.runtime_dir.clone());
 
     let result = match &cli.command {
-        Command::Enroll { username } => cmd_enroll(&sockets, username, cli.json),
+        Command::Enroll { username, add } => cmd_enroll(&sockets, username, *add, cli.json),
         Command::List => cmd_list(&sockets, cli.json),
         Command::Remove { username, yes } => cmd_remove(&sockets, username, *yes, cli.json),
-        Command::Test { username } => cmd_test(&sockets, username, cli.json),
+        Command::Test { username } => cmd_test(&sockets, username, cli.json).map(|code| {
+            if code != TEST_EXIT_RECOGNIZED {
+                std::process::exit(code);
+            }
+        }),
         Command::Status => cmd_status(&sockets, cli.json),
+        Command::Calibrate { ttl, end, status } => {
+            let send = transport(&sockets);
+            match cli_pad::cmd_calibrate(&send, ttl.as_deref(), *end, *status, cli.json, is_root())
+            {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(CliError::new(e)),
+            }
+        }
+        Command::Pad {
+            action: PadAction::Run { user, quick, out },
+        } => {
+            let send = transport(&sockets);
+            match cli_pad::cmd_pad_run(&send, user.as_deref(), *quick, out.as_deref()) {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(CliError::new(e)),
+            }
+        }
+        Command::UnlockWatch {
+            user,
+            locker_pid,
+            locker_name,
+            timeout_ms,
+            term_grace_ms,
+        } => std::process::exit(
+            unlock_watch::run(&unlock_watch::WatchArgs {
+                socket: sockets.command.clone(),
+                user: user.clone(),
+                locker_pid: *locker_pid,
+                locker_name: locker_name.clone(),
+                timeout_ms: *timeout_ms,
+                term_grace: Duration::from_millis(*term_grace_ms),
+            })
+            .code(),
+        ),
         Command::Train {
             data_dir,
             models_dir,
             min_confirmed,
-        } => cmd_train(data_dir.as_deref(), models_dir.as_deref(), *min_confirmed, cli.json),
+        } => cmd_train(
+            data_dir.as_deref(),
+            models_dir.as_deref(),
+            *min_confirmed,
+            cli.json,
+        ),
         Command::DatasetReport { data_dir } => cmd_dataset_report(data_dir.as_deref(), cli.json),
         Command::Promote {
             candidate_dir,
@@ -290,6 +532,51 @@ fn main() {
             *max_frr_regression,
             cli.json,
         ),
+        Command::Dataset { action } => match action {
+            DatasetAction::Purge {
+                older_than,
+                dry_run,
+                data_dir,
+            } => cmd_dataset_purge(*older_than, *dry_run, data_dir.as_deref()),
+        },
+        Command::Models { action } => match action {
+            ModelsAction::Verify {
+                models_dir,
+                manifest,
+                print_manifest,
+            } => std::process::exit(cmd_models_verify(
+                models_dir.as_deref(),
+                manifest.as_deref(),
+                *print_manifest,
+            )),
+        },
+        Command::Config { action } => match action {
+            ConfigAction::Check { config } => {
+                std::process::exit(cmd_config_check(config.as_deref()))
+            }
+            ConfigAction::DumpDefaults => {
+                print!(
+                    "{}",
+                    doorman_shared::config_check::render_reference_markdown()
+                );
+                Ok(())
+            }
+            ConfigAction::Get { key, config } => {
+                exit_with(cli_pad::cmd_config_get(config.as_deref(), key))
+            }
+            ConfigAction::Set { key, value, config } => exit_with(cli_pad::cmd_config_edit(
+                config.as_deref(),
+                key,
+                Some(value),
+                is_root(),
+            )),
+            ConfigAction::Unset { key, config } => exit_with(cli_pad::cmd_config_edit(
+                config.as_deref(),
+                key,
+                None,
+                is_root(),
+            )),
+        },
         Command::Doctor => cmd_doctor(),
         Command::Install {
             dry_run,
@@ -297,6 +584,7 @@ fn main() {
             auto: _,
             cpu,
             rocm,
+            cuda,
             ncnn,
             screen_unlock: _,
             login,
@@ -304,7 +592,19 @@ fn main() {
             no_pam,
             desktop,
             auto_unlock,
-        } => cmd_install(*dry_run, *yes, *cpu, *rocm, *ncnn, *login, *sudo, *no_pam, desktop, *auto_unlock),
+        } => cmd_install(
+            *dry_run,
+            *yes,
+            *cpu,
+            *rocm,
+            *cuda,
+            *ncnn,
+            *login,
+            *sudo,
+            *no_pam,
+            desktop,
+            *auto_unlock,
+        ),
         Command::Uninstall { dry_run, purge } => cmd_uninstall(*dry_run, *purge),
         Command::Preview { args } => cmd_preview(args),
     };
@@ -360,6 +660,122 @@ fn cmd_train(
     Ok(())
 }
 
+/// Exit code: every loaded model file matches the manifest.
+const MODELS_EXIT_OK: i32 = 0;
+/// Exit code: a hash mismatch, an unreadable file, or an error.
+const MODELS_EXIT_MISMATCH: i32 = 1;
+/// Exit code: no mismatch, but a file is unlisted (unverifiable) or missing.
+const MODELS_EXIT_UNVERIFIED: i32 = 2;
+
+fn cmd_models_verify(
+    models_dir: Option<&Path>,
+    manifest_file: Option<&Path>,
+    print_manifest: bool,
+) -> i32 {
+    use doormand::model_integrity::{self as mi, FileStatus};
+    let config = match doorman_shared::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: cannot load config: {e}");
+            return MODELS_EXIT_MISMATCH;
+        }
+    };
+    let dir = models_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.ml.models_dir));
+    let files = mi::loaded_model_files(config.authentication.liveness_enabled);
+    if print_manifest {
+        for name in &files {
+            match mi::sha256_file(&dir.join(name)) {
+                Ok(hash) => println!("{hash}  {name}"),
+                Err(e) => eprintln!("# {name}: {e}"),
+            }
+        }
+        return MODELS_EXIT_OK;
+    }
+    let user_manifest = manifest_file
+        .map(PathBuf::from)
+        .or_else(|| config.models.manifest_path.as_ref().map(PathBuf::from));
+    let manifest = match mi::manifest_for(user_manifest.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return MODELS_EXIT_MISMATCH;
+        }
+    };
+    let report = mi::verify(&dir, &files, &manifest);
+    println!("models dir: {}", dir.display());
+    for (name, status) in &report.files {
+        match status {
+            FileStatus::Verified => println!("  ok         {name}"),
+            FileStatus::Mismatch { expected, actual } => {
+                println!("  MISMATCH   {name}\n             expected {expected}\n             actual   {actual}")
+            }
+            FileStatus::Unlisted { actual } => {
+                println!("  unlisted   {name} (sha256 {actual}; not in the manifest)")
+            }
+            FileStatus::Missing => println!("  missing    {name}"),
+            FileStatus::Unreadable(e) => println!("  UNREADABLE {name}: {e}"),
+        }
+    }
+    if !report.mismatches().is_empty() {
+        MODELS_EXIT_MISMATCH
+    } else if report.all_verified() {
+        MODELS_EXIT_OK
+    } else {
+        MODELS_EXIT_UNVERIFIED
+    }
+}
+
+fn cmd_dataset_purge(
+    older_than: Option<u32>,
+    dry_run: bool,
+    data_dir: Option<&Path>,
+) -> Result<(), CliError> {
+    // Dataset files are root-owned 0700; refuse early with a clear message
+    // instead of failing half way through a deletion.
+    if !nix::unistd::geteuid().is_root() {
+        return Err(CliError::new(
+            "dataset purge must run as root (the dataset directory is private to the daemon); try: sudo doorman dataset purge ...",
+        ));
+    }
+    let config = doorman_shared::Config::load()
+        .map_err(|e| CliError::new(format!("cannot load config: {e}")))?;
+    let days = older_than.unwrap_or(config.dataset.retention_days);
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&config.daemon.data_dir));
+    let dataset_dir = data_dir.join("dataset");
+    let today = chrono::Utc::now().date_naive();
+    let entries = doormand::dataset_purge::purge_candidates(&dataset_dir, today, days)
+        .map_err(|e| CliError::new(format!("cannot scan {}: {e}", dataset_dir.display())))?;
+    for path in &entries {
+        println!(
+            "{}{}",
+            if dry_run {
+                "would delete "
+            } else {
+                "deleting "
+            },
+            path.display()
+        );
+    }
+    if dry_run {
+        println!(
+            "{} entries older than {days} days (dry run, nothing deleted)",
+            entries.len()
+        );
+        return Ok(());
+    }
+    let removed = doormand::dataset_purge::delete_entries(&dataset_dir, &entries)
+        .map_err(|e| CliError::new(format!("delete failed: {e}")))?;
+    println!(
+        "deleted {removed} entries older than {days} days from {}",
+        dataset_dir.display()
+    );
+    Ok(())
+}
+
 fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliError> {
     let data_dir = data_dir
         .map(PathBuf::from)
@@ -382,7 +798,10 @@ fn cmd_dataset_report(data_dir: Option<&Path>, json: bool) -> Result<(), CliErro
         println!("  false negative attempts: {}", report.false_negative);
         println!("  rejected attempts: {}", report.rejected);
         println!("  suspected spoof attempts: {}", report.suspected_spoof);
-        println!("  proactive unlocked attempts: {}", report.proactive_unlocked);
+        println!(
+            "  proactive unlocked attempts: {}",
+            report.proactive_unlocked
+        );
         println!("  unknown attempts: {}", report.unknown);
         println!("  matched attempts: {}", report.matched_attempts);
         println!("  unlabeled attempts: {}", report.unlabeled_attempts);
@@ -447,6 +866,7 @@ fn cmd_install(
     yes: bool,
     cpu: bool,
     rocm: bool,
+    cuda: bool,
     ncnn: bool,
     login: bool,
     sudo: bool,
@@ -458,6 +878,8 @@ fn cmd_install(
         EpChoice::Cpu
     } else if rocm {
         EpChoice::Rocm
+    } else if cuda {
+        EpChoice::Cuda
     } else if ncnn {
         EpChoice::Ncnn
     } else {
@@ -533,6 +955,28 @@ fn send_request(
     request: &Request,
     timeout: Duration,
 ) -> Result<Response, CliError> {
+    match send_request_raw(socket_path, request, timeout)? {
+        Response::Denied { reason } => Err(CliError::new(format!("denied by daemon: {reason}"))),
+        Response::RateLimited { retry_after_s } => Err(CliError::new(format!(
+            "rate limited by daemon: retry in {retry_after_s}s"
+        ))),
+        Response::UnsupportedProtocol {
+            reason,
+            supported_version,
+        } => Err(CliError::new(format!(
+            "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
+        ))),
+        other => Ok(other),
+    }
+}
+
+/// [`send_request`] without turning refusals into errors: the caller sees
+/// `Denied`, `RateLimited` and `UnsupportedProtocol` as responses.
+fn send_request_raw(
+    socket_path: &Path,
+    request: &Request,
+    timeout: Duration,
+) -> Result<Response, CliError> {
     let stream = UnixStream::connect(socket_path).map_err(|e| {
         CliError::new(format!(
             "could not connect to daemon socket {} ({e}). Is doormand running? \
@@ -549,7 +993,7 @@ fn send_request(
         .map_err(|e| CliError::new(format!("failed to set write timeout: {e}")))?;
 
     let mut writer = stream;
-    let request_json = serde_json::to_string(request)
+    let request_json = serde_json::to_string(&RequestEnvelope::new(request.clone()))
         .map_err(|e| CliError::new(format!("failed to serialize request: {e}")))?;
     writeln!(writer, "{request_json}")
         .map_err(|e| CliError::new(format!("failed to send request: {e}")))?;
@@ -572,8 +1016,13 @@ fn send_request(
         ));
     }
 
-    serde_json::from_str(line.trim())
-        .map_err(|e| CliError::new(format!("failed to parse daemon response: {e} (raw: {})", line.trim())))
+    let response: Response = serde_json::from_str(line.trim()).map_err(|e| {
+        CliError::new(format!(
+            "failed to parse daemon response: {e} (raw: {})",
+            line.trim()
+        ))
+    })?;
+    Ok(response)
 }
 
 fn print_raw(response: &Response) -> Result<(), CliError> {
@@ -581,6 +1030,60 @@ fn print_raw(response: &Response) -> Result<(), CliError> {
         .map_err(|e| CliError::new(format!("failed to serialize response: {e}")))?;
     println!("{json}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// config check
+// ---------------------------------------------------------------------------
+
+/// Exit code: config valid, no unknown or deprecated keys.
+const CONFIG_EXIT_OK: i32 = 0;
+/// Exit code: config unreadable, unparsable or failing validation.
+const CONFIG_EXIT_INVALID: i32 = 1;
+/// Exit code: config valid but has unknown or deprecated keys.
+const CONFIG_EXIT_UNKNOWN_KEYS: i32 = 2;
+
+fn cmd_config_check(explicit: Option<&Path>) -> i32 {
+    let path = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => match doorman_shared::Config::find_config_path() {
+            Some(p) => p,
+            None => {
+                println!("no config file found in the standard locations; built-in defaults apply");
+                return CONFIG_EXIT_OK;
+            }
+        },
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("invalid: cannot read {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    let report = match doorman_shared::config_check::check_str(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("invalid: {}: {e}", path.display());
+            return CONFIG_EXIT_INVALID;
+        }
+    };
+    println!(
+        "{}: valid (schema_version {})",
+        path.display(),
+        report.config.schema_version
+    );
+    for key in &report.unknown_keys {
+        println!("unknown key: {key}");
+    }
+    for (key, hint) in &report.deprecated_keys {
+        println!("deprecated key: {key} ({hint})");
+    }
+    if report.unknown_keys.is_empty() && report.deprecated_keys.is_empty() {
+        CONFIG_EXIT_OK
+    } else {
+        CONFIG_EXIT_UNKNOWN_KEYS
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,13 +1115,26 @@ fn print_status(info: &DaemonInfo) {
     println!("  uptime         : {uptime}");
     println!(
         "  camera         : {}",
-        if info.camera_available { "available" } else { "unavailable" }
+        if info.camera_available {
+            "available"
+        } else {
+            "unavailable"
+        }
     );
     println!(
         "  models loaded  : {}",
         if info.models_loaded { "yes" } else { "no" }
     );
     println!("  enrolled users : {}", info.enrolled_users);
+    if let Some(ort) = &info.ort_runtime {
+        println!("  onnx runtime   : {ort}");
+    }
+    if let Some(left) = info.calibration_remaining_secs {
+        println!(
+            "  CALIBRATION    : ACTIVE, {} left (failure budget suspended; end: sudo doorman calibrate --end)",
+            cli_pad::fmt_duration(left)
+        );
+    }
 }
 
 fn format_uptime(secs: u64) -> String {
@@ -699,12 +1215,7 @@ fn print_user_table(users: &[UserInfo]) {
 // remove
 // ---------------------------------------------------------------------------
 
-fn cmd_remove(
-    sockets: &Sockets,
-    username: &str,
-    yes: bool,
-    json: bool,
-) -> Result<(), CliError> {
+fn cmd_remove(sockets: &Sockets, username: &str, yes: bool, json: bool) -> Result<(), CliError> {
     if !yes && !json {
         print!("Remove enrollment for '{username}'? [y/N] ");
         std::io::stdout()
@@ -733,7 +1244,10 @@ fn cmd_remove(
     }
     match response {
         Response::Success { message, .. } => {
-            println!("{}", message.unwrap_or_else(|| format!("Removed user: {username}")));
+            println!(
+                "{}",
+                message.unwrap_or_else(|| format!("Removed user: {username}"))
+            );
             Ok(())
         }
         Response::Failure { reason } => Err(CliError::new(reason)),
@@ -745,18 +1259,71 @@ fn cmd_remove(
 // test / auth
 // ---------------------------------------------------------------------------
 
-fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliError> {
-    let response = send_request(
+/// Exit codes of `doorman test` (see `doormand::test_report`): 0 recognized,
+/// 1 error (daemon unreachable, denied, unexpected answer), 2 not recognized,
+/// rejected, unavailable or suspended. The `recognized:` / `!recognized:` lines
+/// on stdout are unchanged.
+use doormand::test_report::{
+    classify, error_report, EXIT_NOT_RECOGNIZED as TEST_EXIT_NOT_RECOGNIZED,
+    EXIT_RECOGNIZED as TEST_EXIT_RECOGNIZED,
+};
+
+fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<i32, CliError> {
+    let started = std::time::Instant::now();
+    let answer = send_request_raw(
         &sockets.command,
         &Request::Authenticate {
             username: username.to_string(),
+            service: None,
+            tty: None,
         },
         // Daemon captures AUTH_FRAMES frames; allow a little headroom over DEFAULT.
         Duration::from_secs(15),
-    )?;
+    );
+    let duration_ms = started.elapsed().as_millis() as u64;
     if json {
-        return print_raw(&response);
+        // One JSON object on stdout in every case, errors included.
+        let mut report = match &answer {
+            Ok(response) => classify(response, duration_ms, chrono::Utc::now().timestamp()),
+            Err(_) => error_report(duration_ms),
+        };
+        // Loud in the data too: results taken in calibration mode say so.
+        let send = transport(sockets);
+        report.calibration = cli_pad::calibration_state(&send).is_some_and(|c| c.active);
+        let line = serde_json::to_string_pretty(&report)
+            .map_err(|e| CliError::new(format!("failed to serialize report: {e}")))?;
+        println!("{line}");
+        if let Err(CliError(msg)) = &answer {
+            eprintln!("error: {msg}");
+        }
+        return Ok(report.exit_code);
     }
+    let response = match answer? {
+        // A suspension is an expected outcome, shown like a rejection.
+        Response::Denied { reason }
+            if reason.contains(doormand::face_budget::FACE_SUSPENDED_CODE) =>
+        {
+            println!("!recognized: {username} ({reason})");
+            return Ok(TEST_EXIT_NOT_RECOGNIZED);
+        }
+        Response::Denied { reason } => {
+            return Err(CliError::new(format!("denied by daemon: {reason}")))
+        }
+        Response::RateLimited { retry_after_s } => {
+            return Err(CliError::new(format!(
+                "rate limited by daemon: retry in {retry_after_s}s"
+            )))
+        }
+        Response::UnsupportedProtocol {
+            reason,
+            supported_version,
+        } => {
+            return Err(CliError::new(format!(
+                "daemon rejected the request: {reason} (daemon speaks protocol {supported_version})"
+            )))
+        }
+        other => other,
+    };
     match response {
         Response::Success { message, .. } => {
             let detail = message.unwrap_or_default();
@@ -765,14 +1332,14 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
             } else {
                 println!("recognized: {username} ({detail})");
             }
-            Ok(())
+            Ok(TEST_EXIT_RECOGNIZED)
         }
-        // Authentication failure is a normal, expected outcome — report it but do
-        // not treat it as a CLI error (exit 0) so scripts can distinguish "not
-        // recognized" from "daemon unreachable".
+        // Authentication failure is a normal, expected outcome: the line is not an
+        // `error:`, but the exit code is non-zero so exit-code-only consumers are
+        // not fooled by a rejected or camera-less attempt.
         Response::Failure { reason } => {
             println!("!recognized: {username} ({reason})");
-            Ok(())
+            Ok(TEST_EXIT_NOT_RECOGNIZED)
         }
         other => Err(CliError::new(format!("unexpected response: {other:?}"))),
     }
@@ -782,7 +1349,7 @@ fn cmd_test(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliErro
 // enroll
 // ---------------------------------------------------------------------------
 
-fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliError> {
+fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Result<(), CliError> {
     // Start a background progress watcher on the debug socket. Enrollment
     // progress is published there as StreamMessage::Enrollment frames while the
     // command connection below blocks waiting for the final reply.
@@ -799,12 +1366,14 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
 
     if !json {
         println!("Enrolling '{username}' — look at the camera...");
+        println!("Hint: slowly turn your head a little and vary the lighting; use --add for another lighting condition.");
     }
 
     let response = send_request(
         &sockets.command,
         &Request::Enroll {
             username: username.to_string(),
+            add,
         },
         ENROLL_TIMEOUT,
     );
@@ -821,20 +1390,27 @@ fn cmd_enroll(sockets: &Sockets, username: &str, json: bool) -> Result<(), CliEr
     }
     match response {
         Response::Success { message, .. } => {
-            println!(
-                "\n✓ Enrolled '{username}'. {}",
-                message.unwrap_or_default()
-            );
+            println!("\n✓ Enrolled '{username}'. {}", message.unwrap_or_default());
             Ok(())
         }
-        Response::Failure { reason } => Err(CliError::new(format!(
-            "enrollment failed: {reason}"
-        ))),
+        Response::Failure { reason } => Err(CliError::new(format!("enrollment failed: {reason}"))),
         // The daemon never streams Progress on the command socket, but handle it
         // defensively so an unexpected frame doesn't crash the CLI.
-        Response::Progress { message, current, total } => Err(CliError::new(format!(
+        Response::Progress {
+            message,
+            current,
+            total,
+        } => Err(CliError::new(format!(
             "unexpected progress on command socket: {message} ({current}/{total})"
         ))),
+        // send_request already turns these into errors; arm kept for exhaustiveness.
+        Response::Denied { .. }
+        | Response::RateLimited { .. }
+        | Response::UnsupportedProtocol { .. }
+        | Response::Matched { .. }
+        | Response::NoMatch { .. } => {
+            Err(CliError::new(format!("unexpected response: {response:?}")))
+        }
     }
 }
 
@@ -900,4 +1476,232 @@ fn render_progress(phase: &EnrollmentPhase, current: usize, total: usize) {
     // \r keeps the bar on one line; stdout flush so it updates live.
     print!("\r  {label} [{bar}] {current}/{total}");
     let _ = std::io::stdout().flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use doorman_shared::NoMatchReason;
+    use doormand::test_report::EXIT_ERROR as TEST_EXIT_ERROR;
+
+    fn test_exit_code(response: &Response) -> i32 {
+        classify(response, 0, 0).exit_code
+    }
+
+    #[test]
+    fn test_exit_code_is_zero_only_for_a_recognized_face() {
+        let table = [
+            (
+                Response::Success {
+                    message: None,
+                    data: None,
+                },
+                TEST_EXIT_RECOGNIZED,
+            ),
+            (
+                Response::Failure {
+                    reason: "Camera not available (no frames)".into(),
+                },
+                TEST_EXIT_NOT_RECOGNIZED,
+            ),
+            (
+                Response::Denied {
+                    reason: "peer uid".into(),
+                },
+                TEST_EXIT_ERROR,
+            ),
+            (Response::RateLimited { retry_after_s: 1 }, TEST_EXIT_ERROR),
+            (
+                Response::Denied {
+                    reason: doormand::decision::suspended_reason(30),
+                },
+                TEST_EXIT_NOT_RECOGNIZED,
+            ),
+            (
+                Response::NoMatch {
+                    reason: NoMatchReason::Timeout,
+                },
+                TEST_EXIT_ERROR,
+            ),
+        ];
+        for (response, want) in table {
+            assert_eq!(test_exit_code(&response), want, "{response:?}");
+        }
+    }
+
+    // --- Round 9b-2a: calibrate, pad run, config get|set|unset ---
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["doorman"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn calibrate_parses_ttl_end_and_status_and_rejects_mixtures() {
+        match parse(&["calibrate"]).unwrap().command {
+            Command::Calibrate {
+                ttl: None,
+                end: false,
+                status: false,
+            } => {}
+            _ => panic!("plain calibrate"),
+        }
+        match parse(&["calibrate", "--ttl", "45m"]).unwrap().command {
+            Command::Calibrate { ttl: Some(t), .. } => assert_eq!(t, "45m"),
+            _ => panic!("ttl"),
+        }
+        assert!(matches!(
+            parse(&["calibrate", "--end"]).unwrap().command,
+            Command::Calibrate { end: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["calibrate", "--status"]).unwrap().command,
+            Command::Calibrate { status: true, .. }
+        ));
+        assert!(parse(&["calibrate", "--end", "--status"]).is_err());
+        assert!(parse(&["calibrate", "--end", "--ttl", "5m"]).is_err());
+    }
+
+    #[test]
+    fn pad_run_has_sensible_defaults_and_one_optional_quick() {
+        match parse(&["pad", "run"]).unwrap().command {
+            Command::Pad {
+                action:
+                    PadAction::Run {
+                        user: None,
+                        quick: false,
+                        out: None,
+                    },
+            } => {}
+            _ => panic!("defaults"),
+        }
+        assert!(matches!(
+            parse(&["pad", "run", "--quick"]).unwrap().command,
+            Command::Pad {
+                action: PadAction::Run { quick: true, .. }
+            }
+        ));
+        assert!(parse(&["pad"]).is_err());
+        assert!(
+            parse(&["pad", "run", "--genuine", "5"]).is_err(),
+            "no flag soup"
+        );
+    }
+
+    #[test]
+    fn config_get_set_unset_parse() {
+        match parse(&["config", "set", "ipc.face_cooldown_secs", "[10, 30, 120]"])
+            .unwrap()
+            .command
+        {
+            Command::Config {
+                action:
+                    ConfigAction::Set {
+                        key,
+                        value,
+                        config: None,
+                    },
+            } => {
+                assert_eq!(
+                    (key.as_str(), value.as_str()),
+                    ("ipc.face_cooldown_secs", "[10, 30, 120]")
+                );
+            }
+            _ => panic!("set"),
+        }
+        assert!(matches!(
+            parse(&["config", "get", "ipc"]).unwrap().command,
+            Command::Config {
+                action: ConfigAction::Get { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["config", "unset", "ipc.face_max_judged_failures"])
+                .unwrap()
+                .command,
+            Command::Config {
+                action: ConfigAction::Unset { .. }
+            }
+        ));
+        assert!(parse(&["config", "set", "only.key"]).is_err());
+        assert!(
+            parse(&["config", "set", "k", "v", "--restart"]).is_err(),
+            "no --restart flag"
+        );
+    }
+
+    #[test]
+    fn calibrate_from_a_non_root_user_prints_the_sudo_line_and_sends_nothing() {
+        let sent = std::cell::Cell::new(0);
+        let send = |_: &Request, _: Duration| -> Result<Response, String> {
+            sent.set(sent.get() + 1);
+            Err("must not be called".into())
+        };
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, Some("30m"), false, false, false, false),
+            Ok(1)
+        );
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, None, true, false, false, false),
+            Ok(1)
+        );
+        assert_eq!(sent.get(), 0);
+        assert!(
+            cli_pad::sudo_instruction(" --ttl 30m").contains("sudo doorman calibrate --ttl 30m")
+        );
+    }
+
+    #[test]
+    fn calibrate_status_works_for_anyone_and_root_sends_the_request() {
+        use doorman_shared::CalibrationInfo;
+        let seen = std::cell::RefCell::new(Vec::new());
+        let send = |r: &Request, _: Duration| -> Result<Response, String> {
+            seen.borrow_mut().push(serde_json::to_string(r).unwrap());
+            Ok(Response::Success {
+                message: None,
+                data: Some(ResponseData::Calibration {
+                    info: CalibrationInfo {
+                        active: true,
+                        remaining_secs: 60,
+                        ttl_secs: 2700,
+                        judged_failures_counted: 0,
+                    },
+                }),
+            })
+        };
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, None, false, true, false, false),
+            Ok(0)
+        );
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, Some("30m"), false, false, false, true),
+            Ok(0)
+        );
+        assert_eq!(
+            cli_pad::cmd_calibrate(&send, None, true, false, false, true),
+            Ok(0)
+        );
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                r#"{"type":"calibrate_status"}"#.to_string(),
+                r#"{"type":"calibrate","ttl_secs":1800}"#.to_string(),
+                r#"{"type":"calibrate_end"}"#.to_string(),
+            ]
+        );
+        assert!(cli_pad::cmd_calibrate(&send, Some("soon"), false, false, false, true).is_err());
+    }
+
+    #[test]
+    fn calibrate_surfaces_the_daemons_refusal() {
+        let send = |_: &Request, _: Duration| -> Result<Response, String> {
+            Ok(Response::Failure {
+                reason: "ttl 99999s exceeds the maximum of 7200s (120 min)".into(),
+            })
+        };
+        let err =
+            cli_pad::cmd_calibrate(&send, Some("99999s"), false, false, false, true).unwrap_err();
+        assert!(err.contains("exceeds the maximum"), "{err}");
+    }
 }

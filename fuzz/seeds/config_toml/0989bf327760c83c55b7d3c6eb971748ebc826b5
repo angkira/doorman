@@ -1,0 +1,30 @@
+[ip0c]
+admin_uids = [0,[ipc]
+admin_uids = [# doorman Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.b/doorman"
+log_.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (roo 00connectit and the user themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = fon{_alse
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keeh]
+thp_raw_[ipRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the us
+er themself
+# are always allowed).
+trusted_uids = [n_valid_fpTvrames vvvv= 5
+
+[d

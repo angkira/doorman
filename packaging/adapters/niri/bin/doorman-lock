@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# doorman-lock - lock the session and start event-driven face unlock.
+#
+# Starts the screen locker as a background job of this script (it is not
+# allowed to daemonize itself), so $! is the PID of the real locker, then starts `doorman unlock-watch` for
+# exactly that PID. The watcher asks the daemon to report a face match and then
+# SIGTERMs the locker; nothing is polled and nothing is killed by name.
+#
+# A locker refused because the session is already locked exits at once. If it
+# exits non-zero but a locker of the same name is alive for this user (gtklock
+# can return 1 while a previous instance holds the lock), the watcher is
+# attached to that live PID instead of giving up. If nothing is alive but
+# logind reports LockedHint=yes, the lock belongs to an unknown client: that is
+# logged and no watcher is started (there is nothing to SIGTERM). One watcher
+# at a time: its PID is kept in $XDG_RUNTIME_DIR/doorman/unlock-watch.pid.
+# Checking that file and starting the watcher is one step under a non-blocking
+# flock on $XDG_RUNTIME_DIR/doorman/unlock-watch.lock, so two key presses within
+# the settle time cannot start two watchers for one locker. A recorded PID counts
+# only while /proc shows an unlock watcher behind it (PIDs get reused). Without
+# flock the old unlocked check-then-start is used and logged.
+#
+# Environment (all optional):
+#   DOORMAN_USER            user whose face unlocks (default: current user)
+#   DOORMAN_SOCKET          daemon socket (default: /run/doorman/doorman.sock)
+#   DOORMAN_BIN             doorman CLI (default: doorman)
+#   DOORMAN_LOCK_BACKEND    auto | gtklock | swaylock (default: auto)
+#   DOORMAN_LOCKER_NAME     expected /proc comm of the locker (default: basename)
+#   DOORMAN_UNLOCK_MODE     event (default) | poll (old polling watcher, fallback)
+#   DOORMAN_GTKLOCK_CONFIG  default: ${XDG_CONFIG_HOME:-$HOME/.config}/gtklock/config.ini
+#   DOORMAN_SWAYLOCK_CONFIG default: ${XDG_CONFIG_HOME:-$HOME/.config}/swaylock/config
+#   DOORMAN_LOCKER_SETTLE   seconds to wait before deciding the locker stayed up (0.3)
+#   DOORMAN_WATCH_EARLY     1 (default): start the watcher as soon as the locker
+#                           process exists, in parallel with the settle wait, so
+#                           the daemon starts the camera ~0.3 s earlier. 0: old
+#                           order (settle first, then watcher). Applies to
+#                           DOORMAN_UNLOCK_MODE=event only; poll mode always
+#                           starts its watcher after the settle wait.
+#   GTKLOCK, SWAYLOCK       locker executables
+# Extra arguments are passed to the locker.
+set -euo pipefail
+
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}"
+
+user="${DOORMAN_USER:-$(id -un)}"
+socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
+doorman_bin="${DOORMAN_BIN:-doorman}"
+backend="${DOORMAN_LOCK_BACKEND:-auto}"
+unlock_mode="${DOORMAN_UNLOCK_MODE:-event}"
+settle="${DOORMAN_LOCKER_SETTLE:-0.3}"
+watch_early="${DOORMAN_WATCH_EARLY:-1}"
+gtklock_bin="${GTKLOCK:-gtklock}"
+swaylock_bin="${SWAYLOCK:-swaylock}"
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+gtklock_config="${DOORMAN_GTKLOCK_CONFIG:-$config_home/gtklock/config.ini}"
+swaylock_config="${DOORMAN_SWAYLOCK_CONFIG:-$config_home/swaylock/config}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+poll_watcher="${DOORMAN_LOCK_WATCH_POLL:-$script_dir/doorman-lock-watch-poll}"
+
+state_dir="$XDG_RUNTIME_DIR/doorman"
+log="$state_dir/lock.log"
+mkdir -p "$state_dir"
+chmod 700 "$state_dir"
+
+watcher_pidfile="$state_dir/unlock-watch.pid"
+watcher_lockfile="$state_dir/unlock-watch.lock"
+watcher_pid=""
+
+log() {
+    printf '%s doorman-lock: %s\n' "$(date -Is)" "$*" >>"$log"
+}
+
+# Remove the pidfile on exit, but only if it still names our watcher.
+cleanup_pidfile() {
+    if [ -n "$watcher_pid" ] && [ "$(cat "$watcher_pidfile" 2>/dev/null)" = "$watcher_pid" ]; then
+        rm -f "$watcher_pidfile"
+    fi
+}
+trap cleanup_pidfile EXIT
+
+# True when $1 is a command line (NUL separators already turned into spaces)
+# of an unlock watcher: the event watcher or the polling fallback script.
+is_unlock_watcher_cmdline() {
+    case "$1" in
+        *" unlock-watch "* | *"$(basename -- "$poll_watcher")"*) return 0 ;;
+    esac
+    return 1
+}
+
+# True (and logs) when a watcher recorded in the pidfile is still alive. A pidfile
+# naming a live process that is not an unlock watcher (reused PID) is stale: it
+# is logged and removed. Without /proc only liveness can be checked.
+live_watcher_running() {
+    local recorded cmdline
+    recorded="$(cat "$watcher_pidfile" 2>/dev/null || true)"
+    case "$recorded" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$recorded" 2>/dev/null || return 1
+    if [ -r /proc/self/cmdline ]; then
+        cmdline="$(tr '\0' ' ' <"/proc/$recorded/cmdline" 2>/dev/null || true)"
+        if ! is_unlock_watcher_cmdline "$cmdline"; then
+            log "pidfile names pid=$recorded which is not an unlock watcher (PID reused?): removing stale $watcher_pidfile"
+            rm -f "$watcher_pidfile"
+            return 1
+        fi
+    fi
+    log "unlock watcher pid=$recorded is already running"
+    return 0
+}
+
+# Start the watcher for the locker with PID $1 in the background and record it.
+# File descriptor 9 holds the start lock (see start_watcher_once); the watcher
+# gets it closed so it does not keep the lock for its whole life.
+start_watcher() {
+    local target_pid="$1"
+    case "$unlock_mode" in
+        event)
+            "$doorman_bin" --socket "$socket" unlock-watch \
+                --user "$user" --locker-pid "$target_pid" --locker-name "$locker_name" \
+                >>"$log" 2>&1 9>&- &
+            ;;
+        poll)
+            "$poll_watcher" "$user" "$socket" "$locker_name" >>"$log" 2>&1 9>&- &
+            ;;
+        *)
+            log "unsupported DOORMAN_UNLOCK_MODE=$unlock_mode (locker left running, password unlock only)"
+            echo "doorman-lock: unsupported DOORMAN_UNLOCK_MODE=$unlock_mode" >&2
+            return 0
+            ;;
+    esac
+    watcher_pid=$!
+    echo "$watcher_pid" >"$watcher_pidfile"
+    log "unlock watcher pid=$watcher_pid mode=$unlock_mode locker_pid=$target_pid"
+}
+
+# Check the pidfile and start a watcher for the locker with PID $1 as one atomic
+# step. The non-blocking flock on fd 9 serialises concurrent doorman-lock runs:
+# if another run holds it, that run is starting the watcher, so skip. Sets
+# watcher_pid only when this run started the watcher.
+start_watcher_once() {
+    local target_pid="$1" locked=0
+    if ! command -v flock >/dev/null 2>&1; then
+        log "flock not found: checking and starting the watcher without the start lock"
+    elif ! exec 9>"$watcher_lockfile"; then
+        log "cannot open $watcher_lockfile: checking and starting the watcher without the start lock"
+    elif flock -n 9; then
+        locked=1
+    else
+        exec 9>&-
+        log "another doorman-lock holds $watcher_lockfile and is starting the watcher: not starting one"
+        return 0
+    fi
+    if live_watcher_running; then
+        log "decision: not starting a second watcher"
+    else
+        start_watcher "$target_pid"
+    fi
+    if [ "$locked" -eq 1 ]; then
+        exec 9>&-
+    fi
+    return 0
+}
+
+# The locker exited at once with a non-zero status ($1). Decide whether the
+# session lock is nevertheless held and, if a live locker holds it, watch it.
+handle_failed_locker() {
+    local exit_rc="$1" holder session_id hint
+    holder="$(pgrep -n -u "$(id -u)" -x "$locker_name" 2>/dev/null || true)"
+    if [ -n "$holder" ]; then
+        log "decision: rc=$exit_rc but $locker_name pid=$holder is alive for uid $(id -u): lock held, attaching watcher"
+        start_watcher_once "$holder"
+        if [ -n "$watcher_pid" ]; then
+            local watch_rc=0
+            wait "$watcher_pid" || watch_rc=$?
+            log "unlock watcher pid=$watcher_pid exited rc=$watch_rc"
+        fi
+        return 0
+    fi
+    session_id="${XDG_SESSION_ID:-}"
+    hint=""
+    if [ -n "$session_id" ]; then
+        hint="$(loginctl show-session "$session_id" -p LockedHint 2>/dev/null || true)"
+    fi
+    if [ "$hint" = "LockedHint=yes" ]; then
+        log "decision: rc=$exit_rc, no live $locker_name for uid $(id -u), but logind reports LockedHint=yes for session $session_id: lock held by an unknown client, no watcher attached (nothing to SIGTERM)"
+    else
+        log "decision: rc=$exit_rc, no live $locker_name for uid $(id -u) and session not reported locked (LockedHint='${hint#LockedHint=}'): no watcher"
+    fi
+}
+
+if [ "$backend" = auto ]; then
+    if command -v "$gtklock_bin" >/dev/null 2>&1; then
+        backend=gtklock
+    elif command -v "$swaylock_bin" >/dev/null 2>&1; then
+        backend=swaylock
+    else
+        log "neither $gtklock_bin nor $swaylock_bin found"
+        echo "doorman-lock: no screen locker found (tried $gtklock_bin, $swaylock_bin)" >&2
+        exit 127
+    fi
+fi
+
+case "$backend" in
+    gtklock)
+        locker_cmd=("$gtklock_bin")
+        [ -f "$gtklock_config" ] && locker_cmd+=(--config "$gtklock_config")
+        ;;
+    swaylock)
+        locker_cmd=("$swaylock_bin")
+        [ -f "$swaylock_config" ] && locker_cmd+=(--config "$swaylock_config")
+        ;;
+    *)
+        log "unsupported DOORMAN_LOCK_BACKEND=$backend"
+        echo "doorman-lock: unsupported DOORMAN_LOCK_BACKEND=$backend" >&2
+        exit 2
+        ;;
+esac
+locker_name="${DOORMAN_LOCKER_NAME:-$(basename -- "${locker_cmd[0]}")}"
+
+log "locking: user=$user mode=$unlock_mode cmd=${locker_cmd[*]} $*"
+"${locker_cmd[@]}" "$@" >>"$log" 2>&1 &
+locker_pid=$!
+
+# Hot path: the watcher only needs the PID, and the daemon can start the camera
+# as soon as it is asked, so do not make it wait for the settle check. A locker
+# that dies meanwhile makes the early watcher exit by itself (locker gone); it is
+# reaped below before the already-locked handling runs.
+# Event mode only: the poll watcher has no lock gate (it would run `doorman test`
+# and kill the locker before the compositor has locked), so it keeps the old
+# order and starts after the settle check.
+if [ "$watch_early" = 1 ] && [ "$unlock_mode" = event ] && kill -0 "$locker_pid" 2>/dev/null; then
+    start_watcher_once "$locker_pid"
+fi
+
+# A locker that is refused because the session is already locked exits at
+# once. Do not start a second locker. With a zero status that is success; a
+# non-zero status may still mean the lock is held (see the header).
+sleep "$settle"
+if ! kill -0 "$locker_pid" 2>/dev/null; then
+    if [ -n "$watcher_pid" ]; then
+        wait "$watcher_pid" 2>/dev/null || true
+        log "early unlock watcher pid=$watcher_pid ended with its locker"
+        cleanup_pidfile
+        watcher_pid=""
+    fi
+    rc=0
+    wait "$locker_pid" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "locker exited within ${settle}s (rc=0): session already locked; nothing more to do"
+    else
+        log "locker exited within ${settle}s (rc=$rc): checking whether the session lock is held"
+        handle_failed_locker "$rc"
+    fi
+    exit 0
+fi
+log "locker pid=$locker_pid name=$locker_name"
+
+# Watch whenever the recorded locker is alive, whatever its exit code will be
+# (a no-op when the early watcher above is already running).
+start_watcher_once "$locker_pid"
+
+# Stay as the locker's parent so it is reaped the moment it exits.
+rc=0
+wait "$locker_pid" || rc=$?
+log "locker pid=$locker_pid exited rc=$rc"

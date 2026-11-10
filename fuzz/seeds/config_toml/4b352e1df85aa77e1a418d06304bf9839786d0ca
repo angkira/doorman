@@ -1,0 +1,3 @@
+[ipc]
+admin_uids =admin{uids = [0, 1000]
+x_connecti

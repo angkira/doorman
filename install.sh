@@ -101,7 +101,7 @@ echo "                    ${YELLOW}Performance: 50-60 FPS (GPU) / 8-10 FPS (CPU)
 echo "                    Requires: onnxruntime-rocm (AMD) or onnxruntime-gpu (NVIDIA)"
 echo ""
 
-read -p "Choose backend [1-3] (default: 2): " BACKEND_CHOICE
+read -rp "Choose backend [1-3] (default: 2): " BACKEND_CHOICE
 BACKEND_CHOICE=${BACKEND_CHOICE:-2}
 
 case $BACKEND_CHOICE in
@@ -118,7 +118,7 @@ case $BACKEND_CHOICE in
         NEEDS_PYTHON=false
         if [ "$GPU_TYPE" != "nvidia" ]; then
             echo -e "${YELLOW}Warning: candle-cuda requires NVIDIA GPU with CUDA${NC}"
-            read -p "Continue anyway? [y/N]: " CONTINUE
+            read -rp "Continue anyway? [y/N]: " CONTINUE
             if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
                 exit 1
             fi
@@ -155,7 +155,7 @@ echo "  2) ${GREEN}v4l${NC}        - Video4Linux (simple, direct device access)"
 echo "                    Works with /dev/videoN devices"
 echo ""
 
-read -p "Choose camera [1-2] (default: 1): " CAMERA_CHOICE
+read -rp "Choose camera [1-2] (default: 1): " CAMERA_CHOICE
 CAMERA_CHOICE=${CAMERA_CHOICE:-1}
 
 case $CAMERA_CHOICE in
@@ -165,7 +165,7 @@ case $CAMERA_CHOICE in
         ;;
     2)
         CAMERA="v4l"
-        CARGO_FEATURES="$CARGO_FEATURES,camera-v4l"
+        CARGO_FEATURES="$CARGO_FEATURES,camera-v4l2"
         ;;
     *)
         echo -e "${RED}Invalid choice${NC}"
@@ -190,7 +190,7 @@ echo "                /var/lib/doorman/"
 echo "                /etc/systemd/system/doormand.service"
 echo ""
 
-read -p "Choose mode [1-2] (default: 1): " INSTALL_MODE
+read -rp "Choose mode [1-2] (default: 1): " INSTALL_MODE
 INSTALL_MODE=${INSTALL_MODE:-1}
 
 case $INSTALL_MODE in
@@ -237,7 +237,7 @@ echo -e "  Service:       $SERVICE_DIR/doormand.service"
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
 
-read -p "Proceed with installation? [y/N]: " CONFIRM
+read -rp "Proceed with installation? [y/N]: " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
     echo "Installation cancelled."
     exit 0
@@ -273,6 +273,7 @@ if [ "$NEEDS_PYTHON" = true ]; then
         python3.12 -m venv "$VENV_DIR" || python3 -m venv "$VENV_DIR"
     fi
     
+    # shellcheck disable=SC1091 # venv activate script is created at install time
     source "$VENV_DIR/bin/activate"
     
     # Install dependencies
@@ -296,6 +297,7 @@ if [ "$NEEDS_PYTHON" = true ]; then
         # Create symlink libonnxruntime.so -> libonnxruntime.so.X.Y.Z
         cd "$ORT_CAPI_DIR"
         if [ ! -e "libonnxruntime.so" ]; then
+            # shellcheck disable=SC2012 # glob in a known library dir; names are plain
             VERSIONED_LIB=$(ls libonnxruntime.so.* 2>/dev/null | head -1)
             if [ -n "$VERSIONED_LIB" ]; then
                 ln -sf "$VERSIONED_LIB" libonnxruntime.so

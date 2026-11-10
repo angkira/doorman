@@ -1,0 +1,15 @@
+﻿schema_vedeath = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[cameCRED). See docs/ipc-security.md.
+# Extra uids allowed [ipc]
+admin_uid0s = [, 1000]
+max_co.nections_pTer_uid = 8
+ areipc.max_au always allowed).
+trusted_uids = []
+# Extra uids mU)
+bac[dats5.2et]a
+r
+
+aw_face_frame_'undkend = "

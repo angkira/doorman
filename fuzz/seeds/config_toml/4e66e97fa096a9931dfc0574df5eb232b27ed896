@@ -1,0 +1,5 @@
+# doorman Configured on LFW + real-binary5-0.88, worsmes = 10
+timeout_secs = *
+
+[ipc]
+# IPC peer-credoren

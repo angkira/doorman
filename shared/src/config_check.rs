@@ -1,0 +1,321 @@
+//! `doorman config check` and the generated config reference (docs/CONFIG.md).
+//!
+//! The set of known keys is derived from a serialized `Config::default()`, so it
+//! cannot drift from the struct. `Option` fields that default to `None` are
+//! serialized by `serde_json` as `null` (TOML would drop them), which keeps them
+//! in the known set.
+
+use crate::config::{Config, ConfigError, CONFIG_SCHEMA_VERSION};
+use std::collections::BTreeMap;
+
+/// Keys that were renamed or removed and are no longer read: `(dotted old key, hint)`.
+/// Add an entry when a key is renamed or removed. Such a key is reported once, as
+/// deprecated (not additionally as unknown).
+pub const DEPRECATED_KEYS: &[(&str, &str)] = &[(
+    "dataset.raw_face_frame_bundle_size",
+    "removed in 7c511d9 and ignored: every detector-positive auth frame is captured and \
+     capture packs are bounded by dataset.max_capture_packs_per_day; the remaining \
+     generic cap is dataset.raw_frame_bundle_size. Delete the key",
+)];
+
+/// Result of checking a config file that parsed and validated.
+#[derive(Debug)]
+pub struct CheckReport {
+    pub config: Config,
+    /// Dotted paths present in the file that no `Config` field reads.
+    pub unknown_keys: Vec<String>,
+    /// `(dotted path, hint)` of deprecated keys present in the file.
+    pub deprecated_keys: Vec<(String, String)>,
+}
+
+fn default_config_json() -> serde_json::Value {
+    serde_json::to_value(Config::default())
+        .expect("Config::default() serializes to JSON (all fields are plain data)")
+}
+
+/// The built-in default of a dotted key (`null` for an unset optional key), or
+/// `None` when the key does not exist.
+pub fn default_value(dotted: &str) -> Option<serde_json::Value> {
+    let mut current = default_config_json();
+    for part in dotted.split('.') {
+        current = current.get(part)?.clone();
+    }
+    Some(current)
+}
+
+/// Known dotted key paths of the config, mapped to "is a table".
+pub fn known_keys() -> BTreeMap<String, bool> {
+    let mut out = BTreeMap::new();
+    collect_known(&default_config_json(), "", &mut out);
+    out
+}
+
+fn collect_known(value: &serde_json::Value, prefix: &str, out: &mut BTreeMap<String, bool>) {
+    let Some(map) = value.as_object() else {
+        return;
+    };
+    for (key, child) in map {
+        let path = join_path(prefix, key);
+        out.insert(path.clone(), child.is_object());
+        collect_known(child, &path, out);
+    }
+}
+
+fn join_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix}.{key}")
+    }
+}
+
+/// Dotted paths in `value` that are not in `known`. Children of a known leaf
+/// are not inspected (a leaf value is opaque).
+fn unknown_paths(
+    value: &toml::Value,
+    prefix: &str,
+    known: &BTreeMap<String, bool>,
+    out: &mut Vec<String>,
+) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    for (key, child) in table {
+        let path = join_path(prefix, key);
+        match known.get(&path) {
+            None => out.push(path),
+            Some(true) => unknown_paths(child, &path, known, out),
+            Some(false) => {}
+        }
+    }
+}
+
+/// Parse, validate and diff a config file's text against the known keys.
+pub fn check_str(content: &str) -> Result<CheckReport, ConfigError> {
+    let config: Config = toml::from_str(content)?;
+    config.validate()?;
+    let raw: toml::Value = toml::from_str(content)?;
+    let known = known_keys();
+    let mut unknown_keys = Vec::new();
+    unknown_paths(&raw, "", &known, &mut unknown_keys);
+    unknown_keys.retain(|path| !DEPRECATED_KEYS.iter().any(|(old, _)| old == path));
+    let deprecated_keys = DEPRECATED_KEYS
+        .iter()
+        .filter(|(old, _)| path_present(&raw, old))
+        .map(|(old, hint)| (old.to_string(), hint.to_string()))
+        .collect();
+    Ok(CheckReport {
+        config,
+        unknown_keys,
+        deprecated_keys,
+    })
+}
+
+fn path_present(value: &toml::Value, dotted: &str) -> bool {
+    let mut current = value;
+    for part in dotted.split('.') {
+        match current.get(part) {
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Decimals kept when printing a float default (f32 fields widen to f64 in JSON
+/// and would otherwise print as 0.05000000074505806).
+const FLOAT_DOC_DECIMALS: usize = 6;
+
+fn render_default(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "unset".to_string(),
+        serde_json::Value::Number(n) if n.is_f64() => {
+            let text = format!("{:.*}", FLOAT_DOC_DECIMALS, n.as_f64().unwrap_or_default());
+            let trimmed = text.trim_end_matches('0');
+            trimmed
+                .strip_suffix('.')
+                .map_or_else(|| trimmed.to_string(), |int| format!("{int}.0"))
+        }
+        other => other.to_string(),
+    }
+}
+
+const REFERENCE_HEADER: &str = "\
+# Configuration reference
+
+<!-- GENERATED by `doorman config dump-defaults` from Config::default(). Do not edit by hand;
+     a test fails when this file is out of date. -->
+
+Every key of `doorman.toml` with its built-in default. A key left out of the
+file takes the default listed here; a section left out entirely takes the
+defaults of all its keys. Check a file with:
+
+    doorman config check [--config PATH]
+
+Exit codes: `0` valid, `1` invalid (parse error or failed validation),
+`2` valid but the file contains keys this build does not know (typos, keys from
+a newer version) or deprecated keys.
+
+`schema_version` is the version of this file format (currently ";
+
+const REFERENCE_AFTER_VERSION: &str = ").
+A file without it is read as the current version; a file with a newer version
+than the build supports is rejected. It is bumped only for incompatible
+changes.
+
+`unset` means an optional key with no value (the code picks its own behaviour,
+see the comments in `packaging/doorman.toml.example`).
+
+Read and change single keys without editing the file by hand:
+
+    doorman config get ipc.face_cooldown_secs      # effective value (file or default)
+    sudo doorman config set ipc.face_cooldown_secs \"[10, 30, 120]\"
+    sudo doorman config unset ipc.face_cooldown_secs
+
+`set` / `unset` (root, on `/etc/doorman/doorman.toml`) check the key against this
+reference (an unknown key is refused with suggestions) and the value against the
+same validation the daemon applies at start, keep comments and layout, write
+atomically after a backup `doorman.toml.bak.<timestamp>` (the newest 10 are
+kept), print a diff, refuse a file that fails the trust check below, and never
+restart anything: they print `restart needed: sudo systemctl restart doormand`.
+Comment lines directly above a removed key are removed with it.
+
+Which file is read: `--config`, then `DOORMAN_CONFIG`, then (non-root only)
+`./doorman.toml` and `~/.config/doorman/doorman.toml`, then
+`/etc/doorman/doorman.toml`. A process running as root (for example
+`sudo doorman dataset purge`) never reads the working directory or the user
+config directory, and refuses any file that is not owned by root or whose file
+or directory is group/world-writable.
+
+";
+
+/// Appended to the generated reference; one entry per behaviour-changing
+/// default.
+const MIGRATION_NOTES: &str = "
+## Migration notes
+
+* Defaults are applied per key when a key is missing from the file. Changing a
+  default therefore changes the behaviour of an existing install whose file
+  omits that key. `doorman config check` does not report omitted keys; compare
+  the file with this reference.
+* Dataset capture defaults were tightened for new installs: `raw_frame_bundle_size`
+  10 -> 5 and `max_capture_packs_per_day` 500 -> 20 (both only matter with
+  `keep_raw_frames = true`, which stays `false`, as does `logging_enabled`).
+  `retention_days = 14` is new. An existing file that sets these keys keeps its
+  values; a file that omits them now gets the smaller caps. The daemon logs the
+  effective `[dataset]` values once at start.
+* `retention_days` is advisory (it is only the default of `doorman dataset purge`); the daemon deletes capture packs only when `raw_frames_retention_days` is set. Remove old
+  files yourself with `sudo doorman dataset purge [--older-than DAYS] [--dry-run]`
+  (root only; it deletes `attempts-*.jsonl`, `labels-*.jsonl` and
+  `captures/<day>/` entries whose UTC day is older than the cutoff).
+* Round 9a (security hardening) changed defaults for installs whose file omits
+  the keys: face auth is suspended after 5 judged failures
+  (`ipc.face_max_judged_failures`, 0 disables); in `mean` mode every frame must
+  reach `decision.frame_identity_floor = 0.30` (0 disables) and at least
+  `authentication.min_decision_frames` (derived: auth_frames - 2) good frames
+  must be collected; frames with a second face are not accepted
+  (`recognition.multi_face_policy = \"reject\"`, `\"off\"` restores the old
+  behaviour); frames older than `camera.max_frame_age_ms = 1000` are skipped (0
+  disables); the daemon refuses to start when a listed model file does not match
+  the integrity manifest (`models.allow_unverified_models`); raw frames of
+  SUCCESSFUL unlocks are no longer stored even with `keep_raw_frames = true`
+  (`dataset.capture_successful_unlocks = true` restores it); automatic deletion
+  of capture packs happens only when `dataset.raw_frames_retention_days` is set
+  (unset = never). Run `doorman models verify` before upgrading.
+* `dataset.raw_face_frame_bundle_size` was removed (commit 7c511d9) and has no
+  effect. `doorman config check` reports it as deprecated (exit 2); delete it
+  from the file. See `dataset.raw_frame_bundle_size` for the remaining cap.
+";
+
+/// The generated docs/CONFIG.md body: every section and key with its default.
+pub fn render_reference_markdown() -> String {
+    let value = default_config_json();
+    let map = value
+        .as_object()
+        .expect("Config serializes to a JSON object");
+    let mut out = String::from(REFERENCE_HEADER);
+    out.push_str(&CONFIG_SCHEMA_VERSION.to_string());
+    out.push_str(REFERENCE_AFTER_VERSION);
+    out.push_str("## Top level\n\n| Key | Default |\n|---|---|\n");
+    for (key, child) in map.iter().filter(|(_, v)| !v.is_object()) {
+        out.push_str(&format!("| `{key}` | `{}` |\n", render_default(child)));
+    }
+    for (section, child) in map.iter().filter(|(_, v)| v.is_object()) {
+        out.push_str(&format!(
+            "\n## `[{section}]`\n\n| Key | Default |\n|---|---|\n"
+        ));
+        render_section(child, section, &mut out);
+    }
+    out.push_str(MIGRATION_NOTES);
+    out
+}
+
+fn render_section(value: &serde_json::Value, path: &str, out: &mut String) {
+    let Some(map) = value.as_object() else {
+        return;
+    };
+    for (key, child) in map.iter().filter(|(_, v)| !v.is_object()) {
+        out.push_str(&format!("| `{key}` | `{}` |\n", render_default(child)));
+    }
+    for (key, child) in map.iter().filter(|(_, v)| v.is_object()) {
+        let sub = format!("{path}.{key}");
+        out.push_str(&format!(
+            "\n### `[{sub}]`\n\n| Key | Default |\n|---|---|\n"
+        ));
+        render_section(child, &sub, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_keys_cover_option_fields_and_sections() {
+        let known = known_keys();
+        assert_eq!(known.get("camera"), Some(&true));
+        assert_eq!(known.get("schema_version"), Some(&false));
+        // Option<..> defaulting to None must still be a known key.
+        assert_eq!(known.get("ipc.stream_socket_group"), Some(&false));
+        assert_eq!(known.get("pam.sudo.similarity_threshold"), Some(&false));
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_with_dotted_paths() {
+        let report =
+            check_str("bogus = 1\n[camera]\nwidth = 640\nnot_a_key = true\n[nosuch]\nx = 1\n")
+                .unwrap();
+        assert_eq!(
+            report.unknown_keys,
+            vec!["bogus", "camera.not_a_key", "nosuch"]
+        );
+    }
+
+    #[test]
+    fn newer_schema_version_is_invalid() {
+        let err =
+            check_str(&format!("schema_version = {}\n", CONFIG_SCHEMA_VERSION + 1)).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
+    }
+
+    #[test]
+    fn missing_schema_version_reads_as_current() {
+        let report = check_str("").unwrap();
+        assert_eq!(report.config.schema_version, CONFIG_SCHEMA_VERSION);
+        assert!(report.unknown_keys.is_empty());
+    }
+
+    #[test]
+    fn generated_reference_lists_every_known_key() {
+        let doc = render_reference_markdown();
+        for (path, is_table) in known_keys() {
+            let leaf = path.rsplit('.').next().expect("non-empty path");
+            let needle = if is_table {
+                format!("`[{path}]`")
+            } else {
+                format!("`{leaf}`")
+            };
+            assert!(doc.contains(&needle), "{path} missing from reference");
+        }
+    }
+}

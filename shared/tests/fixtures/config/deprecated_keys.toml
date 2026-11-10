@@ -1,0 +1,8 @@
+# Host config shape: a key that was removed from the code is still in the file.
+schema_version = 1
+
+[dataset]
+logging_enabled = true
+keep_raw_frames = true
+raw_frame_bundle_size = 5
+raw_face_frame_bundle_size = 120
