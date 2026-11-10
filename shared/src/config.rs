@@ -1295,7 +1295,26 @@ pub struct DatasetConfig {
     /// omitted. Advisory only: the daemon never deletes dataset files itself.
     #[serde(default = "default_dataset_retention_days")]
     pub retention_days: u32,
+
+    /// Also store raw frames of SUCCESSFUL unlocks (needs `keep_raw_frames`).
+    /// Default `false`: a sharp, well-lit photo of the owner taken by the very
+    /// sensor that unlocks is the best material to print and replay, so it is
+    /// not kept unless you need genuine samples for calibration. Rejected and
+    /// spoof-suspected attempts are still captured when `keep_raw_frames` is on.
+    #[serde(default)]
+    pub capture_successful_unlocks: bool,
+
+    /// Automatic retention of raw capture packs (`<data_dir>/dataset/captures/`):
+    /// the daemon deletes capture days older than this many days at start and
+    /// then daily. UNSET (default): nothing is ever deleted automatically.
+    /// `0`: keep forever (explicit). Only capture packs are touched, never
+    /// attempt or label shards. Range 0..=3650.
+    #[serde(default)]
+    pub raw_frames_retention_days: Option<u32>,
 }
+
+/// Inclusive upper bound for `[dataset] raw_frames_retention_days`.
+pub const MAX_RAW_FRAMES_RETENTION_DAYS: u32 = 3650;
 
 impl Default for DatasetConfig {
     fn default() -> Self {
@@ -1307,6 +1326,8 @@ impl Default for DatasetConfig {
             raw_frame_jpeg_quality: default_raw_frame_jpeg_quality(),
             max_attempt_records_per_day: default_dataset_max_attempt_records_per_day(),
             retention_days: default_dataset_retention_days(),
+            capture_successful_unlocks: false,
+            raw_frames_retention_days: None,
         }
     }
 }
@@ -1715,6 +1736,16 @@ impl Config {
         if !(0.0..=MAX_LUMA).contains(&brightness) {
             return Err(ConfigError::Invalid(format!(
                 "recognition.min_brightness = {brightness} is out of range (0..={MAX_LUMA})"
+            )));
+        }
+        if self
+            .dataset
+            .raw_frames_retention_days
+            .is_some_and(|d| d > MAX_RAW_FRAMES_RETENTION_DAYS)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "dataset.raw_frames_retention_days = {} is out of range (0..={MAX_RAW_FRAMES_RETENTION_DAYS})",
+                self.dataset.raw_frames_retention_days.unwrap_or_default()
             )));
         }
         let floor = self.decision.frame_identity_floor;
@@ -2290,6 +2321,12 @@ mod camera_guard_tests {
             crate::config::MultiFacePolicy::Reject
         );
         assert_eq!(cfg.recognition.multi_face_min_area_ratio, 0.25);
+        assert!(!cfg.dataset.capture_successful_unlocks);
+        assert_eq!(cfg.dataset.raw_frames_retention_days, None);
+        let bad: Config = toml::from_str("[dataset]\nraw_frames_retention_days=3651\n").unwrap();
+        assert!(bad.validate().is_err());
+        let ok: Config = toml::from_str("[dataset]\nraw_frames_retention_days=0\n").unwrap();
+        assert!(ok.validate().is_ok());
         assert!(!cfg.models.allow_unverified_models);
         assert!(cfg.models.manifest_path.is_none());
         assert!(cfg.validate().is_ok());

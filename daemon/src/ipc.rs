@@ -1329,10 +1329,7 @@ fn log_auth_capture_pack(
     gt_source: GtSource,
     frames: Vec<dataset::CaptureFrameImage>,
 ) {
-    if !state.config.dataset.logging_enabled
-        || !state.config.dataset.keep_raw_frames
-        || frames.is_empty()
-    {
+    if !dataset::capture_pack_allowed(&state.config.dataset, outcome) || frames.is_empty() {
         return;
     }
     let data_dir = state.config.daemon.data_dir.clone();

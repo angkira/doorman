@@ -89,12 +89,14 @@ or directory is group/world-writable.
 
 | Key | Default |
 |---|---|
+| `capture_successful_unlocks` | `false` |
 | `keep_raw_frames` | `false` |
 | `logging_enabled` | `false` |
 | `max_attempt_records_per_day` | `50000` |
 | `max_capture_packs_per_day` | `20` |
 | `raw_frame_bundle_size` | `5` |
 | `raw_frame_jpeg_quality` | `92` |
+| `raw_frames_retention_days` | `unset` |
 | `retention_days` | `14` |
 
 ## `[decision]`

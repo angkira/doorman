@@ -386,6 +386,12 @@ async fn main() -> Result<()> {
         config.dataset.max_attempt_records_per_day,
         config.dataset.retention_days,
     );
+    info!(
+        capture_successful_unlocks = config.dataset.capture_successful_unlocks,
+        "{}",
+        doormand::dataset_purge::Retention::from_config(config.dataset.raw_frames_retention_days)
+            .describe()
+    );
     info!("ML backend: {}", config.ml.backend);
     info!("Device: {}", config.ml.device);
     if config.daemon.debug_mode {
@@ -401,6 +407,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&config.daemon.data_dir)?;
 
     verify_model_integrity(&config)?;
+    spawn_raw_frame_retention(&config);
 
     info!("Initializing ML pipeline...");
     let ml_pipeline = match ml::MLPipeline::new(&config).await {
@@ -806,4 +813,35 @@ fn verify_model_integrity(config: &Config) -> anyhow::Result<()> {
         );
     }
     outcome.map_err(anyhow::Error::msg)
+}
+
+/// Interval of the automatic raw frame retention pass after the one at start.
+const RETENTION_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Fix the dataset directory modes and, only when
+/// `[dataset] raw_frames_retention_days` is set above 0, delete capture packs
+/// older than that: once now and then daily. With the key unset nothing is ever
+/// deleted (the modes are still enforced).
+fn spawn_raw_frame_retention(config: &Config) {
+    let dataset_dir = std::path::Path::new(&config.daemon.data_dir).join("dataset");
+    let retention =
+        doormand::dataset_purge::Retention::from_config(config.dataset.raw_frames_retention_days);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(RETENTION_INTERVAL);
+        loop {
+            tick.tick().await;
+            let dir = dataset_dir.clone();
+            let today = chrono::Utc::now().date_naive();
+            let result = tokio::task::spawn_blocking(move || {
+                doormand::dataset_purge::run_retention(&dir, retention, today)
+            })
+            .await;
+            match result {
+                Ok(Ok(0)) => {}
+                Ok(Ok(n)) => info!("raw frame retention: removed {n} capture day(s)"),
+                Ok(Err(e)) => warn!("raw frame retention pass failed (non-fatal): {e}"),
+                Err(e) => warn!("raw frame retention task failed: {e}"),
+            }
+        }
+    });
 }

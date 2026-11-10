@@ -78,6 +78,100 @@ pub fn purge_candidates(
     Ok(out)
 }
 
+/// Only the capture-pack day directories (`captures/YYYYMMDD`) strictly older
+/// than `older_than_days` before `today`. Attempt and label shards are never
+/// selected: this is the automatic retention of raw frames.
+pub fn capture_candidates(
+    dataset_dir: &Path,
+    today: NaiveDate,
+    older_than_days: u32,
+) -> std::io::Result<Vec<PathBuf>> {
+    Ok(purge_candidates(dataset_dir, today, older_than_days)?
+        .into_iter()
+        .filter(|p| p.is_dir() && p.parent().is_some_and(|d| d.ends_with(CAPTURES_DIR)))
+        .collect())
+}
+
+/// Make the dataset, `captures` and every capture-day directory private
+/// (0700). Real directories only (symlinks are skipped). Returns how many were
+/// changed.
+#[cfg(unix)]
+pub fn enforce_private_dirs(dataset_dir: &Path) -> std::io::Result<usize> {
+    use std::os::unix::fs::PermissionsExt;
+    const PRIVATE: u32 = 0o700;
+    let mut changed = 0;
+    let mut fix = |dir: &Path| -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.is_dir() && meta.permissions().mode() & 0o777 != PRIVATE {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(PRIVATE))?;
+            changed += 1;
+        }
+        Ok(())
+    };
+    if !real_dir_exists(dataset_dir)? {
+        return Ok(0);
+    }
+    fix(dataset_dir)?;
+    let captures = dataset_dir.join(CAPTURES_DIR);
+    if real_dir_exists(&captures)? {
+        fix(&captures)?;
+        for entry in std::fs::read_dir(&captures)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                fix(&entry.path())?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// How automatic retention of raw frames is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retention {
+    /// `raw_frames_retention_days` unset: never delete automatically.
+    Unconfigured,
+    /// `raw_frames_retention_days = 0`: keep forever.
+    KeepForever,
+    /// Delete capture days older than this many days.
+    Days(u32),
+}
+
+impl Retention {
+    pub fn from_config(days: Option<u32>) -> Self {
+        match days {
+            None => Self::Unconfigured,
+            Some(0) => Self::KeepForever,
+            Some(n) => Self::Days(n),
+        }
+    }
+
+    /// The INFO line logged at start.
+    pub fn describe(self) -> String {
+        match self {
+            Self::Unconfigured => "raw frame retention: not configured (raw_frames_retention_days unset), nothing is deleted automatically".to_string(),
+            Self::KeepForever => "raw frame retention: keep forever (raw_frames_retention_days = 0)".to_string(),
+            Self::Days(n) => format!("raw frame retention: capture packs older than {n} days are deleted at start and daily"),
+        }
+    }
+}
+
+/// One retention pass: fix directory modes, then delete capture days older than
+/// the configured retention. Does nothing to files when retention is not
+/// `Days`. Returns the number of capture days removed.
+pub fn run_retention(
+    dataset_dir: &Path,
+    retention: Retention,
+    today: NaiveDate,
+) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    enforce_private_dirs(dataset_dir)?;
+    let Retention::Days(days) = retention else {
+        return Ok(0);
+    };
+    let old = capture_candidates(dataset_dir, today, days)?;
+    delete_entries(dataset_dir, &old)
+}
+
 fn shard_day(file_name: &str) -> Option<NaiveDate> {
     let stem = file_name.strip_suffix(SHARD_SUFFIX)?;
     SHARD_PREFIXES
@@ -229,5 +323,69 @@ mod tests {
         std::fs::create_dir_all(&ds).unwrap();
         assert!(delete_entries(&ds, &[victim.join("20200101")]).is_err());
         assert!(victim.join("20200101/precious").exists());
+    }
+
+    #[test]
+    fn retention_deletes_only_old_capture_days_and_only_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ds = tmp.path();
+        for d in ["20261001", "20261020", "20261024"] {
+            std::fs::create_dir_all(ds.join("captures").join(d).join("pack")).unwrap();
+        }
+        std::fs::write(ds.join("attempts-20261001.jsonl"), "x").unwrap();
+        std::fs::write(ds.join("labels-20261001.jsonl"), "x").unwrap();
+        let today = day(2026, 10, 24);
+
+        // Unset and 0: nothing is deleted.
+        for r in [
+            Retention::from_config(None),
+            Retention::from_config(Some(0)),
+        ] {
+            assert_eq!(run_retention(ds, r, today).unwrap(), 0);
+            assert!(ds.join("captures/20261001").exists());
+        }
+        // 7 days: the 2026-10-01 pack goes, the others and the shards stay.
+        assert_eq!(
+            run_retention(ds, Retention::from_config(Some(7)), today).unwrap(),
+            1
+        );
+        assert!(!ds.join("captures/20261001").exists());
+        assert!(ds.join("captures/20261020").exists());
+        assert!(ds.join("captures/20261024").exists());
+        assert!(ds.join("attempts-20261001.jsonl").exists());
+        assert!(ds.join("labels-20261001.jsonl").exists());
+    }
+
+    #[test]
+    fn retention_state_is_described_for_the_start_up_log() {
+        assert!(Retention::from_config(None)
+            .describe()
+            .contains("not configured"));
+        assert!(Retention::from_config(Some(0))
+            .describe()
+            .contains("keep forever"));
+        assert!(Retention::from_config(Some(7))
+            .describe()
+            .contains("7 days"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dataset_directories_are_forced_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ds = tmp.path().join("dataset");
+        let dayd = ds.join("captures").join("20261024");
+        std::fs::create_dir_all(&dayd).unwrap();
+        for d in [&ds, &ds.join("captures"), &dayd] {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(enforce_private_dirs(&ds).unwrap(), 3);
+        for d in [&ds, &ds.join("captures"), &dayd] {
+            let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", d.display());
+        }
+        assert_eq!(enforce_private_dirs(&ds).unwrap(), 0, "idempotent");
+        assert_eq!(enforce_private_dirs(&tmp.path().join("none")).unwrap(), 0);
     }
 }

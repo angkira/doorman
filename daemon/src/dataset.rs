@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 /// Outcome label for one attempt. The ground-truth-confirmed `ConfirmedGenuine` is set
 /// ONLY by the (future, M2) GT-labeling step — cosine alone never sets it. M1 logs the
 /// weaker, immediately-known states.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
     /// GT-confirmed genuine (PAM/password success). Reserved for M2 labeling.
     ConfirmedGenuine,
@@ -271,6 +271,15 @@ pub fn log_label_event(data_dir: &str, enabled: bool, event: &LabelEvent) {
     }
 }
 
+/// Whether raw frames of an attempt with this outcome may be stored: needs
+/// `logging_enabled` and `keep_raw_frames`, and a successful unlock
+/// additionally needs `capture_successful_unlocks`.
+pub fn capture_pack_allowed(cfg: &doorman_shared::DatasetConfig, outcome: Outcome) -> bool {
+    cfg.logging_enabled
+        && cfg.keep_raw_frames
+        && (outcome != Outcome::ConfirmedGenuine || cfg.capture_successful_unlocks)
+}
+
 // Plain data parameters of a persisted record; a params struct would be a refactor.
 #[allow(clippy::too_many_arguments)]
 pub fn write_capture_pack(
@@ -505,6 +514,31 @@ fn append_jsonl<T: Serialize>(dir: &Path, prefix: &str, rec: &T) -> std::io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn raw_frames_of_successful_unlocks_need_an_explicit_opt_in() {
+        let mut cfg = doorman_shared::DatasetConfig {
+            logging_enabled: true,
+            keep_raw_frames: true,
+            ..Default::default()
+        };
+        assert!(!capture_pack_allowed(&cfg, Outcome::ConfirmedGenuine));
+        for failed in [
+            Outcome::Rejected,
+            Outcome::FalseNegative,
+            Outcome::SuspectedSpoof,
+        ] {
+            assert!(capture_pack_allowed(&cfg, failed), "{failed:?}");
+        }
+        cfg.capture_successful_unlocks = true;
+        assert!(capture_pack_allowed(&cfg, Outcome::ConfirmedGenuine));
+        cfg.keep_raw_frames = false;
+        assert!(!capture_pack_allowed(&cfg, Outcome::ConfirmedGenuine));
+        assert!(!capture_pack_allowed(&cfg, Outcome::Rejected));
+        cfg.keep_raw_frames = true;
+        cfg.logging_enabled = false;
+        assert!(!capture_pack_allowed(&cfg, Outcome::Rejected));
+    }
+
     use super::*;
 
     fn sample_record() -> AttemptRecord {

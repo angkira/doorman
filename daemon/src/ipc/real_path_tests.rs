@@ -614,3 +614,47 @@ async fn fresh_frames_after_a_stale_one_still_decide() {
     assert_eq!(d.outcome, AuthOutcome::Matched);
     assert_eq!(d.frames_seen, 3, "the stale frame was not counted");
 }
+
+// ---------------------------------------------------------------------------
+// Round 9a F: raw frames of successful unlocks are not stored by default
+// ---------------------------------------------------------------------------
+
+async fn captures_after(script: &[Scene], capture_successful: bool) -> usize {
+    let (state, _d, _c, dir) = build_state_cfg(script, script.len(), 0, |c| {
+        c.dataset.logging_enabled = true;
+        c.dataset.keep_raw_frames = true;
+        c.dataset.capture_successful_unlocks = capture_successful;
+    })
+    .await;
+    let outcome = run_authenticate(&state, USER, None, None).await.outcome;
+    // The pack is written on a blocking task: give it time to appear (or not).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let captures = dir.path().join("dataset").join("captures");
+    let packs = std::fs::read_dir(&captures)
+        .map(|days| {
+            days.flatten()
+                .map(|d| std::fs::read_dir(d.path()).map_or(0, |p| p.count()))
+                .sum()
+        })
+        .unwrap_or(0);
+    assert!(matches!(
+        outcome,
+        AuthOutcome::Matched | AuthOutcome::NotMatched | AuthOutcome::IdentityFloor
+    ));
+    packs
+}
+
+#[tokio::test]
+async fn a_successful_unlock_stores_no_raw_frames_by_default() {
+    assert_eq!(captures_after(&[LiveOwner; 5], false).await, 0);
+}
+
+#[tokio::test]
+async fn a_successful_unlock_stores_raw_frames_only_when_enabled() {
+    assert_eq!(captures_after(&[LiveOwner; 5], true).await, 1);
+}
+
+#[tokio::test]
+async fn a_rejected_attempt_is_still_captured_by_default() {
+    assert_eq!(captures_after(&[LiveImpostor; 5], false).await, 1);
+}
