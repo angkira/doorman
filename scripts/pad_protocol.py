@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Presentation-attack screening protocol for doorman (interactive, stdlib only).
+"""DEPRECATED: use `doorman pad run` (native, calibration-aware; docs/PAD-PROTOCOL.md).
+
+Presentation-attack screening protocol for doorman (interactive, stdlib only).
 
 You run it, in front of the camera, with a phone and a printed photo of yourself.
 It walks through genuine and attack classes, runs `doorman --json test <user>`

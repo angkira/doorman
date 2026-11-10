@@ -187,7 +187,8 @@ object instead (also for errors): `decision` (`recognized`, `not_recognized`,
 `not_enrolled`, `face_auth_suspended`, `denied`, `rate_limited`,
 `daemon_error`, `other_failure`), `similarity_bucket` (0.05 steps),
 `liveness_ok` (true/false/null), `frames_judged` (null for now: the wire answer
-does not carry it), `duration_ms`, `suspended_until` (RFC 3339, only when
+does not carry it), `duration_ms`, `calibration` (true while calibration mode is on, see
+`docs/PAD-PROTOCOL.md`), `suspended_until` (RFC 3339, only when
 suspended). No frames, embeddings or exact scores.
 
 ## Exit codes of `doorman unlock-watch`

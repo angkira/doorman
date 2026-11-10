@@ -21,6 +21,20 @@ changes.
 `unset` means an optional key with no value (the code picks its own behaviour,
 see the comments in `packaging/doorman.toml.example`).
 
+Read and change single keys without editing the file by hand:
+
+    doorman config get ipc.face_cooldown_secs      # effective value (file or default)
+    sudo doorman config set ipc.face_cooldown_secs "[10, 30, 120]"
+    sudo doorman config unset ipc.face_cooldown_secs
+
+`set` / `unset` (root, on `/etc/doorman/doorman.toml`) check the key against this
+reference (an unknown key is refused with suggestions) and the value against the
+same validation the daemon applies at start, keep comments and layout, write
+atomically after a backup `doorman.toml.bak.<timestamp>` (the newest 10 are
+kept), print a diff, refuse a file that fails the trust check below, and never
+restart anything: they print `restart needed: sudo systemctl restart doormand`.
+Comment lines directly above a removed key are removed with it.
+
 Which file is read: `--config`, then `DOORMAN_CONFIG`, then (non-root only)
 `./doorman.toml` and `~/.config/doorman/doorman.toml`, then
 `/etc/doorman/doorman.toml`. A process running as root (for example

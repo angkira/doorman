@@ -20,6 +20,8 @@ connection is dropped (fail closed).
 | `WaitForMatch{username, timeout_ms}` | same as `Authenticate` (it yields the same decision) |
 | `Enroll`, `RemoveUser`, `ListUsers`, `DetectAndRecognize`, `GetLatestDetection`, `Shutdown` | root or `admin_uids` |
 | `Status` | anyone (no biometric data, no user names) |
+| `Calibrate{ttl_secs}`, `CalibrateEnd` | **uid 0 only** (not `admin_uids`, not `trusted_uids`): calibration mode freezes the failure budget |
+| `CalibrateStatus` | anyone (remaining time and a counter, nothing else) |
 
 `Authenticate` may also carry `service` and `tty` (the PAM module's
 `PAM_SERVICE` / `PAM_TTY`; additive, protocol version stays 1). A service listed
