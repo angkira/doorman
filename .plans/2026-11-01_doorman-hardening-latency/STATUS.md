@@ -95,3 +95,12 @@ Nothing below is host-verified; the fixes are code and unit tests only. The next
 - Fixed (host-unverified): native backend must decode one real first frame within `[camera] native_first_frame_timeout_ms` (default 1500) or fall through to ffmpeg; `[camera] backend = "auto" | "native" | "ffmpeg"` (default `auto`, `ffmpeg` skips native, the host override if native misbehaves); producer panics are caught, logged at ERROR, and the camera is re-opened on the next request; `doorman test` exits 2 on `!recognized:` (0 only when recognized, 1 on CLI error), stdout unchanged.
 - Known limit: a native first-frame read that blocks forever cannot be interrupted (v4l polls without timeout); after the timeout the device stays held until that read returns, so the ffmpeg fallback may find it busy. Set `backend = "ffmpeg"` on such a host.
 - Docs: `docs/INSTALL-FROM-BRANCH.md` installs the niri scripts side by side under `~/.local/bin/doorman-event/`, no longer hard-codes a release run id, has jq p50/p95 commands for the timing log; `doorman install --help` says it is a from-source dev installer.
+
+## Round 7 (native "Not a JPEG file" on the owner's host)
+Symptom, **proved from the owner's journal**: with UGREEN Camera 4K (uvcvideo, MJPG 1280x720@30) the native open succeeded but the first frame read panicked with `libjpeg fatal error: Not a JPEG file: starts with 0x61 0xe8`; the ffmpeg fallback then worked (first_frame_ms about 1985, recognized 73.76%).
+
+Proved by reading the dependency sources (not by running a camera): nokhwa's V4L2 path returns the full mmap'd buffer and drops `bytesused`; the format read-back after `set_camera_format` already errors on mismatch.
+
+**Hypothesis, not proved:** the cause of the non-JPEG buffer (junk/partial first buffers after STREAMON, or a format/buffer mismatch inside nokhwa or the driver). The new WARN line (first 8 bytes as hex, length, fourcc, resolution, frame index) is there to settle it on the next host run.
+
+Changes (tests in each; host-unverified): negotiated-format check that fails fast; validation of every buffer before the decoder (SOI + marker walk to EOI); `native_warmup_frames` (default 3) with retry inside `native_first_frame_timeout_ms`; per-(device, mode) negative cache `native_failure_cooldown_secs` (default 600) for `backend = "auto"`. No auth thresholds, liveness defaults or other defaults changed. Nothing here is claimed as verified on the host.

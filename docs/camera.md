@@ -88,6 +88,8 @@ Hypotheses, most likely first:
 |---|---|---|
 | `backend` | `"auto"` | `"auto"`: native V4L2 first, accepted only after it decoded one real frame within `native_first_frame_timeout_ms`, otherwise the ffmpeg backend. `"native"`: native only, no ffmpeg fallback. `"ffmpeg"`: skip native, use ffmpeg (the pre-native behaviour; use it as an override if the native path misbehaves on a host). Anything else is rejected at config load. |
 | `native_first_frame_timeout_ms` | `1500` | How long the native backend may take to deliver its first decoded frame. Valid 100..=10000. A timeout, a capture/decode error or a panic closes the native camera and moves on (see "Native first-frame validation"). |
+| `native_warmup_frames` | `3` | Native backend only. Buffers read and dropped unexamined right after STREAMON before one may count as the first frame (UVC devices can deliver junk or partial buffers first). Every buffer after that is validated (see "Round 7") and, if rejected, skipped; the loop retries inside `native_first_frame_timeout_ms` instead of failing on frame 1. Valid 0..=10. Unrelated to `warmup_frames` (the producer's cold-open discard). |
+| `native_failure_cooldown_secs` | `600` | `backend = "auto"` only. After the native backend failed in this daemon process, the next opens for the same device and requested mode skip it and go straight to ffmpeg for this many seconds (one INFO line: `native backend skipped: failed Ns ago: <reason>`), then native is probed again. The memory is per process: a restart re-probes. `0` disables it. Valid 0..=86400. `backend = "native"` ignores it (no fallback to protect); `backend = "ffmpeg"` never tries native. |
 | `fourcc` | unset | `"MJPG"` or `"YUYV"`. Unset keeps today's behaviour. |
 | `warmup_frames` | `0` | Frames dropped after a cold open. Valid 0..=10. Recommended: `3`. |
 | `prearm_on_lock` | `false` | Open on the lock event even while `IdleHint` is set, but only for `prearm_window_ms` after it. Recommended: `true`. |
@@ -130,6 +132,49 @@ What the code now does regardless of the exact site:
   camera is closed, consumers see "unavailable" (`latest_frame` cleared) and the
   next loop iteration re-opens it (and may fall back to ffmpeg). An unexpected
   thread exit is also logged at ERROR.
+
+## Round 7: "Not a JPEG file: starts with 0x61 0xe8"
+
+Owner's host journal (UGREEN Camera 4K, uvcvideo, MJPG 1280x720@30):
+`native camera opened at DeviceMode { format: Mjpeg, 1280x720, 30 fps } but
+delivered no usable first frame ... first frame read panicked: libjpeg fatal
+error: Not a JPEG file: starts with 0x61 0xe8`, then ffmpeg works. So the
+buffer handed to the decoder was not an MJPEG frame (no FF D8).
+
+**Proved by code reading** (nokhwa 0.10.11, nokhwa-bindings-linux 0.1.4, v4l 0.14.0):
+`v4l`'s mmap `next()` returns the whole mapped buffer, not `bytesused` bytes, and
+`nokhwa::Camera::frame()`/`frame_raw()` pass it on without `bytesused`. A good
+frame is therefore a JPEG plus slack, and truncation cannot be seen from the
+length. The bindings already read the format back after `set_camera_format` and
+return an error on a mismatch.
+
+**Not proved (hypotheses until the new WARN lines are seen on the host):** why
+the buffer began with `61 e8`: junk/partial first buffers after STREAMON, a
+buffer for another format, or something inside nokhwa/the driver.
+
+What the code does now:
+
+- **Negotiated format is checked.** After the stream is open the driver's
+  format is read back; a pixel format or resolution different from the request
+  (or a format this backend cannot decode) fails the open with an explicit
+  error. A different fps is tolerated.
+- **Every candidate buffer is validated before libjpeg/mozjpeg sees it**
+  (`camera/native_frames.rs`): MJPEG must start with FF D8 and a JPEG marker
+  walk must reach FF D9; the decoder receives exactly the bytes up to that EOI
+  (the slack is cut). YUYV must hold `width*height*2` bytes. The `catch_unwind`
+  boundary stays as the last line of defence. Limit: without `bytesused`, a
+  truncated frame whose missing tail was overwritten by an older frame's stale
+  bytes can pass the walk; the decoder then rejects it and the frame is dropped.
+- **Warm-up and retry.** The first `native_warmup_frames` buffers are dropped,
+  then rejected candidates are skipped until one decodes or the budget
+  (`native_first_frame_timeout_ms` minus up to 100 ms of slack) is spent. A read
+  error fails at once.
+- **Rejection log** (WARN, one line per rejection, after the first five per
+  camera instance DEBUG): reason, the first 8 bytes of the buffer as hex (never
+  more image data), buffer length, `bytesused` (`unavailable` through nokhwa),
+  negotiated fourcc, resolution and frame index.
+- **Negative cache** for `backend = "auto"`: see `native_failure_cooldown_secs`.
+  Key = device (`device_path` or index) + requested width/height/fps/fourcc.
 
 ## Privacy invariant
 

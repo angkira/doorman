@@ -30,6 +30,10 @@ fps    = 30
 # "auto" = native V4L2 (accepted only after a real first frame), then ffmpeg.
 # "ffmpeg" skips the native backend; "native" disables the ffmpeg fallback.
 backend = "auto"
+# Native backend: buffers dropped after STREAMON before a frame may count (0..=10).
+# native_warmup_frames = 3
+# After a native failure, go straight to ffmpeg for this many seconds (0 = off).
+# native_failure_cooldown_secs = 600
 
 [ml]
 backend    = "ort"
