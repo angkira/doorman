@@ -74,18 +74,18 @@ pub mod device_guard;
 pub mod probe;
 
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod native_frames;
+
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod native_cooldown;
+
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
 mod format_select;
 
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 mod v4l2_backend;
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 pub use v4l2_backend::V4L2Camera;
-
-#[allow(dead_code)] // unused when no native backend is compiled in
-/// May the native (V4L2/nokhwa) backend be tried for `choice`?
-fn native_allowed(choice: CameraBackendChoice) -> bool {
-    choice != CameraBackendChoice::Ffmpeg
-}
 
 #[allow(dead_code)] // unused without the ffmpeg backend
 /// May the ffmpeg backend be tried for `choice`? "native" never falls back to it.
@@ -177,18 +177,40 @@ impl Camera {
         // Then V4L2 / native webcam (nokhwa).
         // Only accepted after it delivered a real first frame (see probe.rs).
         #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
-        if native_allowed(config.camera.backend) {
-            match V4L2Camera::new_with_config(config).await {
-                Ok(cam) => {
-                    tracing::info!("Using V4L2/nokhwa camera backend");
-                    return Ok(Self {
-                        inner: CameraBackendInner::V4L2(cam),
-                    });
+        match native_cooldown::decide(&config.camera, native_cooldown::global()) {
+            native_cooldown::NativeDecision::Try => {
+                let key = native_cooldown::NativeKey::from_config(&config.camera);
+                let started = std::time::Instant::now();
+                match V4L2Camera::new_with_config(config).await {
+                    Ok(cam) => {
+                        native_cooldown::global().clear(&key);
+                        tracing::info!(
+                            "Using V4L2/nokhwa camera backend (selected after {} ms)",
+                            started.elapsed().as_millis()
+                        );
+                        return Ok(Self {
+                            inner: CameraBackendInner::V4L2(cam),
+                        });
+                    }
+                    Err(e) => {
+                        let reason = format!("{e:#}");
+                        tracing::warn!(
+                            "V4L2/nokhwa camera failed after {} ms: {reason}, trying next backend",
+                            started.elapsed().as_millis()
+                        );
+                        native_cooldown::global().record_failure(key, reason);
+                    }
                 }
-                Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {:#}, trying next backend", e),
             }
-        } else {
-            tracing::info!("[camera] backend = \"ffmpeg\": skipping the native backend");
+            native_cooldown::NativeDecision::SkipCooling(failed) => tracing::info!(
+                "native backend skipped: failed {}s ago: {} (retry after native_failure_cooldown_secs = {})",
+                failed.age.as_secs(),
+                failed.reason,
+                config.camera.native_failure_cooldown_secs
+            ),
+            native_cooldown::NativeDecision::SkipByConfig => {
+                tracing::info!("[camera] backend = \"ffmpeg\": skipping the native backend")
+            }
         }
 
         // Live webcam via the ffmpeg CLI (reliable real camera on macOS, where
@@ -289,14 +311,13 @@ mod tests {
 
     #[test]
     fn backend_choice_selects_which_backends_are_tried() {
-        // (choice, native tried, ffmpeg tried)
+        // (choice, ffmpeg tried); whether native is tried is `native_cooldown::decide`.
         let table = [
-            (CameraBackendChoice::Auto, true, true),
-            (CameraBackendChoice::Native, true, false),
-            (CameraBackendChoice::Ffmpeg, false, true),
+            (CameraBackendChoice::Auto, true),
+            (CameraBackendChoice::Native, false),
+            (CameraBackendChoice::Ffmpeg, true),
         ];
-        for (choice, native, ffmpeg) in table {
-            assert_eq!(native_allowed(choice), native, "{choice:?}");
+        for (choice, ffmpeg) in table {
             assert_eq!(ffmpeg_allowed(choice), ffmpeg, "{choice:?}");
         }
     }

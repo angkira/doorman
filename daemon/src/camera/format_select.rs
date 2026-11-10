@@ -91,6 +91,40 @@ pub fn select_mode(modes: &[DeviceMode], wanted: &WantedMode) -> Result<DeviceMo
         .unwrap_or(*best))
 }
 
+/// Fail fast when the driver did not settle on the mode that was requested.
+///
+/// `actual` is the format the driver reports after the stream is open
+/// (`None` when it is neither MJPEG nor YUYV, which this backend cannot
+/// decode). The pixel format and the resolution must match exactly: decoding
+/// the frames of another format with the requested format's decoder is how
+/// "Not a JPEG file" errors arise. A different frame rate is harmless and is
+/// not an error.
+pub fn check_negotiated(
+    requested: &DeviceMode,
+    actual: Option<DeviceMode>,
+    actual_description: &str,
+) -> Result<(), String> {
+    let Some(actual) = actual else {
+        return Err(format!(
+            "driver reports an unsupported pixel format ({actual_description}) instead of {:?}",
+            requested.format
+        ));
+    };
+    if actual.format != requested.format {
+        return Err(format!(
+            "driver negotiated {:?} instead of the requested {:?} ({actual_description})",
+            actual.format, requested.format
+        ));
+    }
+    if (actual.width, actual.height) != (requested.width, requested.height) {
+        return Err(format!(
+            "driver negotiated {}x{} instead of the requested {}x{} ({actual_description})",
+            actual.width, actual.height, requested.width, requested.height
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +294,36 @@ mod tests {
     fn no_usable_mode_lists_what_is_offered() {
         let err = select_mode(&[], &want(640, 480, None)).unwrap_err();
         assert!(err.contains("offered: none"), "{err}");
+    }
+
+    #[test]
+    fn negotiated_mode_must_match_format_and_resolution() {
+        let want = DeviceMode {
+            format: CameraFourcc::Mjpeg,
+            width: 1280,
+            height: 720,
+            fps: 30,
+        };
+        assert!(check_negotiated(&want, Some(want), "x").is_ok());
+        // fps drift is not an error
+        let slower = DeviceMode { fps: 15, ..want };
+        assert!(check_negotiated(&want, Some(slower), "x").is_ok());
+
+        let yuyv = DeviceMode {
+            format: CameraFourcc::Yuyv,
+            ..want
+        };
+        let err = check_negotiated(&want, Some(yuyv), "YUYV 1280x720@30").unwrap_err();
+        assert!(err.contains("Yuyv") && err.contains("Mjpeg"), "{err}");
+
+        let small = DeviceMode { width: 640, ..want };
+        let err = check_negotiated(&want, Some(small), "d").unwrap_err();
+        assert!(err.contains("640x720") && err.contains("1280x720"), "{err}");
+
+        let err = check_negotiated(&want, None, "NV12 1280x720@30").unwrap_err();
+        assert!(
+            err.contains("unsupported pixel format") && err.contains("NV12"),
+            "{err}"
+        );
     }
 }

@@ -8,8 +8,12 @@
 ///
 /// Note: Prefer GStreamer backend for desktop integration
 use super::device_guard;
-use super::format_select::{select_mode, DeviceMode, WantedMode};
-use super::probe::validate_first_frame;
+use super::format_select::{check_negotiated, select_mode, DeviceMode, WantedMode};
+use super::native_frames::{
+    decode_guarded, first_usable_frame, log_rejection, loop_budget, validate_frame, FrameContext,
+    FrameSource, RawFrame, MAX_DETAILED_REJECTION_LOGS,
+};
+use super::probe::{drop_contained, validate_first_frame};
 use super::CameraBackend;
 use anyhow::{anyhow, Context, Result};
 use doorman_shared::config::CameraFourcc;
@@ -20,13 +24,54 @@ use nokhwa::utils::{
     ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
     Resolution,
 };
+use nokhwa::Buffer as NokhwaBuffer;
 use nokhwa::Camera as NokhwaCamera;
+use std::borrow::Cow;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 pub struct V4L2Camera {
     camera: NokhwaCamera,
+    /// Format the driver reported after the stream was opened (not the request).
+    ctx: FrameContext,
+    /// Buffers read from the driver so far (frame index in log lines).
+    frames_read: u64,
+    /// Rejections logged with full detail so far (see `MAX_DETAILED_REJECTION_LOGS`).
+    detailed_logs: u32,
+}
+
+impl FrameSource for V4L2Camera {
+    fn next_frame(&mut self) -> Result<RawFrame<'_>> {
+        self.frames_read += 1;
+        // nokhwa hands out the whole mmap'd buffer and does not expose
+        // `bytesused`; `validate_frame` finds the end of the JPEG itself.
+        match self.camera.frame_raw().context("Failed to capture frame")? {
+            Cow::Borrowed(bytes) => Ok(RawFrame {
+                bytes,
+                bytesused: None,
+            }),
+            // The V4L2 backend lends the mmap'd buffer; an owned copy would
+            // mean a different nokhwa backend than the one this file targets.
+            Cow::Owned(_) => Err(anyhow!("nokhwa returned an owned frame buffer")),
+        }
+    }
+}
+
+/// Decodes validated frame bytes to RGB with nokhwa (mozjpeg for MJPEG).
+fn decode_rgb(ctx: &FrameContext, span: &[u8]) -> Result<DynamicImage> {
+    let buffer = NokhwaBuffer::new(
+        Resolution::new(ctx.width, ctx.height),
+        span,
+        to_frame_format(ctx.fourcc),
+    );
+    let decoded = buffer
+        .decode_image::<RgbFormat>()
+        .context("Failed to decode frame")?;
+    let (width, height) = (decoded.width(), decoded.height());
+    ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, decoded.into_raw())
+        .map(DynamicImage::ImageRgb8)
+        .ok_or_else(|| anyhow!("Failed to create image buffer"))
 }
 
 // Safety: nokhwa::Camera's internal state doesn't implement Send/Sync,
@@ -173,6 +218,30 @@ impl CameraBackend for V4L2Camera {
             .open_stream()
             .map_err(|e| anyhow!("cannot start camera stream at {chosen:?}: {e}"))?;
 
+        // The driver, not the request, decides what the buffers contain: read
+        // back what it settled on and refuse to decode against another format.
+        let negotiated = match camera.refresh_camera_format() {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = drop_contained(camera);
+                return Err(anyhow!("cannot read back the negotiated format: {e}"));
+            }
+        };
+        let actual = to_device_mode(&negotiated);
+        if let Err(msg) = check_negotiated(&chosen, actual, &negotiated.to_string()) {
+            let _ = drop_contained(camera);
+            return Err(anyhow!(
+                "camera index {}: {msg}",
+                config.camera.device_index
+            ));
+        }
+        let actual = actual.unwrap_or(chosen);
+        let ctx = FrameContext {
+            fourcc: actual.format,
+            width: actual.width,
+            height: actual.height,
+        };
+
         info!(
             "V4L2 camera opened: {} {}x{} @ {}fps {:?} in {:.1} ms",
             camera.info().human_name(),
@@ -188,8 +257,24 @@ impl CameraBackend for V4L2Camera {
         // device that cannot deliver falls through to the next backend.
         let timeout = Duration::from_millis(u64::from(config.camera.native_first_frame_timeout_ms));
         let first_frame_started = Instant::now();
-        let camera = validate_first_frame(Self { camera }, timeout, |cam| {
-            cam.capture_frame().map(|_| ())
+        let warmup = config.camera.native_warmup_frames;
+        let budget = loop_budget(timeout);
+        let camera = Self {
+            camera,
+            ctx,
+            frames_read: 0,
+            detailed_logs: 0,
+        };
+        let camera = validate_first_frame(camera, timeout, move |cam| {
+            let found = first_usable_frame(cam, &ctx, warmup, budget, |span| {
+                decode_rgb(&ctx, span).map(|_| ())
+            })?;
+            info!(
+                "V4L2 first usable frame: {} buffers read ({} warm-up dropped, {} rejected)",
+                found.frames_read, warmup, found.rejected
+            );
+            cam.detailed_logs = found.rejected.min(MAX_DETAILED_REJECTION_LOGS);
+            Ok(())
         })
         .with_context(|| {
             format!(
@@ -206,20 +291,25 @@ impl CameraBackend for V4L2Camera {
     }
 
     fn capture_frame(&mut self) -> Result<DynamicImage> {
-        let frame = self.camera.frame().context("Failed to capture frame")?;
-
-        let decoded = frame
-            .decode_image::<RgbFormat>()
-            .context("Failed to decode frame")?;
-
-        let width = decoded.width();
-        let height = decoded.height();
-        let data = decoded.into_raw();
-
-        let img_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, data)
-            .ok_or_else(|| anyhow!("Failed to create image buffer"))?;
-
-        Ok(DynamicImage::ImageRgb8(img_buffer))
+        let ctx = self.ctx;
+        let index = self.frames_read;
+        let detailed = self.detailed_logs < MAX_DETAILED_REJECTION_LOGS;
+        let outcome = {
+            let frame = self.next_frame()?;
+            match validate_frame(&ctx, &frame)
+                .and_then(|span| decode_guarded(span, &mut |s| decode_rgb(&ctx, s)))
+            {
+                Ok(img) => Ok(img),
+                Err(why) => {
+                    log_rejection(&ctx, index, &frame, &why, detailed);
+                    Err(why)
+                }
+            }
+        };
+        outcome.map_err(|why| {
+            self.detailed_logs = self.detailed_logs.saturating_add(1);
+            anyhow!("frame {index} rejected: {why}")
+        })
     }
 
     fn capture_frames(&mut self, count: usize) -> Vec<DynamicImage> {
