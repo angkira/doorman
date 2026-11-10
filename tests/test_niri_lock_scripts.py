@@ -27,7 +27,15 @@ LOCKER_STUB = """#!/bin/sh
 printf '%s\\n' "$$" > "$STUB_DIR/{name}.pid"
 printf '%s\\n' "$@" > "$STUB_DIR/{name}.args"
 trap 'exit 0' TERM
-while :; do sleep 0.05; done
+# Self-terminating: gives up after STUB_MAX_TICKS ticks (default 600 = 30 s) or
+# as soon as the pytest process that started it (STUB_OWNER) is gone, so a killed
+# or timed-out test run can never leave it behind.
+ticks=0
+while [ "$ticks" -lt "${{STUB_MAX_TICKS:-600}}" ]; do
+    kill -0 "$STUB_OWNER" 2>/dev/null || exit 0
+    sleep 0.05
+    ticks=$((ticks + 1))
+done
 """
 
 EXITING_LOCKER_STUB = """#!/bin/sh
@@ -41,7 +49,15 @@ LONG_WATCHER_STUB = """#!/bin/sh
 printf '%s\\n' "$$" > "$STUB_DIR/{name}.pid"
 printf '%s\\n' "$@" >> "$STUB_DIR/{name}.calls"
 trap 'exit 0' TERM
-while :; do sleep 0.05; done
+# Self-terminating: gives up after STUB_MAX_TICKS ticks (default 600 = 30 s) or
+# as soon as the pytest process that started it (STUB_OWNER) is gone, so a killed
+# or timed-out test run can never leave it behind.
+ticks=0
+while [ "$ticks" -lt "${{STUB_MAX_TICKS:-600}}" ]; do
+    kill -0 "$STUB_OWNER" 2>/dev/null || exit 0
+    sleep 0.05
+    ticks=$((ticks + 1))
+done
 """
 
 # pgrep: records its arguments, prints $STUB_DIR/pgrep.out (exit 1 if empty).
@@ -105,6 +121,7 @@ class Env:
             "XDG_RUNTIME_DIR": str(self.runtime),
             "XDG_CONFIG_HOME": str(self.config),
             "STUB_DIR": str(self.stub_dir),
+            "STUB_OWNER": str(os.getpid()),
             "DOORMAN_USER": "alice",
             "DOORMAN_SOCKET": str(tmp_path / "doorman.sock"),
             "DOORMAN_LOCKER_SETTLE": "0.2",
@@ -115,6 +132,8 @@ class Env:
             "GTKLOCK": "gtklock",
             "SWAYLOCK": "swaylock",
         }
+        self.procs: list[subprocess.Popen] = []
+        ENVS.append(self)
         # Default: no live locker, session not locked. Never ask the real host.
         self.stub("pgrep", PGREP_STUB)
         self.stub("loginctl", LOGINCTL_STUB)
@@ -140,13 +159,69 @@ class Env:
 
     def run(self, extra_env: dict[str, str] | None = None, args: list[str] | None = None):
         env = {**self.env, **(extra_env or {})}
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             [str(LOCK), *(args or [])],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
+        self.procs.append(proc)
+        return proc
+
+    def _own_pids(self) -> list[int]:
+        """Pids whose environment carries this Env's STUB_DIR and this pytest as
+        STUB_OWNER: the scripts, stubs and their children, never anyone else's."""
+        marks = {f"STUB_DIR={self.stub_dir}".encode(), f"STUB_OWNER={os.getpid()}".encode()}
+        pids = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                environ = set((entry / "environ").read_bytes().split(b"\0"))
+            except OSError:
+                continue
+            if marks <= environ:
+                pids.append(int(entry.name))
+        return pids
+
+    def reap(self) -> None:
+        """End every process this Env started, and only those."""
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.terminate()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            pids = self._own_pids()
+            if not pids:
+                break
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            time.sleep(0.05)
+        for proc in self.procs:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+
+# Every Env created by the running test; the autouse fixture below reaps them.
+ENVS: list[Env] = []
+
+
+@pytest.fixture(autouse=True)
+def _reap_stub_processes():
+    """Teardown: no stub locker/watcher started by a test outlives it, pass or fail."""
+    yield
+    while ENVS:
+        ENVS.pop().reap()
 
 
 def stop_locker(env: Env, name: str, proc: subprocess.Popen) -> None:
@@ -593,3 +668,67 @@ def test_poll_mode_never_starts_its_watcher_early(tmp_path: Path) -> None:
 
 def test_early_watcher_is_the_default() -> None:
     assert 'watch_early="${DOORMAN_WATCH_EARLY:-1}"' in LOCK.read_text()
+
+
+# --- the stubs must not be able to outlive their test ---------------------------
+
+def _wait_dead(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _reaped(pid: int) -> bool:
+    """True once the pid is gone or only a zombie awaiting its parent."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split(") ")[-1][0] == "Z"
+    except OSError:
+        return True
+
+
+def _start_stub_locker(env: Env, extra: dict[str, str]) -> subprocess.Popen:
+    env.stub("gtklock", LOCKER_STUB)
+    proc = subprocess.Popen(
+        [str(env.stub_dir / "gtklock")], env={**env.env, **extra}, start_new_session=False
+    )
+    env.procs.append(proc)
+    return proc
+
+
+def test_stub_locker_stops_by_itself_when_its_owner_is_gone(tmp_path: Path) -> None:
+    """A killed pytest (STUB_OWNER dead) must not leave the stub looping."""
+    env = Env(tmp_path)
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    proc = _start_stub_locker(env, {"STUB_OWNER": str(gone.pid)})
+    proc.wait(timeout=5)
+    assert proc.returncode == 0
+
+
+def test_stub_locker_has_a_hard_time_bound(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    proc = _start_stub_locker(env, {"STUB_MAX_TICKS": "4"})
+    proc.wait(timeout=5)
+    assert proc.returncode == 0
+
+
+def test_reap_ends_the_stubs_a_failing_test_would_leave(tmp_path: Path) -> None:
+    """What the teardown does after an assertion fails before stop_locker()."""
+    env = Env(tmp_path)
+    env.stub("gtklock", LOCKER_STUB)
+    env.stub("doorman", RECORDER_STUB)
+    proc = env.run(
+        {"DOORMAN_UNLOCK_MODE": "poll", "DOORMAN_LOCKER_SETTLE": "3.0",
+         "DOORMAN_LOCK_WATCH_POLL": str(env.stub_dir / "doorman")}
+    )
+    env.wait_for("gtklock.pid")
+    stub_pid = int((env.stub_dir / "gtklock.pid").read_text())
+    assert proc.poll() is None and not _reaped(stub_pid)
+    env.reap()
+    assert _wait_dead(stub_pid) or _reaped(stub_pid)
+    assert proc.poll() is not None
