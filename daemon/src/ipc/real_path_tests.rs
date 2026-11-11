@@ -33,6 +33,9 @@ const FRAME_SIDE: u32 = 8;
 /// Relief of a live face and of a flat photo (threshold is `RELIEF_THRESHOLD`).
 const LIVE_RELIEF: f32 = 0.2;
 const FLAT_RELIEF: f32 = 0.01;
+/// Relief of a weakly 3-d frame: below the threshold, above the pool hard
+/// floor (half of the threshold).
+const BORDERLINE_RELIEF: f32 = 0.04;
 /// Embeddings are 3-d unit vectors: cosine to the owner template is 1.0 for the
 /// owner and 0.0 for the impostor, around `SIMILARITY_THRESHOLD`.
 const OWNER_EMBEDDING: [f32; 3] = [1.0, 0.0, 0.0];
@@ -57,6 +60,8 @@ enum Scene {
     OwnerWithPhoneFace,
     /// The live owner with a small face far in the background (4% of the area).
     OwnerWithBackgroundFace,
+    /// The live owner on a frame with a thin relief (`BORDERLINE_RELIEF`).
+    BorderlineOwner,
 }
 
 impl Scene {
@@ -65,7 +70,8 @@ impl Scene {
             Scene::LiveOwner
             | Scene::Photo
             | Scene::OwnerWithPhoneFace
-            | Scene::OwnerWithBackgroundFace => OWNER_EMBEDDING.to_vec(),
+            | Scene::OwnerWithBackgroundFace
+            | Scene::BorderlineOwner => OWNER_EMBEDDING.to_vec(),
             Scene::LiveImpostor => IMPOSTOR_EMBEDDING.to_vec(),
             Scene::WeakOwner => vec![0.35, (1.0f32 - 0.35 * 0.35).sqrt(), 0.0],
             Scene::TooWeak => vec![0.25, (1.0f32 - 0.25 * 0.25).sqrt(), 0.0],
@@ -75,16 +81,22 @@ impl Scene {
     fn relief(self) -> f32 {
         match self {
             Scene::Photo => FLAT_RELIEF,
+            Scene::BorderlineOwner => BORDERLINE_RELIEF,
             _ => LIVE_RELIEF,
         }
     }
 }
 
 use Scene::{
-    LiveImpostor, LiveOwner, OwnerWithBackgroundFace, OwnerWithPhoneFace, Photo, TooWeak, WeakOwner,
+    BorderlineOwner, LiveImpostor, LiveOwner, OwnerWithBackgroundFace, OwnerWithPhoneFace, Photo,
+    TooWeak, WeakOwner,
 };
 
 fn frame(index: usize) -> RawFrame {
+    frame_with_sequence(index, index as u64)
+}
+
+fn frame_with_sequence(index: usize, sequence: u64) -> RawFrame {
     let mut image = RgbImage::new(FRAME_SIDE, FRAME_SIDE);
     image.put_pixel(
         0,
@@ -94,7 +106,7 @@ fn frame(index: usize) -> RawFrame {
     RawFrame {
         image: Arc::new(DynamicImage::ImageRgb8(image)),
         timestamp: std::time::Instant::now(),
-        sequence: index as u64,
+        sequence,
     }
 }
 
@@ -118,6 +130,19 @@ struct ScriptedBackend {
     script: Vec<Scene>,
     camera: watch::Sender<Option<RawFrame>>,
     depth_calls: Arc<AtomicUsize>,
+    /// Camera frames skipped before script index `.0` (a jump of `.1` in the
+    /// capture sequence), or none.
+    sequence_jump: Option<(usize, u64)>,
+}
+
+impl ScriptedBackend {
+    fn sequence_of(&self, index: usize) -> u64 {
+        let jump = match self.sequence_jump {
+            Some((at, by)) if index >= at => by,
+            _ => 0,
+        };
+        index as u64 + jump
+    }
 }
 
 #[async_trait::async_trait]
@@ -126,7 +151,8 @@ impl MLBackend for ScriptedBackend {
         // Lock step: the next frame becomes visible once this one is being handled.
         let next = frame_index(image) + 1;
         if next < self.script.len() {
-            self.camera.send_replace(Some(frame(next)));
+            self.camera
+                .send_replace(Some(frame_with_sequence(next, self.sequence_of(next))));
         }
         let second_face_side = match self.script[frame_index(image)] {
             Scene::OwnerWithPhoneFace => Some(0.3),
@@ -263,6 +289,30 @@ async fn build_state_mini(
     watch::Sender<Option<RawFrame>>,
     tempfile::TempDir,
 ) {
+    build_state_full(
+        script,
+        auth_frames,
+        mean_mode_depth_samples,
+        tweak,
+        mini,
+        None,
+    )
+    .await
+}
+
+async fn build_state_full(
+    script: &[Scene],
+    auth_frames: usize,
+    mean_mode_depth_samples: u32,
+    tweak: impl FnOnce(&mut Config),
+    mini: MiniMode,
+    sequence_jump: Option<(usize, u64)>,
+) -> (
+    DaemonState,
+    Arc<AtomicUsize>,
+    watch::Sender<Option<RawFrame>>,
+    tempfile::TempDir,
+) {
     let data_dir = tempfile::tempdir().expect("temp data dir");
     let mut config = Config::default();
     config.daemon.data_dir = data_dir.path().to_string_lossy().into_owned();
@@ -273,6 +323,10 @@ async fn build_state_mini(
     config.authentication.liveness_depth_threshold = RELIEF_THRESHOLD;
     config.liveness.frames = 1;
     config.liveness.mean_mode_depth_samples = mean_mode_depth_samples;
+    // These tests predate the frame pool (`[liveness] pool_frames`, on by
+    // default): they pin the single-deciding-frame behaviour and run with it
+    // off. The pool has its own tests at the end of this file.
+    config.liveness.pool_frames = 0;
     // The synthetic 8x8 frames have no texture: switch the quality gate off.
     config.recognition.min_sharpness = 0.0;
     config.recognition.min_face_area_frac = 0.0;
@@ -289,6 +343,7 @@ async fn build_state_mini(
         script: script.to_vec(),
         camera: camera_tx.clone(),
         depth_calls: depth_calls.clone(),
+        sequence_jump,
     });
     let mut storage = Storage::new_with_dir(data_dir.path())
         .await
@@ -822,7 +877,7 @@ async fn shadow_logging_leaves_every_decision_unchanged() {
             assert_eq!(on, off, "{name} samples={samples} n_of_m={n_of_m}");
             assert_eq!(on_lines.len(), 1, "{name}: exactly one record per attempt");
             let rec = &on_lines[0];
-            assert_eq!(rec["schema_version"], 2);
+            assert_eq!(rec["schema_version"], 3);
             assert_eq!(rec["source"], "test");
             assert_eq!(rec["calibration"], false);
             assert_eq!(rec["frames_used"], on.0.frames_used as u64);
@@ -1176,4 +1231,276 @@ async fn lock_screen_attempts_are_logged_only_when_asked_for() {
     assert!(!new(&cfg, AttemptSource::LockScreen, false));
     // Calibration alone forces it on, with the same collector.
     assert!(new(&cfg, AttemptSource::Test, true));
+}
+
+// ---------------------------------------------------------------------------
+// Round 9b-2b: the decision on a POOL of adjacent frames
+// ---------------------------------------------------------------------------
+
+/// `mean` mode with the pool on (the config default; the legacy tests above
+/// switch it off).
+async fn pool_run(
+    script: &[Scene],
+    auth_frames: usize,
+    sequence_jump: Option<(usize, u64)>,
+    tweak: impl FnOnce(&mut Config),
+) -> Run {
+    let (state, depth_calls, _camera, _dir) = build_state_full(
+        script,
+        auth_frames,
+        0,
+        |c| {
+            c.liveness.pool_frames = 5;
+            tweak(c);
+        },
+        MiniMode::Loaded,
+        sequence_jump,
+    )
+    .await;
+    let decision = run_authenticate(&state, USER, None, None).await;
+    Run {
+        decision,
+        depth_calls: depth_calls.load(Ordering::SeqCst),
+    }
+}
+
+fn reason(decision: AuthDecision) -> String {
+    match decision.into_response() {
+        doorman_shared::Response::Failure { reason } => reason,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pool_accepts_a_genuine_sequence_and_checks_every_pool_frame_once() {
+    let run = pool_run(&[LiveOwner; 5], 5, None, |_| {}).await;
+    assert_eq!(run.decision.outcome, AuthOutcome::Matched);
+    assert_eq!(run.decision.frames_used, 5);
+    // Frame 0 was checked by the first-frame gate and its relief is reused;
+    // the other four pool frames cost one inference each.
+    assert_eq!(run.depth_calls, 5);
+    assert!(matches!(
+        run.decision.liveness,
+        Some(LivenessOutcome::Pass { relief }) if (relief - LIVE_RELIEF).abs() < 1e-6
+    ));
+}
+
+#[tokio::test]
+async fn pool_closes_the_unchecked_middle_frames_gap() {
+    let script = [LiveOwner, Photo, Photo, Photo, LiveOwner];
+    // Pool off: documented gap, accepted.
+    let off = pool_run(&script, 5, None, |c| c.liveness.pool_frames = 0).await;
+    assert_eq!(off.decision.outcome, AuthOutcome::Matched);
+    // Pool on: the photo frames are depth-checked and the pool is rejected.
+    let on = pool_run(&script, 5, None, |_| {}).await;
+    assert_eq!(on.decision.outcome, AuthOutcome::LivenessRejected);
+    assert_eq!(on.decision.liveness_criterion, Some("pool_hard_floor"));
+    assert!(reason(on.decision).contains("[liveness_rejected: pool_hard_floor]"));
+}
+
+#[tokio::test]
+async fn pool_rejects_a_photo_pool_and_a_mixed_pool() {
+    // A photo pool behind one live first frame.
+    let photo = pool_run(&[LiveOwner, Photo, Photo, Photo, Photo], 5, None, |_| {}).await;
+    assert_eq!(photo.decision.outcome, AuthOutcome::LivenessRejected);
+    assert_eq!(photo.decision.liveness_criterion, Some("pool_hard_floor"));
+    // One photo frame among live ones cannot hide.
+    let mixed = pool_run(
+        &[LiveOwner, LiveOwner, Photo, LiveOwner, LiveOwner],
+        5,
+        None,
+        |_| {},
+    )
+    .await;
+    assert_eq!(mixed.decision.outcome, AuthOutcome::LivenessRejected);
+    assert_eq!(mixed.decision.liveness_criterion, Some("pool_hard_floor"));
+    assert!(doormand::face_budget::is_judged_failure(
+        &mixed.decision.outcome
+    ));
+    // A photo on the deciding frame only.
+    let last = pool_run(
+        &[LiveOwner, LiveOwner, LiveOwner, LiveOwner, Photo],
+        5,
+        None,
+        |_| {},
+    )
+    .await;
+    assert_eq!(last.decision.liveness_criterion, Some("pool_hard_floor"));
+}
+
+#[tokio::test]
+async fn pool_tolerates_thin_frames_only_above_the_floor_and_in_the_minority() {
+    // One and two borderline frames (above the hard floor): 4/5 and 3/5 pass.
+    let one = pool_run(
+        &[LiveOwner, LiveOwner, BorderlineOwner, LiveOwner, LiveOwner],
+        5,
+        None,
+        |_| {},
+    )
+    .await;
+    assert_eq!(one.decision.outcome, AuthOutcome::Matched);
+    let two = pool_run(
+        &[
+            LiveOwner,
+            BorderlineOwner,
+            LiveOwner,
+            BorderlineOwner,
+            LiveOwner,
+        ],
+        5,
+        None,
+        |_| {},
+    )
+    .await;
+    assert_eq!(two.decision.outcome, AuthOutcome::Matched);
+    // Three of five below the threshold: the pass fraction (0.6) fails.
+    let three = pool_run(
+        &[
+            LiveOwner,
+            BorderlineOwner,
+            BorderlineOwner,
+            BorderlineOwner,
+            LiveOwner,
+        ],
+        5,
+        None,
+        |_| {},
+    )
+    .await;
+    assert_eq!(three.decision.outcome, AuthOutcome::LivenessRejected);
+    assert_eq!(
+        three.decision.liveness_criterion,
+        Some("pool_pass_fraction")
+    );
+    // The absolute threshold is not lowered: an all-borderline pool fails
+    // (the first-frame gate already rejects it, as without the pool).
+    let thin = pool_run(&[BorderlineOwner; 5], 5, None, |_| {}).await;
+    assert_eq!(thin.decision.outcome, AuthOutcome::LivenessRejected);
+}
+
+#[tokio::test]
+async fn pool_must_be_contiguous_in_capture_order() {
+    // Gap of 3 between neighbours (two skipped camera frames) is tolerated.
+    let ok = pool_run(&[LiveOwner; 5], 5, Some((3, 2)), |_| {}).await;
+    assert_eq!(ok.decision.outcome, AuthOutcome::Matched);
+    // Gap of 4: not contiguous, no pool, no decision, and no depth work spent
+    // on the pool.
+    let gap = pool_run(&[LiveOwner; 5], 5, Some((3, 3)), |_| {}).await;
+    assert_eq!(gap.decision.outcome, AuthOutcome::InsufficientFrames);
+    assert_eq!(gap.depth_calls, 1, "only the first-frame gate ran");
+    assert!(!doormand::face_budget::is_judged_failure(
+        &gap.decision.outcome
+    ));
+    // The limit is configurable.
+    let wide = pool_run(&[LiveOwner; 5], 5, Some((3, 3)), |c| {
+        c.liveness.pool_max_gap_frames = 4
+    })
+    .await;
+    assert_eq!(wide.decision.outcome, AuthOutcome::Matched);
+}
+
+#[tokio::test]
+async fn pool_identity_frames_are_bounded_to_the_pool() {
+    // Six frames collected, pool of five: the first frame is not part of the
+    // embedding and not part of the pool.
+    let run = pool_run(&[LiveOwner; 6], 6, None, |_| {}).await;
+    assert_eq!(run.decision.outcome, AuthOutcome::Matched);
+    assert_eq!(run.decision.frames_used, 5);
+    assert_eq!(run.depth_calls, 6, "first-frame gate + five pool frames");
+    // A photo in the pool is found even when it is not on a gate frame.
+    let hidden = pool_run(
+        &[LiveOwner, LiveOwner, Photo, LiveOwner, LiveOwner, LiveOwner],
+        6,
+        None,
+        |_| {},
+    )
+    .await;
+    assert_eq!(hidden.decision.outcome, AuthOutcome::LivenessRejected);
+}
+
+#[tokio::test]
+async fn pool_rejects_mixed_identities_that_the_plain_mean_accepts() {
+    let script = [LiveOwner, LiveOwner, LiveOwner, WeakOwner, WeakOwner];
+    let off = pool_run(&script, 5, None, |c| c.liveness.pool_frames = 0).await;
+    assert_eq!(off.decision.outcome, AuthOutcome::Matched, "plain mean");
+    let on = pool_run(&script, 5, None, |_| {}).await;
+    assert_eq!(on.decision.outcome, AuthOutcome::NotMatched);
+    assert_eq!(on.decision.liveness_criterion, None);
+    assert_eq!(
+        on.depth_calls, 1,
+        "no pool depth work for a pool that is not recognized"
+    );
+    // A wider spread limit restores the plain-mean acceptance.
+    let wide = pool_run(&script, 5, None, |c| c.decision.pool_max_score_spread = 1.0).await;
+    assert_eq!(wide.decision.outcome, AuthOutcome::Matched);
+}
+
+#[tokio::test]
+async fn pool_with_too_few_frames_is_insufficient_not_decided() {
+    let few = pool_run(&[LiveOwner; 3], 3, None, |c| {
+        c.liveness.pool_frames = 5;
+        c.authentication.min_decision_frames = 3;
+        c.authentication.auth_frames = 5;
+    })
+    .await;
+    // The attempt ends at the camera timeout with 3 of 5 pool frames.
+    assert_eq!(few.decision.outcome, AuthOutcome::InsufficientFrames);
+}
+
+#[tokio::test]
+async fn pool_record_carries_the_per_frame_reliefs_and_the_criterion() {
+    let log_dir = tempfile::tempdir().expect("log dir");
+    let log = log_dir.path().join("shadow.jsonl");
+    let log_str = log.to_string_lossy().into_owned();
+    let script = [LiveOwner, LiveOwner, BorderlineOwner, LiveOwner, LiveOwner];
+    let (state, _depth, _camera, _dir) = build_state_full(
+        &script,
+        5,
+        0,
+        |c| {
+            c.liveness.pool_frames = 5;
+            c.liveness.shadow_pad_logging = true;
+            c.telemetry.shadow_pad_log_path = log_str.clone();
+        },
+        MiniMode::Loaded,
+        None,
+    )
+    .await;
+    let decision = run_authenticate(&state, USER, None, None).await;
+    assert_eq!(decision.outcome, AuthOutcome::Matched);
+    for _ in 0..100 {
+        if std::fs::metadata(&log)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let text = std::fs::read_to_string(&log).expect("record");
+    let rec: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let pool = &rec["pool"];
+    assert_eq!(pool["size"], 5);
+    assert_eq!(pool["sequences"], serde_json::json!([0, 1, 2, 3, 4]));
+    assert_eq!(pool["max_gap"], 1);
+    let reliefs: Vec<f64> = pool["reliefs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    assert_eq!(reliefs.len(), 5);
+    assert!((reliefs[2] - f64::from(BORDERLINE_RELIEF)).abs() < 1e-6);
+    assert!((pool["relief_median"].as_f64().unwrap() - f64::from(LIVE_RELIEF)).abs() < 1e-6);
+    assert_eq!(pool["passes"], 4);
+    assert_eq!(pool["scores"].as_array().unwrap().len(), 5);
+    assert!(pool["failed"].is_null());
+}
+
+#[tokio::test]
+async fn pool_off_by_zero_keeps_the_deciding_frame_check() {
+    let run = pool_run(&[LiveOwner; 5], 5, None, |c| c.liveness.pool_frames = 0).await;
+    assert_eq!(run.decision.outcome, AuthOutcome::Matched);
+    assert_eq!(run.depth_calls, 2, "first frame + deciding frame");
+    assert_eq!(run.decision.frames_used, 5);
 }

@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// Record format version; bump on an incompatible change.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 /// Upper bound for the shadow MiniFASNet pass; past it the record says `timeout`.
 const MINIFASNET_TIMEOUT: Duration = Duration::from_secs(2);
 const P10: f32 = 0.10;
@@ -214,6 +214,10 @@ pub struct ShadowRecord {
     pub minifasnet: MiniFasnetBlock,
     /// Metrics of the deciding (last quality) frame.
     pub quality: Option<QualityBlock>,
+    /// Pool decision (`mean` mode, `[liveness] pool_frames > 0`): per-frame
+    /// reliefs and cosines, the aggregate and the failing criterion. `null`
+    /// when the pool was off or the attempt ended before it was judged.
+    pub pool: Option<doormand::pool::PoolReport>,
 }
 
 struct Inner {
@@ -233,6 +237,7 @@ struct Inner {
     /// Last frame that passed the quality gate: the deciding frame whenever the
     /// attempt reached a decision.
     last_quality_frame: Option<(Arc<DynamicImage>, Face)>,
+    pool: Option<doormand::pool::PoolReport>,
 }
 
 /// Collector for one attempt. Disabled (a no-op) unless
@@ -297,6 +302,7 @@ impl ShadowPad {
                 counts: FrameCounts::default(),
                 similarities: Vec::new(),
                 reliefs: Vec::new(),
+                pool: None,
                 last_quality_frame: None,
             }),
         }
@@ -364,6 +370,11 @@ impl ShadowPad {
     /// Depth relief of one depth check (`None` when the check produced no value).
     pub fn depth_relief(&mut self, relief: Option<f32>) {
         self.guard(|s| s.reliefs.extend(relief));
+    }
+
+    /// The pool decision of this attempt (reliefs, cosines, failing criterion).
+    pub fn pool(&mut self, report: &doormand::pool::PoolReport) {
+        self.guard(|s| s.pool = Some(report.clone()));
     }
 
     /// The latest frame that passed the quality gate (an `Arc` clone, no pixels copied).
@@ -452,6 +463,7 @@ fn build(inner: Inner, decision: &AuthDecision) -> (ShadowRecord, EmitJob) {
             p_real: None,
         },
         quality: None,
+        pool: inner.pool,
     };
     let job = EmitJob {
         pipeline: inner.pipeline,

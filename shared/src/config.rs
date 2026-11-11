@@ -39,6 +39,28 @@ pub const DEFAULT_NATIVE_FAILURE_COOLDOWN_SECS: u32 = 600;
 pub const MAX_LUMA: f32 = 255.0;
 /// Largest `[liveness] frames`.
 pub const MAX_LIVENESS_FRAMES: usize = 9;
+/// Default of `[liveness] pool_frames`: adjacent frames judged together for
+/// liveness and identity in `mean` mode (`0` switches the pool off).
+pub const DEFAULT_POOL_FRAMES: usize = 5;
+/// Largest `[liveness] pool_frames`.
+pub const MAX_POOL_FRAMES: usize = 15;
+/// Default of `[liveness] pool_max_gap_frames`: the largest camera-sequence gap
+/// between two neighbouring pool frames (3 = at most two camera frames skipped).
+pub const DEFAULT_POOL_MAX_GAP_FRAMES: u32 = 3;
+/// Inclusive bounds of `[liveness] pool_max_gap_frames`.
+pub const MIN_POOL_MAX_GAP_FRAMES: u32 = 1;
+pub const MAX_POOL_MAX_GAP_FRAMES: u32 = 10;
+/// Default of `[liveness] pool_min_pass_fraction`.
+pub const DEFAULT_POOL_MIN_PASS_FRACTION: f32 = 0.6;
+/// Lowest accepted `[liveness] pool_min_pass_fraction`: half of the pool, so
+/// the rule can never be weaker than the median.
+pub const MIN_POOL_PASS_FRACTION: f32 = 0.5;
+/// Fraction of the depth threshold used as the pool hard floor when
+/// `[liveness] pool_hard_floor` is `0` (derived).
+pub const POOL_HARD_FLOOR_FRACTION: f32 = 0.5;
+/// Default of `[decision] pool_max_score_spread`: largest allowed difference
+/// between the best and the worst per-frame cosine inside the pool.
+pub const DEFAULT_POOL_MAX_SCORE_SPREAD: f32 = 0.30;
 /// Default `[liveness] depth_input_size` (Depth-Anything-V2 export, 37 * 14).
 pub const DEFAULT_DEPTH_INPUT_SIZE: u32 = 518;
 /// Depth-Anything-V2 patch size: `depth_input_size` must be a multiple of it.
@@ -686,6 +708,17 @@ pub struct DecisionConfig {
     /// 0..=`similarity_threshold`; `0` disables. Default 0.30.
     #[serde(default = "default_frame_identity_floor")]
     pub frame_identity_floor: f32,
+
+    /// `mean` mode with `[liveness] pool_frames > 0`: the per-frame cosines of
+    /// the pool may differ by at most this much (best minus worst), otherwise
+    /// the pool is not one steady identity and the attempt is not recognized.
+    /// Range (0, 2]. Default 0.30.
+    #[serde(default = "default_pool_max_score_spread")]
+    pub pool_max_score_spread: f32,
+}
+
+fn default_pool_max_score_spread() -> f32 {
+    DEFAULT_POOL_MAX_SCORE_SPREAD
 }
 
 fn default_frame_identity_floor() -> f32 {
@@ -701,6 +734,7 @@ impl Default for DecisionConfig {
             template_score: default_template_score(),
             flip_tta: false,
             frame_identity_floor: DEFAULT_FRAME_IDENTITY_FLOOR,
+            pool_max_score_spread: DEFAULT_POOL_MAX_SCORE_SPREAD,
         }
     }
 }
@@ -718,6 +752,12 @@ impl DecisionConfig {
             return Err(ConfigError::Invalid(format!(
                 "decision.frame_identity_floor = {} is out of range (0..=1)",
                 self.frame_identity_floor
+            )));
+        }
+        if !(self.pool_max_score_spread > 0.0 && self.pool_max_score_spread <= 2.0) {
+            return Err(ConfigError::Invalid(format!(
+                "decision.pool_max_score_spread = {} is out of range (0, 2]",
+                self.pool_max_score_spread
             )));
         }
         Ok(())
@@ -772,6 +812,35 @@ pub struct LivenessConfig {
     #[serde(default)]
     pub mean_mode_depth_samples: u32,
 
+    /// `mean` mode: the decision is taken on a POOL of this many temporally
+    /// adjacent frames (the last ones collected). Every pool frame is
+    /// depth-checked and scored, the embedding is the mean over the pool only,
+    /// and the pool must be contiguous in camera capture order
+    /// (`pool_max_gap_frames`). `0` switches the pool off (single deciding-frame
+    /// check, `mean_mode_depth_samples` as before). Range `0..=15`; the effective
+    /// size is `min(pool_frames, authentication.auth_frames)`. Default 5.
+    #[serde(default = "default_pool_frames")]
+    pub pool_frames: usize,
+
+    /// Largest camera frame-sequence gap between two neighbouring pool frames.
+    /// A gap of 1 means consecutive camera frames; 3 tolerates two skipped
+    /// frames. Range 1..=10. A pool that is not contiguous ends the attempt as
+    /// `insufficient_frames`. Default 3.
+    #[serde(default = "default_pool_max_gap_frames")]
+    pub pool_max_gap_frames: u32,
+
+    /// At least this fraction of the pool frames must reach the depth threshold
+    /// (besides the median, which must reach it too). Range 0.5..=1. Default 0.6.
+    #[serde(default = "default_pool_min_pass_fraction")]
+    pub pool_min_pass_fraction: f32,
+
+    /// No pool frame may have a relief below this value, so one photo frame
+    /// cannot hide among live ones. `0` (default) derives it as half of
+    /// `authentication.liveness_depth_threshold`; otherwise it must not exceed
+    /// that threshold. It cannot be switched off.
+    #[serde(default)]
+    pub pool_hard_floor: f32,
+
     /// Shadow PAD logging (calibration data only; never part of a decision).
     /// When `true`, every authentication attempt appends ONE JSON line of
     /// per-attempt aggregates (similarity and depth-relief distribution,
@@ -806,6 +875,10 @@ impl Default for LivenessConfig {
             relief_stat: default_relief_stat(),
             depth_input_size: default_depth_input_size(),
             mean_mode_depth_samples: 0,
+            pool_frames: DEFAULT_POOL_FRAMES,
+            pool_max_gap_frames: DEFAULT_POOL_MAX_GAP_FRAMES,
+            pool_min_pass_fraction: DEFAULT_POOL_MIN_PASS_FRACTION,
+            pool_hard_floor: 0.0,
             shadow_pad_logging: false,
             shadow_pad_include_lockscreen: false,
             signals: Vec::new(),
@@ -826,6 +899,31 @@ impl LivenessConfig {
             return Err(ConfigError::Invalid(format!(
                 "liveness.depth_input_size = {} must be a positive multiple of {DEPTH_INPUT_MULTIPLE}",
                 self.depth_input_size
+            )));
+        }
+        if self.pool_frames > MAX_POOL_FRAMES {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.pool_frames = {} is out of range (0..={MAX_POOL_FRAMES})",
+                self.pool_frames
+            )));
+        }
+        if !(MIN_POOL_MAX_GAP_FRAMES..=MAX_POOL_MAX_GAP_FRAMES).contains(&self.pool_max_gap_frames)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.pool_max_gap_frames = {} is out of range ({MIN_POOL_MAX_GAP_FRAMES}..={MAX_POOL_MAX_GAP_FRAMES})",
+                self.pool_max_gap_frames
+            )));
+        }
+        if !(MIN_POOL_PASS_FRACTION..=1.0).contains(&self.pool_min_pass_fraction) {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.pool_min_pass_fraction = {} is out of range ({MIN_POOL_PASS_FRACTION}..=1)",
+                self.pool_min_pass_fraction
+            )));
+        }
+        if !(self.pool_hard_floor.is_finite() && self.pool_hard_floor >= 0.0) {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.pool_hard_floor = {} must be 0 (derived) or a positive number",
+                self.pool_hard_floor
             )));
         }
         if let Some(name) = self.signals.first() {
@@ -1616,6 +1714,15 @@ fn default_window_m() -> usize {
 fn default_template_score() -> TemplateScore {
     TemplateScore::Max
 }
+fn default_pool_frames() -> usize {
+    DEFAULT_POOL_FRAMES
+}
+fn default_pool_max_gap_frames() -> u32 {
+    DEFAULT_POOL_MAX_GAP_FRAMES
+}
+fn default_pool_min_pass_fraction() -> f32 {
+    DEFAULT_POOL_MIN_PASS_FRACTION
+}
 fn default_liveness_frames() -> usize {
     1
 }
@@ -1917,6 +2024,13 @@ impl Config {
                 self.authentication.auth_frames
             )));
         }
+        let hard_floor = self.liveness.pool_hard_floor;
+        if hard_floor > self.authentication.liveness_depth_threshold {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.pool_hard_floor = {hard_floor} must not exceed authentication.liveness_depth_threshold = {}",
+                self.authentication.liveness_depth_threshold
+            )));
+        }
         if self.decision.mode == DecisionMode::NOfM
             && self.authentication.auth_frames < self.decision.accept_n
         {
@@ -2123,6 +2237,50 @@ mod tests {
         .unwrap();
         assert!(ok.validate().is_ok());
         assert!(toml::from_str::<Config>("[liveness]\nrelief_stat = \"mean\"\n").is_err());
+    }
+
+    #[test]
+    fn pool_keys_have_safe_defaults_and_are_range_checked() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.liveness.pool_frames, 5);
+        assert_eq!(cfg.liveness.pool_max_gap_frames, 3);
+        assert_eq!(cfg.liveness.pool_min_pass_fraction, 0.6);
+        assert_eq!(cfg.liveness.pool_hard_floor, 0.0, "0 = derived");
+        assert_eq!(cfg.decision.pool_max_score_spread, 0.30);
+        assert_eq!(cfg.authentication.liveness_depth_threshold, 0.05);
+        assert!(cfg.validate().is_ok());
+
+        let bad = |toml: &str| {
+            let cfg: Config = toml::from_str(toml).unwrap();
+            cfg.validate().unwrap_err().to_string()
+        };
+        assert!(bad("[liveness]\npool_frames = 16\n").contains("pool_frames"));
+        assert!(bad("[liveness]\npool_max_gap_frames = 0\n").contains("pool_max_gap_frames"));
+        assert!(bad("[liveness]\npool_max_gap_frames = 11\n").contains("pool_max_gap_frames"));
+        // The fraction cannot be weaker than half of the pool.
+        assert!(
+            bad("[liveness]\npool_min_pass_fraction = 0.4\n").contains("pool_min_pass_fraction")
+        );
+        assert!(
+            bad("[liveness]\npool_min_pass_fraction = 1.1\n").contains("pool_min_pass_fraction")
+        );
+        assert!(bad("[liveness]\npool_hard_floor = -0.01\n").contains("pool_hard_floor"));
+        // A hard floor above the depth threshold would reject frames the
+        // threshold accepts: refused.
+        assert!(bad("[liveness]\npool_hard_floor = 0.06\n").contains("pool_hard_floor"));
+        assert!(bad("[decision]\npool_max_score_spread = 0\n").contains("pool_max_score_spread"));
+        assert!(bad("[decision]\npool_max_score_spread = 2.5\n").contains("pool_max_score_spread"));
+        assert!(bad("[decision]\npool_max_score_spread = nan\n").contains("pool_max_score_spread"));
+
+        for ok in [
+            "[liveness]\npool_frames = 0\n",
+            "[liveness]\npool_frames = 15\npool_max_gap_frames = 10\n",
+            "[liveness]\npool_min_pass_fraction = 0.5\npool_hard_floor = 0.05\n",
+            "[authentication]\nauth_frames = 3\n",
+        ] {
+            let cfg: Config = toml::from_str(ok).unwrap();
+            assert!(cfg.validate().is_ok(), "{ok}");
+        }
     }
 
     #[test]

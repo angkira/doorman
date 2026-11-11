@@ -566,6 +566,15 @@ async fn decide_core(
     };
     let mut scored_frames: Vec<(image::DynamicImage, crate::ml::Face)> = Vec::new();
     let mut scored_checked: Vec<bool> = Vec::new();
+    // `mean` mode with `[liveness] pool_frames > 0`: the decision is taken on
+    // the last `size` scored frames, which must be adjacent in capture order.
+    // Every scored frame is kept (at most `auth_frames`, `Arc` images) so the
+    // pool can be depth-checked and averaged as a whole.
+    let pool_policy = match &sequential {
+        None => doormand::pool::PoolPolicy::from_config(&state.config, threshold),
+        Some(_) => None,
+    };
+    let mut pool_entries: Vec<PoolEntry> = Vec::new();
     let mut frames_seen = 0usize;
     // Frames not accepted by the multi-face gate / the frame-age guard.
     let mut multi_face_dropped = 0usize;
@@ -603,6 +612,7 @@ async fn decide_core(
             continue;
         }
         let shadow_image = frame.image.clone();
+        let sequence = frame.sequence;
         let frame = (*frame.image).clone();
         let i = frames_seen;
         frames_seen += 1;
@@ -679,6 +689,7 @@ async fn decide_core(
         // aggregate (`[liveness] frames`, median) is decided; 1 frame by default.
         // The deciding frame is confirmed separately before accepting (below).
         let mut checked_this_frame = false;
+        let mut relief_this_frame: Option<f32> = None;
         if let (Some(agg), None) = (liveness_agg.as_mut(), liveness.as_ref()) {
             checked_this_frame = true;
             let liveness_started = std::time::Instant::now();
@@ -700,6 +711,7 @@ async fn decide_core(
                 );
             }
             if let Some(outcome) = frame_result {
+                relief_this_frame = outcome.relief();
                 shadow.depth_relief(outcome.relief());
                 if let LivenessProgress::Decided(verdict) = agg.push(outcome) {
                     timing.liveness_passed = Some(verdict.is_pass());
@@ -728,12 +740,14 @@ async fn decide_core(
         timing.embed.record(embed_started.elapsed());
         match embed_result {
             Ok(embedding) => {
+                let mut pool_score = f32::NAN;
                 if sequential.is_none() {
                     let frame_score = crate::pipeline::template_score(
                         dec.template_score,
                         &embedding,
                         &stored_embeddings,
                     );
+                    pool_score = frame_score;
                     shadow.similarity(frame_score);
                     shadow.frame_event(FrameEvent::Judged);
                     if doormand::frame_policy::below_identity_floor(
@@ -769,6 +783,15 @@ async fn decide_core(
                         decider.push(score, liveness_state(liveness_agg.is_some(), &liveness));
                 }
                 passed_embeddings.push(embedding);
+                if pool_policy.is_some() {
+                    pool_entries.push(PoolEntry {
+                        sequence,
+                        score: pool_score,
+                        relief: relief_this_frame,
+                        image: shadow_image.clone(),
+                        face: face.clone(),
+                    });
+                }
                 if let Some((prev, prev_face, prev_checked)) =
                     deciding_frame.take().filter(|_| mean_depth_samples > 0)
                 {
@@ -934,15 +957,47 @@ async fn decide_core(
         );
     }
 
+    // Pool: the decision frames are the last `size` scored frames, and they must
+    // be adjacent in camera capture order. Otherwise there is no pool to judge.
+    let mut pool_range = 0..passed_embeddings.len();
+    if let Some(policy) = &pool_policy {
+        let sequences: Vec<u64> = pool_entries.iter().map(|e| e.sequence).collect();
+        match doormand::pool::select_tail(&sequences, policy.size, policy.max_gap) {
+            Ok(start) => pool_range = start..pool_entries.len(),
+            Err(shape) => {
+                warn!(
+                    "Authentication for {}: no contiguous pool of {} frames ({:?}; sequences {:?}, max gap {}); {} dropped by the multi-face gate",
+                    username, policy.size, shape, sequences, policy.max_gap, multi_face_dropped
+                );
+                let (outcome, timing_outcome, code) =
+                    insufficient_frames_outcome(multi_face_dropped);
+                return rejected_frame(
+                    state,
+                    &mut timing,
+                    RejectedFrame {
+                        outcome,
+                        timing_outcome,
+                        code,
+                    },
+                    &attempt_id,
+                    username,
+                    raw_face_frames,
+                    frames_seen,
+                    liveness,
+                );
+            }
+        }
+    }
+
     let decision_started = std::time::Instant::now();
-    let aggregated = crate::pipeline::aggregate_embeddings(&passed_embeddings)
-        .unwrap_or_else(|| passed_embeddings[0].clone());
+    let aggregated = crate::pipeline::aggregate_embeddings(&passed_embeddings[pool_range.clone()])
+        .unwrap_or_else(|| passed_embeddings[pool_range.start].clone());
 
     let gallery_similarities: Vec<f32> = stored_embeddings
         .iter()
         .map(|stored_emb| crate::ml::cosine_similarity(&aggregated, stored_emb))
         .collect();
-    let (matched, best_similarity) = match &sequential {
+    let (mut matched, best_similarity) = match &sequential {
         Some(decider) => match sequential_step {
             Step::Accept { similarity } => (true, similarity),
             // Rejected or ran out of frames/time: report the best frame score.
@@ -957,11 +1012,40 @@ async fn decide_core(
             (score >= threshold, score)
         }
     };
+    // Pool identity: every pool frame, their mean and their spread must agree
+    // with the enrolled face; a pool that mixes identities is not recognized.
+    let mut pool_report: Option<doormand::pool::PoolReport> = None;
+    if let Some(policy) = &pool_policy {
+        let entries = &pool_entries[pool_range.clone()];
+        let scores: Vec<f32> = entries.iter().map(|e| e.score).collect();
+        let identity_failed = doormand::pool::judge_identity(&scores, policy).err();
+        if matched {
+            if let Some(criterion) = identity_failed {
+                warn!(
+                    "Authentication for {}: pool identity check failed [{}] (cos={:?}, floor {}, spread limit {})",
+                    username, criterion, scores, policy.identity_floor, policy.max_score_spread
+                );
+                matched = false;
+            }
+        }
+        let sequences: Vec<u64> = entries.iter().map(|e| e.sequence).collect();
+        pool_report = Some(doormand::pool::PoolReport {
+            size: entries.len(),
+            max_gap: doormand::pool::max_sequence_gap(&sequences),
+            sequences,
+            reliefs: Vec::new(),
+            relief_median: None,
+            relief_min: None,
+            passes: 0,
+            scores,
+            failed: identity_failed,
+        });
+    }
     // Bind liveness to the frames that produced the match: the first quality
     // frames were checked, but a photo shown afterwards would still score as the
     // owner. The deciding (last scored) frame must itself be live. Costs one more
     // depth inference unless that frame was the one already checked.
-    if matched && liveness_agg.is_some() {
+    if matched && liveness_agg.is_some() && pool_policy.is_none() {
         if let Some((frame, face, checked)) = deciding_frame.take() {
             let recheck_started = std::time::Instant::now();
             let confirmed = doormand::liveness::confirm_on_deciding_frame(checked, || async {
@@ -990,6 +1074,87 @@ async fn decide_core(
                 );
             }
         }
+    }
+    // Pool liveness: EVERY pool frame (the frames that supply the embedding,
+    // the deciding frame included) is depth-checked, reusing the reliefs of
+    // frames already checked, and the pool is judged as a whole.
+    if let (true, true, Some(policy)) = (matched, liveness_agg.is_some(), &pool_policy) {
+        let pool_started = std::time::Instant::now();
+        let mut reliefs: Vec<f32> = Vec::with_capacity(pool_range.len());
+        let mut performed = 0u32;
+        let mut unavailable: Option<LivenessOutcome> = None;
+        for entry in &pool_entries[pool_range.clone()] {
+            if let Some(relief) = entry.relief {
+                reliefs.push(relief);
+                continue;
+            }
+            performed += 1;
+            match state
+                .ml_pipeline
+                .liveness_check(&entry.image, &entry.face)
+                .await
+            {
+                Some(outcome @ LivenessOutcome::Unavailable { .. }) => {
+                    unavailable = Some(outcome);
+                    break;
+                }
+                Some(outcome) => {
+                    shadow.depth_relief(outcome.relief());
+                    reliefs.push(outcome.relief().unwrap_or(f32::NAN));
+                }
+                None => reliefs.push(f32::NAN),
+            }
+        }
+        timing.liveness = Some(timing.liveness.unwrap_or_default() + pool_started.elapsed());
+        timing.liveness_frames += performed;
+        let verdict = doormand::pool::judge_liveness(&reliefs, policy);
+        if let Some(report) = pool_report.as_mut() {
+            report.reliefs = verdict.summary.reliefs.clone();
+            report.relief_median = (!reliefs.is_empty()).then_some(verdict.summary.median);
+            report.relief_min = (!reliefs.is_empty()).then_some(verdict.summary.min);
+            report.passes = verdict.summary.passes;
+            report.failed = report.failed.or(verdict.failed);
+            warn_or_info_pool(username, report, unavailable.is_some());
+            shadow.pool(report);
+        }
+        if let Some(outcome) = unavailable {
+            timing.liveness_passed = Some(false);
+            return liveness_failure(
+                state,
+                &mut timing,
+                &attempt_id,
+                username,
+                first_quality_face_area_frac,
+                raw_face_frames,
+                frames_seen,
+                Some(outcome),
+            );
+        }
+        timing.liveness_relief = Some(verdict.summary.median);
+        if let Some(criterion) = verdict.failed {
+            timing.liveness_passed = Some(false);
+            let mut decision = liveness_failure(
+                state,
+                &mut timing,
+                &attempt_id,
+                username,
+                first_quality_face_area_frac,
+                raw_face_frames,
+                frames_seen,
+                Some(LivenessOutcome::Fail {
+                    relief: verdict.summary.median,
+                }),
+            );
+            decision.liveness_criterion = Some(criterion);
+            return decision;
+        }
+        timing.liveness_passed = Some(true);
+        liveness = Some(LivenessOutcome::Pass {
+            relief: verdict.summary.median,
+        });
+    } else if let Some(report) = pool_report.as_ref() {
+        // Not judged for liveness (not matched, or liveness off): still logged.
+        shadow.pool(report);
     }
     // `mean` mode, opt-in: also depth-check frames sampled across the sequence,
     // so a photo shown between the checked first frames and the deciding frame
@@ -1078,12 +1243,16 @@ async fn decide_core(
         ),
     );
 
+    let pool_fields = pool_report
+        .as_ref()
+        .map_or(String::new(), |r| format!(" {}", r.log_fields()));
     info!(
-        "Authentication aggregate for {}: {} quality frames, cosine={:.4} (threshold {:.2})",
+        "Authentication aggregate for {}: {} quality frames, cosine={:.4} (threshold {:.2}){}",
         username,
-        passed_embeddings.len(),
+        pool_range.len(),
         best_similarity,
-        threshold
+        threshold,
+        pool_fields
     );
 
     let _ = SIMILARITY_THRESHOLD; // kept for back-compat; threshold comes from config now
@@ -1113,8 +1282,8 @@ async fn decide_core(
         );
     } else {
         warn!(
-            "Authentication failed for {} (aggregated similarity: {:.4})",
-            username, best_similarity
+            "Authentication failed for {} (aggregated similarity: {:.4}){}",
+            username, best_similarity, pool_fields
         );
         dataset::log_label_event(
             &state.config.daemon.data_dir,
@@ -1143,9 +1312,60 @@ async fn decide_core(
             AuthOutcome::NotMatched
         },
         similarity: Some(best_similarity),
-        frames_used: passed_embeddings.len(),
+        frames_used: pool_range.len(),
         frames_seen,
         liveness,
+        liveness_criterion: None,
+    }
+}
+
+/// One scored frame kept for the pool decision.
+struct PoolEntry {
+    /// Camera capture sequence number.
+    sequence: u64,
+    /// Template score of this frame (the same score the identity floor sees).
+    score: f32,
+    /// Depth relief when the frame was already checked, else `None`.
+    relief: Option<f32>,
+    image: Arc<image::DynamicImage>,
+    face: crate::ml::Face,
+}
+
+/// Outcome of an attempt that ended without enough usable frames: ambiguity
+/// when the multi-face gate removed frames, otherwise `insufficient_frames`.
+fn insufficient_frames_outcome(
+    multi_face_dropped: usize,
+) -> (AuthOutcome, crate::timing::TimingOutcome, &'static str) {
+    if multi_face_dropped > 0 {
+        (
+            AuthOutcome::AmbiguousFaces,
+            crate::timing::TimingOutcome::AmbiguousFaces,
+            doormand::decision::AMBIGUOUS_FACES_CODE,
+        )
+    } else {
+        (
+            AuthOutcome::InsufficientFrames,
+            crate::timing::TimingOutcome::InsufficientFrames,
+            doormand::decision::INSUFFICIENT_FRAMES_CODE,
+        )
+    }
+}
+
+/// Log the pool decision: WARN when it failed, INFO otherwise.
+fn warn_or_info_pool(username: &str, report: &doormand::pool::PoolReport, unavailable: bool) {
+    if report.failed.is_some() || unavailable {
+        warn!(
+            "Pool liveness for {}: REJECTED {}{}",
+            username,
+            report.log_fields(),
+            if unavailable {
+                " (depth check unavailable)"
+            } else {
+                ""
+            }
+        );
+    } else {
+        info!("Pool liveness for {}: {}", username, report.log_fields());
     }
 }
 

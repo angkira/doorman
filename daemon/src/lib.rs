@@ -14,6 +14,7 @@ pub mod ml;
 pub mod model_integrity;
 pub mod pad_protocol;
 pub mod pad_stats;
+pub mod pool;
 pub mod storage;
 pub mod sudo_policy;
 pub mod test_report;

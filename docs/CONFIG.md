@@ -129,6 +129,7 @@ or directory is group/world-writable.
 | `flip_tta` | `false` |
 | `frame_identity_floor` | `0.3` |
 | `mode` | `"mean"` |
+| `pool_max_score_spread` | `0.3` |
 | `template_score` | `"max"` |
 | `window_m` | `5` |
 
@@ -165,6 +166,10 @@ or directory is group/world-writable.
 | `depth_input_size` | `518` |
 | `frames` | `1` |
 | `mean_mode_depth_samples` | `0` |
+| `pool_frames` | `5` |
+| `pool_hard_floor` | `0.0` |
+| `pool_max_gap_frames` | `3` |
+| `pool_min_pass_fraction` | `0.6` |
 | `relief_stat` | `"minmax"` |
 | `shadow_pad_include_lockscreen` | `false` |
 | `shadow_pad_logging` | `false` |
