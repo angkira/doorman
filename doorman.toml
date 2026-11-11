@@ -55,7 +55,7 @@ wait_for_match_max_ms = 60000
 # stream_socket_group = "doorman"
 
 [enrollment]
-enroll_frames = 20
+enroll_frames = 40
 min_valid_frames = 5
 
 [dataset]

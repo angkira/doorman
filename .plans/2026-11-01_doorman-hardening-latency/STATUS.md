@@ -275,3 +275,10 @@ The only new privileged surface is the root-only, time-limited calibration IPC. 
 - Not changed: threshold 0.05, `auth_frames`, `n_of_m`, sudo profile, `multi_face_policy`, budget. `pool_frames = 0` restores the previous behaviour.
 - INFERRED / unmeasured: the 0.30 spread, gap 3 and the 0.6 fraction are not calibrated on owner data; a host that processes slower than ~3 camera frames per scored frame gets `insufficient_frames` until `pool_max_gap_frames` is raised. A genuine face with relief 0.037-0.043 on all frames is still rejected (by design).
 - Security impact of the new default: stricter only (additional rejection paths, one more cost: up to 4 extra depth inferences per accepted attempt).
+
+## Round 9b-3 (enrollment redesign, branch work/round9b3)
+- `embeddings.bin` v3: per-template metadata (relief, brightness, size, yaw/pitch proxy, session id, time, build); v1 and v2 still load; v2 backed up once to `embeddings.bin.v2.bak`.
+- Enroll: real minimums (`enroll_frames`, `min_valid_frames` now enforced and validated), brightness/pose/second-face gates, refusal when median relief < 1.5 x threshold, capture-session accounting (`enroll_min_sessions` = 2, reported COMPLETE/INCOMPLETE; does not block unlock). Depth gate unchanged and still fatal per frame.
+- Not changed: authentication path, threshold 0.05; relief metadata is stored/logged only (no relative acceptance rule).
+- Unmeasured: all new defaults (brightness 50..220, yaw 0.35, novelty 0.08, brightness delta 20, gap 300 s) are uncalibrated on owner data.
+

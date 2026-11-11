@@ -538,9 +538,14 @@ impl AuthConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentConfig {
+    /// How many frames, evenly sampled from the 15 s recording, one capture
+    /// session processes (detect, quality, depth, embed). 1..=300.
     #[serde(default = "default_enroll_frames")]
     pub enroll_frames: usize,
 
+    /// Fewest frames of one session that must pass every gate (quality, single
+    /// face, brightness, pose, depth liveness) or the session is refused and
+    /// nothing is stored. 1..=`enroll_frames`.
     #[serde(default = "default_min_valid_frames")]
     pub min_valid_frames: usize,
 
@@ -548,6 +553,55 @@ pub struct EnrollmentConfig {
     /// is at or above this value (near-duplicate pruning). Range (0, 1].
     #[serde(default = "default_prune_cosine")]
     pub prune_cosine: f32,
+
+    /// Capture sessions (separate `doorman enroll` runs, spaced in time, under
+    /// different conditions) needed before an enrollment is reported complete.
+    /// Sessions are stored as they finish; authentication is not blocked while
+    /// an enrollment is incomplete. 1..=5.
+    #[serde(default = "default_enroll_min_sessions")]
+    pub enroll_min_sessions: usize,
+
+    /// A run that starts less than this many seconds after the newest stored
+    /// session joins that session instead of counting as a new one. 0 = every
+    /// run is its own session.
+    #[serde(default = "default_session_min_gap_secs")]
+    pub session_min_gap_secs: u64,
+
+    /// A session counts toward `enroll_min_sessions` only if it differs from the
+    /// earlier counted sessions: its mean embedding novelty (1 - best cosine to
+    /// any earlier template) is at least this, OR its median face brightness
+    /// differs by at least `session_min_brightness_delta`. Range [0, 1];
+    /// 0 makes every session count on novelty alone.
+    #[serde(default = "default_session_min_novelty")]
+    pub session_min_novelty: f32,
+
+    /// Median face-brightness difference (luma levels, 0..=255) that also makes
+    /// a session count as a distinct condition. 0 disables this alternative.
+    #[serde(default = "default_session_min_brightness_delta")]
+    pub session_min_brightness_delta: f32,
+
+    /// Enrollment brightness gate: a frame whose mean face luma is below this
+    /// (too dark) is not enrolled. 0 disables the lower bound.
+    #[serde(default = "default_enroll_min_brightness")]
+    pub min_brightness: f32,
+
+    /// Enrollment brightness gate: a frame whose mean face luma is above this
+    /// (over-exposed) is not enrolled. 255 disables the upper bound.
+    #[serde(default = "default_enroll_max_brightness")]
+    pub max_brightness: f32,
+
+    /// Pose limit: largest head-turn proxy |nose offset / eye distance| (0 =
+    /// frontal; about 0.4 is a 30 degree turn). 0 disables the pose gate.
+    /// Frames from a detector without landmarks cannot be checked and pass.
+    #[serde(default = "default_enroll_max_yaw_ratio")]
+    pub max_yaw_ratio: f32,
+
+    /// Refuse to finish an enrollment run whose median depth relief is below
+    /// this multiple of `authentication.liveness_depth_threshold` (the
+    /// environment is too marginal: genuine faces would often fail later).
+    /// 0 disables the check; otherwise 1.0..=10.0. Skipped when liveness is off.
+    #[serde(default = "default_min_median_relief_margin")]
+    pub min_median_relief_margin: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1739,10 +1793,34 @@ fn default_depth_input_size() -> u32 {
     DEFAULT_DEPTH_INPUT_SIZE
 }
 fn default_enroll_frames() -> usize {
-    20
+    40
 }
 fn default_min_valid_frames() -> usize {
     5
+}
+fn default_enroll_min_sessions() -> usize {
+    2
+}
+fn default_session_min_gap_secs() -> u64 {
+    300
+}
+fn default_session_min_novelty() -> f32 {
+    0.08
+}
+fn default_session_min_brightness_delta() -> f32 {
+    20.0
+}
+fn default_enroll_min_brightness() -> f32 {
+    50.0
+}
+fn default_enroll_max_brightness() -> f32 {
+    220.0
+}
+fn default_enroll_max_yaw_ratio() -> f32 {
+    0.35
+}
+fn default_min_median_relief_margin() -> f32 {
+    1.5
 }
 fn default_prune_cosine() -> f32 {
     0.95
@@ -1897,12 +1975,81 @@ impl Default for AuthConfig {
     }
 }
 
+/// Largest `[enrollment] enroll_frames`.
+pub const ENROLL_FRAMES_MAX: usize = 300;
+/// Largest `[enrollment] enroll_min_sessions`.
+pub const ENROLL_SESSIONS_MAX: usize = 5;
+
+impl EnrollmentConfig {
+    /// Fail-fast range checks (the daemon refuses to start on a bad value).
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let bad = |msg: String| Err(ConfigError::Invalid(format!("enrollment.{msg}")));
+        if !(1..=ENROLL_FRAMES_MAX).contains(&self.enroll_frames) {
+            return bad(format!(
+                "enroll_frames = {} is out of range (1..={ENROLL_FRAMES_MAX})",
+                self.enroll_frames
+            ));
+        }
+        if !(1..=self.enroll_frames).contains(&self.min_valid_frames) {
+            return bad(format!(
+                "min_valid_frames = {} is out of range (1..=enroll_frames = {})",
+                self.min_valid_frames, self.enroll_frames
+            ));
+        }
+        if !(1..=ENROLL_SESSIONS_MAX).contains(&self.enroll_min_sessions) {
+            return bad(format!(
+                "enroll_min_sessions = {} is out of range (1..={ENROLL_SESSIONS_MAX})",
+                self.enroll_min_sessions
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.session_min_novelty) {
+            return bad(format!(
+                "session_min_novelty = {} is out of range (0..=1)",
+                self.session_min_novelty
+            ));
+        }
+        if !(0.0..=MAX_LUMA).contains(&self.session_min_brightness_delta) {
+            return bad(format!(
+                "session_min_brightness_delta = {} is out of range (0..=255)",
+                self.session_min_brightness_delta
+            ));
+        }
+        let (lo, hi) = (self.min_brightness, self.max_brightness);
+        if !((0.0..=MAX_LUMA).contains(&lo) && (0.0..=MAX_LUMA).contains(&hi) && lo < hi) {
+            return bad(format!(
+                "min_brightness = {lo} and max_brightness = {hi} must satisfy 0 <= min < max <= 255"
+            ));
+        }
+        if !(0.0..=2.0).contains(&self.max_yaw_ratio) {
+            return bad(format!(
+                "max_yaw_ratio = {} is out of range (0..=2)",
+                self.max_yaw_ratio
+            ));
+        }
+        let m = self.min_median_relief_margin;
+        if !(m == 0.0 || (1.0..=10.0).contains(&m)) {
+            return bad(format!(
+                "min_median_relief_margin = {m} must be 0 (off) or in 1..=10"
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for EnrollmentConfig {
     fn default() -> Self {
         Self {
             enroll_frames: default_enroll_frames(),
             min_valid_frames: default_min_valid_frames(),
             prune_cosine: default_prune_cosine(),
+            enroll_min_sessions: default_enroll_min_sessions(),
+            session_min_gap_secs: default_session_min_gap_secs(),
+            session_min_novelty: default_session_min_novelty(),
+            session_min_brightness_delta: default_session_min_brightness_delta(),
+            min_brightness: default_enroll_min_brightness(),
+            max_brightness: default_enroll_max_brightness(),
+            max_yaw_ratio: default_enroll_max_yaw_ratio(),
+            min_median_relief_margin: default_min_median_relief_margin(),
         }
     }
 }
@@ -2020,6 +2167,7 @@ impl Config {
                 "enrollment.prune_cosine = {prune} is out of range (0, 1]"
             )));
         }
+        self.enrollment.validate()?;
         let samples = self.liveness.mean_mode_depth_samples;
         if usize::try_from(samples).map_or(true, |n| n > self.authentication.auth_frames) {
             return Err(ConfigError::Invalid(format!(
@@ -2323,6 +2471,58 @@ mod tests {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains("prune_cosine"), "{err}");
         }
+    }
+
+    #[test]
+    fn enrollment_minimums_have_safe_defaults_and_are_range_checked() {
+        let d = EnrollmentConfig::default();
+        assert_eq!(
+            (d.enroll_frames, d.min_valid_frames, d.enroll_min_sessions),
+            (40, 5, 2)
+        );
+        assert!(
+            d.min_brightness > 0.0 && d.max_brightness < MAX_LUMA,
+            "brightness gate is on"
+        );
+        assert!(d.max_yaw_ratio > 0.0 && d.min_median_relief_margin == 1.5);
+        Config::default().validate().unwrap();
+        // An old config that only names the former dead keys still loads.
+        let old: Config =
+            toml::from_str("[enrollment]\nenroll_frames = 20\nmin_valid_frames = 5\n").unwrap();
+        old.validate().unwrap();
+        for (bad, key) in [
+            ("enroll_frames = 0", "enroll_frames"),
+            ("enroll_frames = 301", "enroll_frames"),
+            (
+                "enroll_frames = 4\nmin_valid_frames = 5",
+                "min_valid_frames",
+            ),
+            ("min_valid_frames = 0", "min_valid_frames"),
+            ("enroll_min_sessions = 0", "enroll_min_sessions"),
+            ("enroll_min_sessions = 6", "enroll_min_sessions"),
+            ("session_min_novelty = 1.5", "session_min_novelty"),
+            (
+                "session_min_brightness_delta = 300.0",
+                "session_min_brightness_delta",
+            ),
+            (
+                "min_brightness = 200.0\nmax_brightness = 100.0",
+                "max_brightness",
+            ),
+            ("max_brightness = 300.0", "max_brightness"),
+            ("max_yaw_ratio = -0.1", "max_yaw_ratio"),
+            ("min_median_relief_margin = 0.5", "min_median_relief_margin"),
+            (
+                "min_median_relief_margin = 11.0",
+                "min_median_relief_margin",
+            ),
+        ] {
+            let cfg: Config = toml::from_str(&format!("[enrollment]\n{bad}\n")).unwrap();
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(key), "{bad}: {err}");
+        }
+        let off: Config = toml::from_str("[enrollment]\nmin_median_relief_margin = 0.0\n").unwrap();
+        off.validate().unwrap();
     }
 
     #[test]

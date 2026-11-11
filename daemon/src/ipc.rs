@@ -1961,20 +1961,18 @@ async fn handle_enroll(state: &DaemonState, username: &str, add: bool) -> Respon
 
     // Subsample the captured frames before running (serial, CPU-bound) inference.
     //
-    // Recording ~10s at ~30fps yields ~300 frames. Embedding every one of them
-    // (detect → align → embed) ran serially for ~57s and, because each
-    // `process_frame` borrows a recognizer session from the shared pool, it also
-    // starved the background detection pipeline. Consecutive frames are nearly
-    // identical, so we evenly sample at most ENROLL_MAX_PROCESS_FRAMES of them —
-    // this is enough variation for the diverse-embedding selection below while
-    // cutting enrollment processing time by ~10x and freeing recognizer sessions
-    // for live detection sooner.
-    const ENROLL_MAX_PROCESS_FRAMES: usize = 40;
-    let frames: Vec<image::DynamicImage> = if frames.len() > ENROLL_MAX_PROCESS_FRAMES {
+    // Recording ~15s at ~30fps yields hundreds of frames. Embedding every one of
+    // them ran serially for ~57s and, because each inference borrows a session
+    // from the shared pool, it also starved the background detection pipeline.
+    // Consecutive frames are nearly identical, so we evenly sample at most
+    // `[enrollment] enroll_frames` of them: enough variation for the
+    // diverse-embedding selection below at a fraction of the cost.
+    let max_process_frames = state.config.enrollment.enroll_frames;
+    let frames: Vec<image::DynamicImage> = if frames.len() > max_process_frames {
         let total = frames.len();
         // Evenly spaced indices across the whole recording.
-        let step = total as f64 / ENROLL_MAX_PROCESS_FRAMES as f64;
-        (0..ENROLL_MAX_PROCESS_FRAMES)
+        let step = total as f64 / max_process_frames as f64;
+        (0..max_process_frames)
             .map(|i| frames[((i as f64 * step) as usize).min(total - 1)].clone())
             .collect()
     } else {
@@ -1997,8 +1995,19 @@ async fn handle_enroll(state: &DaemonState, username: &str, add: bool) -> Respon
             username: username.to_string(),
         });
 
-    // Process frames and collect valid embeddings
-    let mut valid_embeddings = Vec::new();
+    // Per frame: detect, quality and enrollment gates (cheap, first), the FATAL
+    // depth-liveness gate (same threshold and fail-closed rules as
+    // authentication; a frame below it is never enrolled), then embed. Unlike
+    // the former `process_frame` path the measured relief is kept as template
+    // metadata instead of being discarded.
+    let enrollment_cfg = &state.config.enrollment;
+    let liveness_threshold = state
+        .config
+        .authentication
+        .liveness_enabled
+        .then_some(state.config.authentication.liveness_depth_threshold);
+    let mut tally = crate::pipeline::enroll_session::RejectTally::default();
+    let mut candidates: Vec<crate::pipeline::enroll_session::Candidate> = Vec::new();
     for (i, frame) in frames.iter().enumerate() {
         // Broadcast progress every 5 frames
         if i % 5 == 0 {
@@ -2013,22 +2022,56 @@ async fn handle_enroll(state: &DaemonState, username: &str, add: bool) -> Respon
                 });
         }
 
-        match state.ml_pipeline.process_frame(frame).await {
-            Ok(Some((face, embedding))) => {
-                // Phase 1: only enroll quality-passed frames so the stored
-                // template is built from sharp, adequately-sized faces.
-                if !frame_passes_quality_gate(frame, &face, &state.config.recognition, i, "enroll")
-                {
-                    continue;
-                }
-                debug!("Frame {}: Valid embedding extracted", i);
-                valid_embeddings.push(embedding);
-            }
+        let face = match state.ml_pipeline.detect_only(frame).await {
+            Ok(Some(face)) => face,
             Ok(None) => {
                 debug!("Frame {}: No valid face detected", i);
+                tally.no_face += 1;
+                continue;
             }
             Err(e) => {
                 warn!("Frame {}: Processing error: {}", i, e);
+                tally.no_face += 1;
+                continue;
+            }
+        };
+        // Size / sharpness / (optional) recognition brightness, as before.
+        if !frame_passes_quality_gate(frame, &face, &state.config.recognition, i, "enroll") {
+            tally.quality += 1;
+            continue;
+        }
+        let measure =
+            crate::pipeline::enroll_session::measure_face(frame, &face, &state.config.recognition);
+        if let Err(reject) = crate::pipeline::enroll_session::check_frame(enrollment_cfg, &measure)
+        {
+            debug!("Frame {}: enrollment gate {:?}", i, reject);
+            tally.note(reject);
+            continue;
+        }
+        let relief = match state.ml_pipeline.liveness_check(frame, &face).await {
+            None => None, // liveness disabled by config
+            Some(LivenessOutcome::Pass { relief }) if !relief.is_nan() => Some(relief),
+            Some(LivenessOutcome::Pass { .. }) | Some(LivenessOutcome::Fail { .. }) => {
+                tally.not_live += 1;
+                continue;
+            }
+            Some(LivenessOutcome::Unavailable { .. }) => {
+                tally.liveness_unavailable += 1;
+                continue;
+            }
+        };
+        match state.ml_pipeline.extract_embedding(frame, &face).await {
+            Ok(embedding) => {
+                debug!("Frame {}: Valid embedding extracted", i);
+                candidates.push(crate::pipeline::enroll_session::Candidate {
+                    embedding,
+                    relief,
+                    measure,
+                });
+            }
+            Err(e) => {
+                warn!("Frame {}: embedding error: {}", i, e);
+                tally.embed_error += 1;
             }
         }
     }
@@ -2039,81 +2082,112 @@ async fn handle_enroll(state: &DaemonState, username: &str, add: bool) -> Respon
         .broadcast(StreamMessage::Enrollment {
             timestamp_ms: state.start_time.elapsed().as_millis() as u64,
             phase: EnrollmentPhase::Complete,
-            current: valid_embeddings.len(),
+            current: candidates.len(),
             total: frames.len(),
             username: username.to_string(),
         });
 
-    if valid_embeddings.is_empty() {
+    if candidates.is_empty() {
         error!("No valid face embeddings extracted");
         return Response::Failure {
-            reason: "No valid faces detected. Please ensure good lighting and look at camera."
-                .to_string(),
+            reason: crate::pipeline::enroll_session::nothing_usable_reason(&tally, frames.len()),
         };
     }
-
-    let num_valid = valid_embeddings.len();
-    info!("Extracted {} valid embeddings", num_valid);
+    info!(
+        "Extracted {} valid embeddings (dropped: {:?})",
+        candidates.len(),
+        tally
+    );
 
     // Capacious enrollment. The stored template must cover the conditions you'll
     // actually unlock under (lighting, angle, distance, glasses). Two parts:
     //   1. UNION the freshly-captured embeddings with any ALREADY stored for this
     //      user, so re-running `enroll` under a NEW condition ADDS coverage instead
-    //      of overwriting it (re-enroll a few times across conditions to build a
-    //      robust set; `doorman remove <user>` resets).
+    //      of overwriting it (`doorman remove <user>` resets).
     //   2. Keep the most DIVERSE TARGET_EMBEDDINGS from the combined pool via
     //      farthest-point selection, so the stored set is spread across conditions
     //      rather than clustered on one.
+    // `finish_run` also enforces the per-run minimums (usable frames, median
+    // relief margin) and does the capture-session accounting.
     const TARGET_EMBEDDINGS: usize = 30;
-    let existing_templates: Vec<Vec<f32>> = {
-        let storage = state.storage.read().await;
-        storage
-            .get_embeddings(username)
-            .cloned()
-            .unwrap_or_default()
-    };
-    if !existing_templates.is_empty() {
+    // One writer for the whole read-plan-write sequence: a concurrent enroll
+    // cannot interleave between reading the existing templates and storing.
+    let mut storage = state.storage.write().await;
+    let existing: Vec<crate::pipeline::enroll_session::StoredTemplate> = storage
+        .get_user(username)
+        .map(|u| {
+            u.embeddings
+                .iter()
+                .cloned()
+                .zip(u.templates_meta.iter().cloned())
+                .map(
+                    |(embedding, meta)| crate::pipeline::enroll_session::StoredTemplate {
+                        embedding,
+                        meta,
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default();
+    if !existing.is_empty() {
         info!(
             "Capacious enroll: merging {} new + {} existing embeddings for {}",
-            valid_embeddings.len(),
-            existing_templates.len(),
+            candidates.len(),
+            existing.len(),
             username
         );
     }
-    let selected_embeddings = match crate::pipeline::plan_templates(
-        valid_embeddings,
-        &existing_templates,
+    let usable = candidates.len();
+    let outcome = match crate::pipeline::enroll_session::finish_run(
+        &crate::pipeline::enroll_session::RunPolicy {
+            cfg: enrollment_cfg,
+            relief_threshold: liveness_threshold,
+            frames_sampled: frames.len(),
+            target: TARGET_EMBEDDINGS,
+        },
+        candidates,
+        existing,
         if add {
             crate::pipeline::EnrollMode::Append
         } else {
             crate::pipeline::EnrollMode::Merge
         },
-        state.config.enrollment.prune_cosine,
-        TARGET_EMBEDDINGS,
+        tally,
+        chrono::Local::now(),
     ) {
-        Ok(templates) => templates,
-        Err(reason) => return Response::Failure { reason },
+        Ok(outcome) => outcome,
+        Err(reason) => {
+            warn!("Enrollment refused for {}: {}", username, reason);
+            return Response::Failure { reason };
+        }
     };
 
     info!(
-        "Selected {} diverse embeddings for storage",
-        selected_embeddings.len()
+        "Selected {} diverse embeddings for storage ({} usable frames)",
+        outcome.embeddings.len(),
+        usable
     );
 
-    // Store the embeddings
-    let mut storage = state.storage.write().await;
     match storage
-        .store_embeddings(username.to_string(), selected_embeddings.clone())
+        .store_templates(
+            username.to_string(),
+            outcome.embeddings.clone(),
+            outcome.metas.clone(),
+        )
         .await
     {
         Ok(()) => {
-            info!("Successfully enrolled user: {}", username);
+            info!(
+                "Successfully enrolled user: {} (complete: {}, sessions counted {}/{}); sessions: {:?}",
+                username,
+                outcome.complete,
+                outcome.counted_sessions,
+                outcome.required_sessions,
+                outcome.sessions
+            );
             Response::Success {
-                message: Some(format!(
-                    "Enrollment successful! Processed {}/{} frames, selected {} high-quality embeddings.",
-                    num_valid,
-                    frames.len(),
-                    selected_embeddings.len()
+                message: Some(crate::pipeline::enroll_session::render_report(
+                    username, &outcome,
                 )),
                 data: None,
             }

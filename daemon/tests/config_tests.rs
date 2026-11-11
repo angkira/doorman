@@ -20,7 +20,7 @@ fn test_default_config() {
     assert_eq!(config.authentication.auth_frames, 10);
     assert_eq!(config.authentication.timeout_secs, 3);
 
-    assert_eq!(config.enrollment.enroll_frames, 20);
+    assert_eq!(config.enrollment.enroll_frames, 40);
     assert_eq!(config.enrollment.min_valid_frames, 5);
 
     assert_eq!(config.preprocessing.image_width, 256);

@@ -1366,7 +1366,7 @@ fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Resul
 
     if !json {
         println!("Enrolling '{username}' — look at the camera...");
-        println!("Hint: slowly turn your head a little and vary the lighting; use --add for another lighting condition.");
+        println!("Hint: look at the camera, alone in view, in even light. Slightly vary your head position. Enrollment needs at least two separate runs in different lighting, a few minutes apart.");
     }
 
     let response = send_request(
@@ -1390,7 +1390,12 @@ fn cmd_enroll(sockets: &Sockets, username: &str, add: bool, json: bool) -> Resul
     }
     match response {
         Response::Success { message, .. } => {
-            println!("\n✓ Enrolled '{username}'. {}", message.unwrap_or_default());
+            // The daemon's report is self-contained (this run, per-session
+            // summaries, complete / incomplete); older daemons send one line.
+            println!(
+                "\n{}",
+                message.unwrap_or_else(|| format!("Enrolled '{username}'."))
+            );
             Ok(())
         }
         Response::Failure { reason } => Err(CliError::new(format!("enrollment failed: {reason}"))),

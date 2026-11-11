@@ -16,6 +16,7 @@ loaded, with an error naming the key.
 | `[decision] template_score` | `"max"` | How one embedding is scored against the stored templates: `max`, `top3_mean`, `centroid`. |
 | `[decision] flip_tta` | `false` | Also embed the mirrored aligned crop and average (one extra recognizer pass per frame). |
 | `[recognition] min_brightness` | `0` (off) | Minimum mean luma (0..=255) inside the face box. |
+| `[enrollment]` gates, sessions, relief margin | see "Capture sessions" below and `CONFIG.md` | `enroll_frames`, `min_valid_frames` and the new keys are enforced and validated at startup. |
 | `[enrollment] prune_cosine` | `0.95` | Enrol drops a template whose cosine to a kept one is at or above this. Range (0, 1]. |
 | `[liveness] frames` | `1` | Frames the depth check is evaluated on (odd, 1..=9). |
 | `[liveness] aggregate` | `"median"` | Only `median` exists. |
@@ -63,9 +64,12 @@ Which one wins is an empirical question for your data: compare them with
 
 ## Enrolment
 
-* `embeddings.bin` is versioned (magic + version 2). The old headerless file is
-  still read; it is rewritten in the new layout on the next save. An older
-  daemon cannot read version 2.
+* `embeddings.bin` is versioned (magic + version 3). The headerless version 1
+  file and version 2 files are still read (their templates simply have no
+  metadata); they are rewritten in the version 3 layout on the next save. An
+  older daemon cannot read version 3. Before the first version 3 write a
+  version 2 file is copied once to `embeddings.bin.v2.bak` (same rules as the
+  v1 backup below); roll back by restoring that copy.
 * Before that first version-2 write the daemon copies the old file to
   `embeddings.bin.v1.bak` (mode 0600, same directory, `create_new`, so an
   existing backup is never overwritten). It is made once; later saves and a
@@ -84,8 +88,43 @@ Which one wins is an empirical question for your data: compare them with
   never evicts: it fills free slots with new distinct templates and fails with
   an explicit message if the new faces are all near-duplicates or the gallery
   is full. Use it for another lighting condition.
-* Enrol stays root/admin only. The CLI prints a hint to turn the head slightly
-  and vary the lighting; there are no interactive pose prompts.
+* Enrol stays root/admin only (`Request::Enroll` is classified admin in
+  `ipc_policy.rs`: uid 0 or `admin_uids`); the report below is sent only to
+  that peer. There are no interactive pose prompts.
+
+### Capture sessions, gates and minimums (version 3 metadata)
+
+One `doorman enroll` run is one capture session (15 s, `enroll_frames` frames
+sampled, default 40). Every stored template carries metadata: its depth relief,
+face brightness, face size, yaw/pitch proxies from the landmarks, session id,
+capture time and daemon version (never pixels). The metadata is used for session
+accounting and logged for later calibration; **authentication does not read it**
+(no per-user or relative relief rule exists; that is unvalidated).
+
+Per frame, in order: face found; size and sharpness (`[recognition]`); enrollment
+gates `[enrollment] min_brightness`/`max_brightness` (default 50..220 mean face
+luma, on), `max_yaw_ratio` (default 0.35, about 25 degrees; 0 = off; frames
+without landmarks cannot be checked and pass), no second face (same area/score
+criteria as `[recognition] multi_face_*`, always enforced); then the **same fatal
+depth gate as authentication**: a frame below `liveness_depth_threshold`, NaN, or
+with the depth check unavailable is never enrolled (liveness is not weakened;
+the former path was equally strict).
+
+Per run (all refusals store nothing):
+* fewer than `min_valid_frames` (default 5) frames passing every gate;
+* median relief of the passing frames below `min_median_relief_margin` x
+  `liveness_depth_threshold` (default 1.5 x 0.05 = 0.075; 0 = off; skipped when
+  liveness is disabled): the environment is too marginal, re-enroll in better light.
+
+Sessions: a run within `session_min_gap_secs` (300) of the newest stored session
+joins it. A session counts toward `enroll_min_sessions` (default 2, max 5) only
+if it differs from the earlier counted ones: mean embedding novelty
+(1 - best cosine to earlier templates) >= `session_min_novelty` (0.08) OR median
+face brightness differs by >= `session_min_brightness_delta` (20 luma). Templates
+stored before metadata form one leading session that counts. Sessions are stored
+as they finish; the report says COMPLETE or INCOMPLETE and what to change. An
+incomplete enrollment does not block authentication (no lock-out).
+The 0.08 / 20 / 50..220 / 0.35 defaults are not calibrated on owner data.
 
 ## Quality gate
 

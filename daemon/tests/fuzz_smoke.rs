@@ -193,7 +193,12 @@ fn config_toml_never_panics() {
 
 /// Version 1: headerless bincode of the user list.
 fn legacy_file(users: &[UserEmbedding]) -> Vec<u8> {
-    bincode::serialize(users).unwrap()
+    // Records of that layout: username, embeddings, enrolled_at (no metadata).
+    let old: Vec<(&String, &Vec<Vec<f32>>, &String)> = users
+        .iter()
+        .map(|u| (&u.username, &u.embeddings, &u.enrolled_at))
+        .collect();
+    bincode::serialize(&old).unwrap()
 }
 
 #[test]

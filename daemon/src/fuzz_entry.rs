@@ -135,11 +135,11 @@ pub fn embeddings_file(data: &[u8]) -> Option<usize> {
 
 /// A small synthetic user (no biometric data) for seed corpora and tests.
 pub fn synthetic_user(name: &str, vectors: usize, dim: usize) -> UserEmbedding {
-    UserEmbedding {
-        username: name.to_string(),
-        embeddings: (0..vectors)
+    UserEmbedding::without_meta(
+        name.to_string(),
+        (0..vectors)
             .map(|v| (0..dim).map(|i| ((v + i) % 7) as f32 / 7.0).collect())
             .collect(),
-        enrolled_at: "2026-01-01T00:00:00Z".to_string(),
-    }
+        "2026-01-01T00:00:00Z".to_string(),
+    )
 }

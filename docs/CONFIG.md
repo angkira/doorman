@@ -137,9 +137,17 @@ or directory is group/world-writable.
 
 | Key | Default |
 |---|---|
-| `enroll_frames` | `20` |
+| `enroll_frames` | `40` |
+| `enroll_min_sessions` | `2` |
+| `max_brightness` | `220.0` |
+| `max_yaw_ratio` | `0.35` |
+| `min_brightness` | `50.0` |
+| `min_median_relief_margin` | `1.5` |
 | `min_valid_frames` | `5` |
 | `prune_cosine` | `0.95` |
+| `session_min_brightness_delta` | `20.0` |
+| `session_min_gap_secs` | `300` |
+| `session_min_novelty` | `0.08` |
 
 ## `[ipc]`
 
