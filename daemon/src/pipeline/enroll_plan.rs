@@ -55,7 +55,7 @@ pub fn plan_templates(
     let capacity = target.saturating_sub(existing.len());
     if capacity == 0 && !distinct.is_empty() {
         return Err(format!(
-            "Template gallery is full ({} of {target}); stored templates are never replaced. Nothing was stored. Remove the user to start over.",
+            "Template gallery is full ({} of {target}); stored templates are never replaced. Nothing was stored. Run `doorman remove <user>` to start over.",
             existing.len()
         ));
     }

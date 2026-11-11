@@ -607,8 +607,8 @@ pub struct EnrollmentConfig {
     /// enrolled: the median (over this run's usable frames) of each frame's best
     /// cosine to the stored templates, and the weakest of its three best frames,
     /// must reach this value, or the run is refused and nothing is stored. Not
-    /// applied to the first enrolment. Range
-    /// `decision.frame_identity_floor`/0.30 ..= 1.0.
+    /// applied to the first enrolment. Must be at least the larger of 0.30 and
+    /// `decision.frame_identity_floor`, and at most 1.0.
     #[serde(default = "default_enroll_same_person_min_similarity")]
     pub enroll_same_person_min_similarity: f32,
 }
@@ -2571,6 +2571,15 @@ mod tests {
         .unwrap();
         let err = low.validate().unwrap_err().to_string();
         assert!(err.contains("enroll_same_person_min_similarity"), "{err}");
+        // Exactly the floor and exactly 1.0 are accepted.
+        let eq: Config = toml::from_str(
+            "[decision]\nframe_identity_floor = 0.35\n[authentication]\nsimilarity_threshold = 0.4\n[enrollment]\nenroll_same_person_min_similarity = 0.35\n",
+        )
+        .unwrap();
+        eq.validate().unwrap();
+        let one: Config =
+            toml::from_str("[enrollment]\nenroll_same_person_min_similarity = 1.0\n").unwrap();
+        one.validate().unwrap();
     }
 
     #[test]

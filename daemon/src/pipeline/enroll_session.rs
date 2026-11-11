@@ -326,9 +326,10 @@ pub fn finish_run(
         best.sort_by(|a, b| b.total_cmp(a));
         let top_min = best.iter().take(3).copied().min_by(f32::total_cmp);
         let floor = cfg.enroll_same_person_min_similarity;
+        let top_min_text = top_min.map_or_else(|| "n/a".to_string(), |t| format!("{t:.3}"));
         if !at_least(med, floor) || !top_min.is_some_and(|t| at_least(t, floor)) {
             tracing::warn!(
-                "Enrollment refused: median best similarity to the stored templates {med:.3}, weakest of top 3 {top_min:?}, required {floor:.3} (enrollment.enroll_same_person_min_similarity)"
+                "Enrollment refused: median best similarity to the stored templates {med:.3}, weakest of top 3 {top_min_text}, required {floor:.3} (enrollment.enroll_same_person_min_similarity)"
             );
             return Err(
                 "These frames do not look like the person already enrolled for this user. Nothing was stored. \
@@ -986,6 +987,21 @@ mod tests {
         let near = at(9, 0) - chrono::Duration::seconds(30);
         let joined = run(&c, good(100.0, 70.0), stored(&first), near).unwrap();
         assert_eq!(joined.this_session_id, first.this_session_id);
+    }
+
+    #[test]
+    fn future_session_slack_boundary_is_inclusive() {
+        let c = cfg();
+        let first = run(&c, good(0.0, 120.0), vec![], at(9, 0)).unwrap();
+        let slack = chrono::Duration::milliseconds(i64::try_from(CLOCK_SLACK_MS).unwrap());
+        // Stored id exactly now + slack is still joined.
+        let edge = at(9, 0) - slack;
+        let joined = run(&c, good(100.0, 70.0), stored(&first), edge).unwrap();
+        assert_eq!(joined.this_session_id, first.this_session_id);
+        // One millisecond further in the future is not.
+        let past = edge - chrono::Duration::milliseconds(1);
+        let split = run(&c, good(100.0, 70.0), stored(&first), past).unwrap();
+        assert_ne!(split.this_session_id, first.this_session_id);
     }
 
     #[test]
