@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// First bytes of a versioned `embeddings.bin`. The legacy (version 1) file has
 /// no header: it starts with the bincode `u64` element count, which can never
@@ -226,17 +226,73 @@ impl Storage {
             None => LEGACY_BACKUP_NAME,
             Some(rest) => match rest.get(..4).and_then(|b| <[u8; 4]>::try_from(b).ok()) {
                 Some(v) if u32::from_le_bytes(v) == LEGACY_META_FREE_VERSION => V2_BACKUP_NAME,
-                _ => return Ok(()),
+                _ => {
+                    self.warn_if_backup_damaged(V2_BACKUP_NAME);
+                    return Ok(());
+                }
             },
         };
         let backup = self.file_path.with_file_name(name);
-        match write_private_file(&backup, &data, false) {
-            Ok(()) => {
-                info!("Backed up the previous embeddings file to {:?}", backup);
-                Ok(())
+        // An existing backup is kept unless it is provably a partial write of
+        // this very file (a strict prefix: a crash or full disk mid-copy).
+        let replace = match fs::read(&backup) {
+            Ok(existing) if existing == data => return Ok(()),
+            Ok(existing) if existing.len() < data.len() && data.starts_with(&existing) => {
+                warn!(
+                    "Embeddings backup {:?} is truncated ({} of {} bytes); rewriting it",
+                    backup,
+                    existing.len(),
+                    data.len()
+                );
+                true
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("Failed to write backup {backup:?}")),
+            Ok(_) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e).with_context(|| format!("Failed to read backup {backup:?}")),
+        };
+        self.install_backup(&backup, &data, replace)
+            .with_context(|| format!("Failed to write backup {backup:?}"))?;
+        info!("Backed up the previous embeddings file to {:?}", backup);
+        Ok(())
+    }
+
+    /// Crash-safe backup write: a 0600 temp file (fsynced) is moved into place
+    /// atomically, so `backup` is either absent/old or complete, never partial.
+    /// Without `replace` an existing backup is left alone (hard link refuses).
+    fn install_backup(&self, backup: &Path, data: &[u8], replace: bool) -> std::io::Result<()> {
+        let tmp = backup.with_extension("bak.tmp");
+        write_private_file(&tmp, data, true)?;
+        let placed = if replace {
+            fs::rename(&tmp, backup)
+        } else {
+            let linked = fs::hard_link(&tmp, backup);
+            let _ = fs::remove_file(&tmp);
+            match linked {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                other => other,
+            }
+        };
+        if placed.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        placed?;
+        match backup.parent() {
+            Some(dir) => fs::File::open(dir).and_then(|d| d.sync_all()),
+            None => Ok(()),
+        }
+    }
+
+    /// The main file is already version 3: a version 2 backup that no longer
+    /// decodes cannot be repaired (its source is gone), so only warn.
+    fn warn_if_backup_damaged(&self, name: &str) {
+        let backup = self.file_path.with_file_name(name);
+        if let Ok(bytes) = fs::read(&backup) {
+            if Self::decode_embeddings(&bytes).is_err() {
+                warn!(
+                    "Embeddings backup {:?} is damaged and the main file is already upgraded; it cannot be rebuilt",
+                    backup
+                );
+            }
         }
     }
 
@@ -647,6 +703,79 @@ mod tests {
         let mut storage = reloaded;
         storage.store_embeddings("alice".into(), all).await.unwrap();
         assert_eq!(fs::read(&backup).unwrap(), v2_bytes());
+    }
+
+    #[tokio::test]
+    async fn truncated_v2_backup_is_repaired_while_the_main_file_is_still_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_file = dir.path().join("embeddings.bin");
+        let backup = dir.path().join(V2_BACKUP_NAME);
+        fs::write(&data_file, v2_bytes()).unwrap();
+        // A crash left only the first 10 bytes of the copy.
+        fs::write(&backup, &v2_bytes()[..10]).unwrap();
+
+        let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![0.0, 0.0, 1.0]])
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), v2_bytes(), "repaired");
+        assert_eq!(mode_of(&backup), 0o600);
+        // Neither temp file is left behind.
+        assert!(!dir.path().join("embeddings.bin.v2.bak.tmp").exists());
+        assert!(!dir.path().join("embeddings.bin.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn a_complete_but_different_backup_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join(V2_BACKUP_NAME);
+        fs::write(dir.path().join("embeddings.bin"), v2_bytes()).unwrap();
+        let mut other = v2_bytes();
+        other.push(0xAA);
+        fs::write(&backup, &other).unwrap();
+        let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![1.0]])
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), other);
+    }
+
+    #[tokio::test]
+    async fn damaged_backup_is_left_alone_once_the_main_file_is_v3() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join(V2_BACKUP_NAME);
+        let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![1.0]])
+            .await
+            .unwrap();
+        fs::write(&backup, b"DMN").unwrap();
+        storage
+            .store_embeddings("alice".into(), vec![vec![2.0]])
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), b"DMN", "kept as is (warned)");
+    }
+
+    #[tokio::test]
+    async fn failed_backup_write_leaves_no_partial_backup_and_the_main_file_intact() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data_file = dir.path().join("embeddings.bin");
+        fs::write(&data_file, v2_bytes()).unwrap();
+        let mut storage = Storage::new_with_dir(dir.path()).await.unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let res = storage
+            .store_embeddings("alice".into(), vec![vec![1.0]])
+            .await;
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        if res.is_ok() {
+            return; // running as root: permissions are not enforced
+        }
+        assert_eq!(fs::read(&data_file).unwrap(), v2_bytes());
+        assert!(!dir.path().join(V2_BACKUP_NAME).exists());
     }
 
     #[tokio::test]

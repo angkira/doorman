@@ -1121,17 +1121,36 @@ async fn decide_core(
         let mut reliefs: Vec<f32> = Vec::with_capacity(pool_range.len());
         let mut performed = 0u32;
         let mut unavailable: Option<LivenessOutcome> = None;
+        let mut deadline_expired = false;
         for entry in &pool_entries[pool_range.clone()] {
             if let Some(relief) = entry.relief {
                 reliefs.push(relief);
                 continue;
             }
+            // The strict sudo profile's deadline also bounds these inferences:
+            // PAM gives up shortly after it, so an overrun fails closed here.
+            let remaining = match strict {
+                Some(_) => deadline.saturating_duration_since(std::time::Instant::now()),
+                None => std::time::Duration::MAX,
+            };
+            if remaining.is_zero() {
+                deadline_expired = true;
+                break;
+            }
             performed += 1;
-            match state
-                .ml_pipeline
-                .liveness_check(&entry.image, &entry.face)
-                .await
-            {
+            let check = state.ml_pipeline.liveness_check(&entry.image, &entry.face);
+            let checked = if strict.is_some() {
+                match tokio::time::timeout(remaining, check).await {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        deadline_expired = true;
+                        break;
+                    }
+                }
+            } else {
+                check.await
+            };
+            match checked {
                 Some(outcome @ LivenessOutcome::Unavailable { .. }) => {
                     unavailable = Some(outcome);
                     break;
@@ -1145,6 +1164,29 @@ async fn decide_core(
         }
         timing.liveness = Some(timing.liveness.unwrap_or_default() + pool_started.elapsed());
         timing.liveness_frames += performed;
+        if deadline_expired {
+            warn!(
+                "Authentication for {}: strict deadline reached during pool liveness checks ({} of {} frames checked); rejecting",
+                username,
+                reliefs.len(),
+                pool_range.len()
+            );
+            let (outcome, timing_outcome, code) = insufficient_frames_outcome(multi_face_dropped);
+            return rejected_frame(
+                state,
+                &mut timing,
+                RejectedFrame {
+                    outcome,
+                    timing_outcome,
+                    code,
+                },
+                &attempt_id,
+                username,
+                raw_face_frames,
+                frames_seen,
+                liveness,
+            );
+        }
         let verdict = doormand::pool::judge_liveness(&reliefs, policy);
         if let Some(report) = pool_report.as_mut() {
             report.reliefs = verdict.summary.reliefs.clone();

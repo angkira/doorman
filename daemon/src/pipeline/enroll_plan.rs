@@ -7,11 +7,13 @@ use crate::ml::cosine_similarity;
 /// How new templates combine with the ones already stored for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollMode {
-    /// Plain `enroll`: union of old and new, then keep the `target` most
-    /// diverse (this may evict older templates).
+    /// Plain `enroll`: existing templates are never evicted. New distinct
+    /// ones fill the free capacity, the most diverse of the new run's own
+    /// templates winning when there are more than fit. A full gallery refuses
+    /// new templates (`doorman remove <user>` starts over).
     Merge,
-    /// `enroll --add`: existing templates are never evicted; new distinct
-    /// ones fill the remaining capacity.
+    /// `enroll --add`: same protection, but a run with no new distinct
+    /// template is refused instead of being a no-op.
     Append,
 }
 
@@ -44,31 +46,22 @@ pub fn plan_templates(
     target: usize,
 ) -> Result<Vec<Vec<f32>>, String> {
     let distinct = prune_near_duplicates(new, existing, prune_cosine);
-    match mode {
-        EnrollMode::Merge => {
-            let mut pool = distinct;
-            pool.extend(existing.iter().cloned());
-            Ok(select_diverse_embeddings(pool, target))
-        }
-        EnrollMode::Append => {
-            if distinct.is_empty() {
-                return Err(
-                    "No new distinct templates: every captured face is a near-duplicate of a stored one. Try another pose or lighting."
-                        .to_string(),
-                );
-            }
-            let capacity = target.saturating_sub(existing.len());
-            if capacity == 0 {
-                return Err(format!(
-                    "Template gallery is full ({} of {target}); remove the user to start over.",
-                    existing.len()
-                ));
-            }
-            let mut all = existing.to_vec();
-            all.extend(select_diverse_embeddings(distinct, capacity));
-            Ok(all)
-        }
+    if mode == EnrollMode::Append && distinct.is_empty() {
+        return Err(
+            "No new distinct templates: every captured face is a near-duplicate of a stored one. Try another pose or lighting."
+                .to_string(),
+        );
     }
+    let capacity = target.saturating_sub(existing.len());
+    if capacity == 0 && !distinct.is_empty() {
+        return Err(format!(
+            "Template gallery is full ({} of {target}); stored templates are never replaced. Nothing was stored. Remove the user to start over.",
+            existing.len()
+        ));
+    }
+    let mut all = existing.to_vec();
+    all.extend(select_diverse_embeddings(distinct, capacity));
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -120,6 +113,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capped.len(), 3);
+    }
+
+    #[test]
+    fn merge_never_evicts_existing_templates_even_when_new_ones_are_outliers() {
+        // The verifier's case: a full legacy gallery plus three clearly new faces.
+        let existing: Vec<Vec<f32>> = (0..30).map(|i| at(i as f32 * 2.0)).collect();
+        let full = plan_templates(
+            vec![at(150.0), at(200.0), at(250.0)],
+            &existing,
+            EnrollMode::Merge,
+            PRUNE,
+            30,
+        )
+        .unwrap_err();
+        assert!(
+            full.contains("full") && full.contains("Nothing was stored"),
+            "{full}"
+        );
+        // With 3 free slots all existing stay and the new ones fill them.
+        let roomy = plan_templates(
+            vec![at(150.0), at(200.0), at(250.0), at(300.0)],
+            &existing[..27],
+            EnrollMode::Merge,
+            PRUNE,
+            30,
+        )
+        .unwrap();
+        assert_eq!(roomy.len(), 30);
+        assert_eq!(&roomy[..27], &existing[..27]);
+    }
+
+    #[test]
+    fn merge_with_nothing_new_keeps_the_stored_set_even_when_full() {
+        let existing: Vec<Vec<f32>> = (0..3).map(|i| at(i as f32 * 90.0)).collect();
+        let plan = plan_templates(vec![at(1.0)], &existing, EnrollMode::Merge, PRUNE, 3).unwrap();
+        assert_eq!(plan, existing);
     }
 
     #[test]

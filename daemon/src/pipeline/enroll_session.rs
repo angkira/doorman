@@ -20,6 +20,10 @@ use doormand::frame_policy::{choose_face, FaceChoice, Sighting};
 /// Session id of templates stored before metadata existed (one pseudo-session).
 const LEGACY_SESSION_ID: u64 = 0;
 
+/// How far ahead of "now" a stored session id may be and still count as the
+/// present (small clock adjustments); anything later is treated as expired.
+const CLOCK_SLACK_MS: u64 = 60_000;
+
 /// What was measured on one frame's face.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameMeasure {
@@ -48,6 +52,11 @@ pub fn pose_ratios(face: &Face) -> (Option<f32>, Option<f32>) {
     let Some([re, le, nose, rm, lm]) = face.landmarks else {
         return (None, None);
     };
+    let all = [re, le, nose, rm, lm];
+    if all.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
+        // Unusable landmarks: report NaN so `check_frame` fails the frame closed.
+        return (Some(f32::NAN), Some(f32::NAN));
+    }
     let eye_dx = (le.0 - re.0).abs();
     let eye_mid = ((re.0 + le.0) / 2.0, (re.1 + le.1) / 2.0);
     let yaw = (eye_dx > 1e-4).then(|| (nose.0 - eye_mid.0).abs() / eye_dx);
@@ -99,6 +108,11 @@ fn at_least(value: f32, floor: f32) -> bool {
 pub fn check_frame(cfg: &EnrollmentConfig, m: &FrameMeasure) -> Result<(), FrameReject> {
     if m.second_face {
         return Err(FrameReject::SecondFace);
+    }
+    // Non-finite pose (NaN landmarks) fails closed even with the pose gate off.
+    if m.yaw_ratio.is_some_and(|y| !y.is_finite()) || m.pitch_ratio.is_some_and(|p| !p.is_finite())
+    {
+        return Err(FrameReject::HeadTurned);
     }
     if cfg.min_brightness > 0.0 && !at_least(m.brightness, cfg.min_brightness) {
         return Err(FrameReject::TooDark);
@@ -281,20 +295,57 @@ pub fn finish_run(
         // the depth stage did not run, which is also a refusal.
         let med = median(&reliefs).unwrap_or(f32::NAN);
         if !at_least(med, required) {
-            return Err(format!(
-                "The depth relief of your face is too marginal here: median {med:.3} is below {:.1}x the liveness threshold ({required:.3}). \
-                 Genuine unlocks would fail often in this light. Nothing was stored. \
-                 Re-enroll in better, even light (face a window or lamp, avoid strong backlight, sit closer).",
+            tracing::warn!(
+                "Enrollment refused: median depth relief {med:.3} is below {required:.3} (enrollment.min_median_relief_margin = {} x the liveness threshold); root can set that key (0 disables) if this environment is genuinely fine",
                 cfg.min_median_relief_margin
-            ));
+            );
+            return Err(
+                "The depth relief of your face is too marginal here, so genuine unlocks would fail often. Nothing was stored. \
+                 Try again in better, even light (face a window or lamp, avoid strong backlight, sit closer). \
+                 If the light cannot be improved, ask the system administrator (root) to relax the enrollment depth-margin setting in the daemon configuration."
+                    .to_string(),
+            );
         }
     }
 
-    // Join the newest stored session when this run starts within the gap.
+    // A further session must be the same person as the stored templates: the
+    // median of the frames' best cosine, and the weakest of the three best
+    // frames, must reach the floor. The first enrolment has nothing to compare.
+    if !existing.is_empty() {
+        let mut best: Vec<f32> = candidates
+            .iter()
+            .map(|c| {
+                existing
+                    .iter()
+                    .map(|t| cosine_similarity(&c.embedding, &t.embedding))
+                    .filter(|s| !s.is_nan())
+                    .fold(-1.0_f32, f32::max)
+            })
+            .collect();
+        let med = median(&best).unwrap_or(f32::NAN);
+        best.sort_by(|a, b| b.total_cmp(a));
+        let top_min = best.iter().take(3).copied().min_by(f32::total_cmp);
+        let floor = cfg.enroll_same_person_min_similarity;
+        if !at_least(med, floor) || !top_min.is_some_and(|t| at_least(t, floor)) {
+            tracing::warn!(
+                "Enrollment refused: median best similarity to the stored templates {med:.3}, weakest of top 3 {top_min:?}, required {floor:.3} (enrollment.enroll_same_person_min_similarity)"
+            );
+            return Err(
+                "These frames do not look like the person already enrolled for this user. Nothing was stored. \
+                 Enroll the same person, or remove the user first to start over."
+                    .to_string(),
+            );
+        }
+    }
+
+    // Join the newest stored session when this run starts within the gap. A
+    // stored session id in the future (the clock was stepped and restored) is
+    // never joined: it would otherwise absorb every later run.
     let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(0);
     let newest = existing
         .iter()
         .filter_map(|t| t.meta.as_ref().map(|m| m.session_id))
+        .filter(|id| *id <= now_ms.saturating_add(CLOCK_SLACK_MS))
         .max();
     let gap_ms = cfg.session_min_gap_secs.saturating_mul(1000);
     let session_id = match newest {
@@ -581,6 +632,9 @@ mod tests {
     fn cfg() -> EnrollmentConfig {
         EnrollmentConfig {
             min_valid_frames: 3,
+            // These fixtures use far-apart "conditions"; the identity check has
+            // its own tests with the default.
+            enroll_same_person_min_similarity: -1.0,
             ..EnrollmentConfig::default()
         }
     }
@@ -702,7 +756,14 @@ mod tests {
         ];
         let err = run(&c, low, vec![], at(9, 0)).unwrap_err();
         assert!(err.contains("too marginal"), "{err}");
-        assert!(err.contains("0.075"), "{err}");
+        assert!(
+            !err.contains("0.075") && !err.contains("min_median_relief_margin"),
+            "{err}"
+        );
+        assert!(
+            err.contains("better, even light") && err.contains("administrator"),
+            "{err}"
+        );
         // Exactly at the margin passes.
         let edge = vec![
             cand(0.0, Some(0.075), 120.0),
@@ -842,6 +903,153 @@ mod tests {
         assert_eq!(s.relief_median, Some(0.12));
         assert_eq!(s.relief_max, Some(0.14));
         assert_eq!(s.brightness_median, Some(130.0));
+    }
+
+    fn identity_cfg() -> EnrollmentConfig {
+        EnrollmentConfig {
+            min_valid_frames: 3,
+            ..EnrollmentConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_session_of_another_person_is_refused_and_nothing_is_planned() {
+        let c = identity_cfg();
+        let first = run(&c, good(0.0, 120.0), vec![], at(9, 0)).unwrap();
+        // 120+ degrees away from every stored template: a different face.
+        let err = run(&c, good(160.0, 70.0), stored(&first), at(9, 30)).unwrap_err();
+        assert!(err.contains("do not look like the person"), "{err}");
+        assert!(err.contains("Nothing was stored"), "{err}");
+        assert!(!err.contains("0.5") && !err.contains("similarity"), "{err}");
+        // Same person under other light is fine.
+        assert!(run(&c, good(15.0, 70.0), stored(&first), at(9, 30)).is_ok());
+    }
+
+    #[test]
+    fn first_enrolment_skips_the_identity_check() {
+        let c = EnrollmentConfig {
+            enroll_same_person_min_similarity: 1.0,
+            ..identity_cfg()
+        };
+        assert!(run(&c, good(0.0, 120.0), vec![], at(9, 0)).is_ok());
+    }
+
+    #[test]
+    fn identity_check_boundary_is_inclusive_and_needs_the_weakest_top_frames() {
+        // Stored template at 0 degrees; candidates exactly at the floor cosine.
+        let floor = 0.5_f32;
+        let c = EnrollmentConfig {
+            enroll_same_person_min_similarity: floor,
+            ..identity_cfg()
+        };
+        let existing = vec![StoredTemplate {
+            embedding: vec![1.0, 0.0],
+            meta: None,
+        }];
+        let edge = |x: f32| Candidate {
+            embedding: vec![x, (1.0 - x * x).sqrt()],
+            relief: Some(0.1),
+            measure: measure(120.0),
+        };
+        let all_at_floor = vec![edge(floor), edge(floor), edge(floor)];
+        assert!(run(&c, all_at_floor, existing.clone(), at(9, 0)).is_ok());
+        // Median ok (0.9) but one of the three best frames is below the floor.
+        let weak = vec![edge(0.9), edge(0.9), edge(0.49)];
+        assert!(run(&c, weak, existing.clone(), at(9, 0)).is_err());
+        // NaN similarity fails closed.
+        let nan = vec![edge(f32::NAN), edge(f32::NAN), edge(f32::NAN)];
+        assert!(run(&c, nan, existing, at(9, 0)).is_err());
+    }
+
+    #[test]
+    fn session_gap_boundary_is_exclusive() {
+        let c = cfg(); // gap 300 s
+        let first = run(&c, good(0.0, 120.0), vec![], at(9, 0)).unwrap();
+        let just_inside = at(9, 0) + chrono::Duration::seconds(299);
+        let joined = run(&c, good(100.0, 70.0), stored(&first), just_inside).unwrap();
+        assert_eq!(joined.this_session_id, first.this_session_id);
+        let exactly = at(9, 5);
+        let split = run(&c, good(100.0, 70.0), stored(&first), exactly).unwrap();
+        assert_ne!(split.this_session_id, first.this_session_id);
+    }
+
+    #[test]
+    fn a_stored_session_in_the_future_is_never_joined() {
+        let c = cfg();
+        let first = run(&c, good(0.0, 120.0), vec![], at(9, 0)).unwrap();
+        // Clock now reads 3 days earlier than the stored session (stepped back).
+        let earlier = at(9, 0) - chrono::Duration::days(3);
+        let later = run(&c, good(100.0, 70.0), stored(&first), earlier).unwrap();
+        assert_ne!(later.this_session_id, first.this_session_id);
+        assert_eq!(later.sessions.len(), 2);
+        // A small step (within the slack) still joins.
+        let near = at(9, 0) - chrono::Duration::seconds(30);
+        let joined = run(&c, good(100.0, 70.0), stored(&first), near).unwrap();
+        assert_eq!(joined.this_session_id, first.this_session_id);
+    }
+
+    #[test]
+    fn novelty_boundary_is_inclusive() {
+        let c = EnrollmentConfig {
+            session_min_novelty: 1.0,
+            session_min_brightness_delta: 20.0,
+            ..cfg()
+        };
+        let meta = |id: u64| {
+            Some(TemplateMeta {
+                session_id: id,
+                captured_at: String::new(),
+                relief: Some(0.1),
+                brightness: 100.0,
+                face_area_frac: 0.1,
+                yaw_ratio: None,
+                pitch_ratio: None,
+                build: String::new(),
+            })
+        };
+        // Orthogonal embeddings: novelty is exactly 1.0 = the requirement.
+        let s = summarize_sessions(&c, &[vec![1.0, 0.0], vec![0.0, 1.0]], &[meta(1), meta(2)]);
+        assert!(s[1].counted, "{:?}", s[1]);
+    }
+
+    #[test]
+    fn nan_landmarks_fail_the_frame_closed_even_with_the_pose_gate_off() {
+        let mut face = Face {
+            bbox: (0.3, 0.3, 0.3, 0.3),
+            confidence: 0.9,
+            frame_dimensions: (640, 480),
+            landmarks: Some([
+                (0.4, 0.4),
+                (0.6, 0.4),
+                (f32::NAN, 0.5),
+                (0.43, 0.6),
+                (0.57, 0.6),
+            ]),
+            other_faces: Vec::new(),
+        };
+        let (yaw, pitch) = pose_ratios(&face);
+        let m = FrameMeasure {
+            yaw_ratio: yaw,
+            pitch_ratio: pitch,
+            ..measure(120.0)
+        };
+        assert_eq!(
+            check_frame(&EnrollmentConfig::default(), &m),
+            Err(FrameReject::HeadTurned)
+        );
+        let off = EnrollmentConfig {
+            max_yaw_ratio: 0.0,
+            ..EnrollmentConfig::default()
+        };
+        assert_eq!(check_frame(&off, &m), Err(FrameReject::HeadTurned));
+        face.landmarks = Some([
+            (f32::INFINITY, 0.4),
+            (0.6, 0.4),
+            (0.5, 0.5),
+            (0.4, 0.6),
+            (0.6, 0.6),
+        ]);
+        assert!(pose_ratios(&face).0.unwrap().is_nan());
     }
 
     #[test]

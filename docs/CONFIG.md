@@ -139,6 +139,7 @@ or directory is group/world-writable.
 |---|---|
 | `enroll_frames` | `40` |
 | `enroll_min_sessions` | `2` |
+| `enroll_same_person_min_similarity` | `0.5` |
 | `max_brightness` | `220.0` |
 | `max_yaw_ratio` | `0.35` |
 | `min_brightness` | `50.0` |

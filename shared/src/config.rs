@@ -602,6 +602,15 @@ pub struct EnrollmentConfig {
     /// 0 disables the check; otherwise 1.0..=10.0. Skipped when liveness is off.
     #[serde(default = "default_min_median_relief_margin")]
     pub min_median_relief_margin: f32,
+
+    /// An additional enrollment session must look like the person already
+    /// enrolled: the median (over this run's usable frames) of each frame's best
+    /// cosine to the stored templates, and the weakest of its three best frames,
+    /// must reach this value, or the run is refused and nothing is stored. Not
+    /// applied to the first enrolment. Range
+    /// `decision.frame_identity_floor`/0.30 ..= 1.0.
+    #[serde(default = "default_enroll_same_person_min_similarity")]
+    pub enroll_same_person_min_similarity: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1822,6 +1831,9 @@ fn default_enroll_max_yaw_ratio() -> f32 {
 fn default_min_median_relief_margin() -> f32 {
     1.5
 }
+fn default_enroll_same_person_min_similarity() -> f32 {
+    0.5
+}
 fn default_prune_cosine() -> f32 {
     0.95
 }
@@ -2032,6 +2044,12 @@ impl EnrollmentConfig {
                 "min_median_relief_margin = {m} must be 0 (off) or in 1..=10"
             ));
         }
+        let same = self.enroll_same_person_min_similarity;
+        if !(DEFAULT_FRAME_IDENTITY_FLOOR..=1.0).contains(&same) {
+            return bad(format!(
+                "enroll_same_person_min_similarity = {same} is out of range ({DEFAULT_FRAME_IDENTITY_FLOOR}..=1)"
+            ));
+        }
         Ok(())
     }
 }
@@ -2050,6 +2068,7 @@ impl Default for EnrollmentConfig {
             max_brightness: default_enroll_max_brightness(),
             max_yaw_ratio: default_enroll_max_yaw_ratio(),
             min_median_relief_margin: default_min_median_relief_margin(),
+            enroll_same_person_min_similarity: default_enroll_same_person_min_similarity(),
         }
     }
 }
@@ -2140,6 +2159,12 @@ impl Config {
             return Err(ConfigError::Invalid(format!(
                 "decision.frame_identity_floor = {floor} must not exceed authentication.similarity_threshold = {}",
                 self.authentication.similarity_threshold
+            )));
+        }
+        let same = self.enrollment.enroll_same_person_min_similarity;
+        if same < floor {
+            return Err(ConfigError::Invalid(format!(
+                "enrollment.enroll_same_person_min_similarity = {same} must not be below decision.frame_identity_floor = {floor}"
             )));
         }
         let min_frames = self.authentication.min_decision_frames;
@@ -2486,6 +2511,10 @@ mod tests {
         );
         assert!(d.max_yaw_ratio > 0.0 && d.min_median_relief_margin == 1.5);
         Config::default().validate().unwrap();
+        // The upper bound of min_valid_frames is inclusive: equal to enroll_frames is fine.
+        let eq: Config =
+            toml::from_str("[enrollment]\nenroll_frames = 5\nmin_valid_frames = 5\n").unwrap();
+        eq.validate().unwrap();
         // An old config that only names the former dead keys still loads.
         let old: Config =
             toml::from_str("[enrollment]\nenroll_frames = 20\nmin_valid_frames = 5\n").unwrap();
@@ -2513,6 +2542,14 @@ mod tests {
             ("max_yaw_ratio = -0.1", "max_yaw_ratio"),
             ("min_median_relief_margin = 0.5", "min_median_relief_margin"),
             (
+                "enroll_same_person_min_similarity = 0.29",
+                "enroll_same_person_min_similarity",
+            ),
+            (
+                "enroll_same_person_min_similarity = 1.01",
+                "enroll_same_person_min_similarity",
+            ),
+            (
                 "min_median_relief_margin = 11.0",
                 "min_median_relief_margin",
             ),
@@ -2523,6 +2560,17 @@ mod tests {
         }
         let off: Config = toml::from_str("[enrollment]\nmin_median_relief_margin = 0.0\n").unwrap();
         off.validate().unwrap();
+        assert_eq!(
+            EnrollmentConfig::default().enroll_same_person_min_similarity,
+            0.5
+        );
+        // Not below the configured per-frame identity floor.
+        let low: Config = toml::from_str(
+            "[decision]\nframe_identity_floor = 0.35\n[authentication]\nsimilarity_threshold = 0.4\n[enrollment]\nenroll_same_person_min_similarity = 0.32\n",
+        )
+        .unwrap();
+        let err = low.validate().unwrap_err().to_string();
+        assert!(err.contains("enroll_same_person_min_similarity"), "{err}");
     }
 
     #[test]

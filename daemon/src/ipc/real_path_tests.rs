@@ -133,6 +133,16 @@ struct ScriptedBackend {
     /// Camera frames skipped before script index `.0` (a jump of `.1` in the
     /// capture sequence), or none.
     sequence_jump: Option<(usize, u64)>,
+    /// Faults injected into every depth inference after the first one (the
+    /// first-frame gate), so the pool's own checks can be made slow or broken.
+    depth_fault: DepthFault,
+}
+
+/// Behaviour of depth inferences after the first.
+#[derive(Clone, Copy, Default)]
+struct DepthFault {
+    delay: std::time::Duration,
+    unavailable: bool,
 }
 
 impl ScriptedBackend {
@@ -201,7 +211,15 @@ impl MLBackend for ScriptedBackend {
         image: &DynamicImage,
         _face: &Face,
     ) -> anyhow::Result<Option<f32>> {
-        self.depth_calls.fetch_add(1, Ordering::SeqCst);
+        let previous = self.depth_calls.fetch_add(1, Ordering::SeqCst);
+        if previous > 0 {
+            if !self.depth_fault.delay.is_zero() {
+                tokio::time::sleep(self.depth_fault.delay).await;
+            }
+            if self.depth_fault.unavailable {
+                return Ok(None);
+            }
+        }
         Ok(Some(self.script[frame_index(image)].relief()))
     }
 
@@ -296,6 +314,7 @@ async fn build_state_mini(
         tweak,
         mini,
         None,
+        DepthFault::default(),
     )
     .await
 }
@@ -307,6 +326,7 @@ async fn build_state_full(
     tweak: impl FnOnce(&mut Config),
     mini: MiniMode,
     sequence_jump: Option<(usize, u64)>,
+    depth_fault: DepthFault,
 ) -> (
     DaemonState,
     Arc<AtomicUsize>,
@@ -344,6 +364,7 @@ async fn build_state_full(
         camera: camera_tx.clone(),
         depth_calls: depth_calls.clone(),
         sequence_jump,
+        depth_fault,
     });
     let mut storage = Storage::new_with_dir(data_dir.path())
         .await
@@ -1255,6 +1276,7 @@ async fn pool_run(
         },
         MiniMode::Loaded,
         sequence_jump,
+        DepthFault::default(),
     )
     .await;
     let decision = run_authenticate(&state, USER, None, None).await;
@@ -1488,6 +1510,7 @@ async fn pool_record_carries_the_per_frame_reliefs_and_the_criterion() {
         },
         MiniMode::Loaded,
         None,
+        DepthFault::default(),
     )
     .await;
     let decision = run_authenticate(&state, USER, None, None).await;
@@ -1527,4 +1550,136 @@ async fn pool_off_by_zero_keeps_the_deciding_frame_check() {
     assert_eq!(run.decision.outcome, AuthOutcome::Matched);
     assert_eq!(run.depth_calls, 2, "first frame + deciding frame");
     assert_eq!(run.decision.frames_used, 5);
+}
+
+// ---------------------------------------------------------------------------
+// Pool liveness under n_of_m and the strict sudo profile
+// ---------------------------------------------------------------------------
+
+fn strict_profile(timeout_ms: u64) -> doormand::sudo_policy::StrictProfile {
+    doormand::sudo_policy::StrictProfile {
+        threshold: SIMILARITY_THRESHOLD,
+        accept_n: 3,
+        window_m: 5,
+        liveness_frames: 1,
+        timeout: std::time::Duration::from_millis(timeout_ms),
+    }
+}
+
+/// One strict (sudo) attempt with the pool on, under the given depth faults.
+async fn strict_pool_run(
+    script: &[Scene],
+    timeout_ms: u64,
+    sequence_jump: Option<(usize, u64)>,
+    depth_fault: DepthFault,
+) -> Run {
+    // The strict profile only uses frames captured after the request arrived.
+    let request_start = std::time::Instant::now();
+    let (state, depth_calls, _camera, _dir) = build_state_full(
+        script,
+        script.len(),
+        0,
+        |c| {
+            c.decision.frame_identity_floor = 0.0;
+            c.liveness.pool_frames = 5;
+        },
+        MiniMode::Loaded,
+        sequence_jump,
+        depth_fault,
+    )
+    .await;
+    let profile = strict_profile(timeout_ms);
+    let decision = run_authenticate(&state, USER, Some((&profile, request_start)), None).await;
+    Run {
+        decision,
+        depth_calls: depth_calls.load(Ordering::SeqCst),
+    }
+}
+
+#[tokio::test]
+async fn strict_profile_pool_accepts_genuine_and_rejects_a_photo_in_the_middle() {
+    let genuine = strict_pool_run(&[LiveOwner; 5], 5000, None, DepthFault::default()).await;
+    assert_eq!(genuine.decision.outcome, AuthOutcome::Matched);
+    assert_eq!(
+        genuine.depth_calls, 3,
+        "every one of the 3 accepting frames"
+    );
+    let script = [LiveOwner, Photo, LiveOwner, LiveOwner, LiveOwner];
+    let spoof = strict_pool_run(&script, 5000, None, DepthFault::default()).await;
+    assert_eq!(spoof.decision.outcome, AuthOutcome::LivenessRejected);
+    assert_eq!(spoof.decision.liveness_criterion, Some("pool_hard_floor"));
+}
+
+#[tokio::test]
+async fn strict_profile_pool_depth_checks_stop_at_the_deadline_and_fail_closed() {
+    // Each pool depth check takes 400 ms against a 300 ms profile timeout: the
+    // first pool check is cut at the deadline and the attempt is rejected as
+    // insufficient frames (never accepted, never a hang past the deadline).
+    let fault = DepthFault {
+        delay: std::time::Duration::from_millis(400),
+        unavailable: false,
+    };
+    let started = std::time::Instant::now();
+    let run = strict_pool_run(&[LiveOwner; 5], 300, None, fault).await;
+    assert_eq!(run.decision.outcome, AuthOutcome::InsufficientFrames);
+    assert_eq!(
+        run.depth_calls, 2,
+        "first-frame gate plus the cut-off check"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(390),
+        "bounded by the deadline, took {:?}",
+        started.elapsed()
+    );
+    assert!(!doormand::face_budget::is_judged_failure(
+        &run.decision.outcome
+    ));
+}
+
+#[tokio::test]
+async fn strict_profile_pool_with_unavailable_depth_model_fails_closed() {
+    let fault = DepthFault {
+        delay: std::time::Duration::ZERO,
+        unavailable: true,
+    };
+    let run = strict_pool_run(&[LiveOwner; 5], 5000, None, fault).await;
+    assert_eq!(run.decision.outcome, AuthOutcome::LivenessError);
+}
+
+#[tokio::test]
+async fn n_of_m_pool_must_be_contiguous_and_fails_closed_without_depth() {
+    let n_of_m = |c: &mut Config| {
+        c.decision.mode = DecisionMode::NOfM;
+        c.decision.accept_n = 3;
+        c.decision.window_m = 5;
+        c.decision.frame_identity_floor = 0.0;
+    };
+    // A camera restart between frames 1 and 2 (sequence jumps by 5): the 3
+    // accepting frames are not adjacent, so there is no pool and no decision.
+    let gap = pool_run(&[LiveOwner; 5], 5, Some((2, 5)), n_of_m).await;
+    assert_eq!(gap.decision.outcome, AuthOutcome::InsufficientFrames);
+    assert_eq!(gap.depth_calls, 1, "only the first-frame gate ran");
+    // The pool's own depth checks failing (model gone after the first frame).
+    let (state, _depth, _camera, _dir) = build_state_full(
+        &[LiveOwner; 5],
+        5,
+        0,
+        |c| {
+            n_of_m(c);
+            c.liveness.pool_frames = 5;
+        },
+        MiniMode::Loaded,
+        None,
+        DepthFault {
+            delay: std::time::Duration::ZERO,
+            unavailable: true,
+        },
+    )
+    .await;
+    let decision = run_authenticate(&state, USER, None, None).await;
+    assert!(
+        decision.outcome == AuthOutcome::LivenessError,
+        "{:?}",
+        decision.outcome
+    );
 }
