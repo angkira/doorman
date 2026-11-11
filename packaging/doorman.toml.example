@@ -134,3 +134,13 @@ retention_days = 14
 # log unless this is true; every record has a `source` (test, sudo, lock_screen).
 # [liveness]
 # shadow_pad_include_lockscreen = false
+
+# Frame pool (Round 9b-2b), mean mode: liveness and identity are decided on the
+# last pool_frames adjacent frames. See docs/decision-and-liveness.md.
+# [liveness]
+# pool_frames = 5               # 0 = off (single deciding-frame check); max 15
+# pool_max_gap_frames = 3       # largest camera frame-sequence gap inside the pool (1..=10)
+# pool_min_pass_fraction = 0.6  # share of frames at or above liveness_depth_threshold (0.5..=1)
+# pool_hard_floor = 0.0         # 0 = 0.5 x liveness_depth_threshold; no frame may be below it
+# [decision]
+# pool_max_score_spread = 0.30  # best minus worst per-frame cosine inside the pool

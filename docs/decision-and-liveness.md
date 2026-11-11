@@ -211,6 +211,77 @@ of
 (docs/bench/README.md), then multiply by K; the timing log's `liveness_frames`
 and `liveness_ms` show the real count and total per attempt.
 
+### Frame pool in mean mode (Round 9b-2b)
+
+The camera delivers video, so `mean` mode decides liveness AND identity on a
+POOL of temporally adjacent frames instead of one deciding frame. On by
+default (`[liveness] pool_frames = 5`); `0` restores the previous behaviour
+(first-frame gate + deciding-frame check, `mean_mode_depth_samples`). `n_of_m`
+mode and the strict sudo profile are not changed by it.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `[liveness] pool_frames` | `5` | Pool size, `0..=15`; effective size is `min(pool_frames, authentication.auth_frames)`. |
+| `[liveness] pool_max_gap_frames` | `3` | Largest camera frame-sequence gap between neighbouring pool frames (1 = consecutive; 3 tolerates two skipped camera frames). Range 1..=10. |
+| `[liveness] pool_min_pass_fraction` | `0.6` | Share of pool frames that must reach the depth threshold. Range 0.5..=1. |
+| `[liveness] pool_hard_floor` | `0` | No pool frame may be below this relief. `0` derives `0.5 x liveness_depth_threshold` (0.025). Must not exceed the threshold; cannot be disabled. |
+| `[decision] pool_max_score_spread` | `0.30` | Best minus worst per-frame cosine in the pool. Range (0, 2]. |
+
+Which frames: the loop still collects `auth_frames` quality frames. The pool is
+the LAST `pool_frames` of them (it always contains the deciding frame) and it
+must be contiguous in camera capture order, using the camera's own frame
+counter (`RawFrame.sequence`), so "gap" is measured in camera frame intervals
+and not in wall-clock time. A pool that is not contiguous, or fewer scored
+frames than the pool size, ends the attempt as `insufficient_frames` (not a
+judged failure; no depth work is spent). The embedding that is scored is the
+mean over the pool only, so every identity frame is also a liveness-checked
+frame (this closes the `mean_mode_depth_samples = 0` gap: photo middle frames
+averaged in beside a live deciding frame). Frames before the pool still go
+through the identity floor and the first-frame depth gate, and may reject the
+attempt, but they do not enter the decision.
+
+Liveness (only for an attempt that is otherwise accepted, depth runs on every
+pool frame, reusing a relief that is already known). The pool is live when ALL hold,
+checked in this order; the first failing one is the reported criterion:
+
+1. `pool_hard_floor`: no frame below the hard floor (a photo frame cannot hide
+   among live ones; NaN counts as below);
+2. `pool_pass_fraction`: at least `ceil(pool_min_pass_fraction x n)` frames
+   (3 of 5 by default) are at or above `liveness_depth_threshold`;
+3. `pool_median`: the median relief is at or above `liveness_depth_threshold`.
+
+The absolute threshold (0.05) is NOT lowered by the pool: a genuine face whose
+relief is 0.037-0.043 on every frame is rejected on the pool exactly as on one
+frame (reported as `pool_pass_fraction`). What the pool adds is robustness to a
+single noisy frame, not a lower bar. A depth model that is missing or errors on
+any pool frame is `liveness_unavailable` (fail closed). The wire answer is
+`Liveness check failed (not a live face) [liveness_rejected: <criterion>].`
+
+Identity (same pool): every frame at or above `frame_identity_floor` (already
+enforced frame by frame during collection), the MEAN per-frame cosine at or
+above the match threshold, the aggregate (mean-embedding) score at or above it
+as before, and best-minus-worst cosine at most `pool_max_score_spread`. A pool
+that fails the identity rule is `not_recognized`. `multi_face_policy`, the
+failure budget and `max_frame_age_ms` apply unchanged.
+
+Calibration data: the decision log line and the WARN/INFO line `Pool liveness`
+carry `pool=N seq=[...] max_gap=G relief=[...] relief_median relief_min pass=k/N
+cos=[...] failed=<criterion|none>`. Shadow PAD records (schema version 3) carry
+the same as `pool` (`sequences`, `max_gap`, `reliefs`, `relief_median`,
+`relief_min`, `passes`, `scores`, `failed`), in addition to the existing
+`depth.relief` distribution.
+
+Cost: up to `pool_frames` depth inferences per accepted attempt (minus the
+frames already checked), about `pool_frames - 1` more than before; rejected
+attempts that do not reach the pool step cost nothing extra. Measure the
+per-frame depth latency as above and multiply.
+
+Limits: the contiguity bound is in camera frames, so a host whose processing
+is slower than about three camera frames per scored frame will see
+`insufficient_frames` until `pool_max_gap_frames` is raised (the logged
+`max_gap` shows the real figure). Spread and gap defaults are not calibrated on
+the owner's data. Pool decisions against real attacks were not measured.
+
 ### Frame-level rules in mean mode (Round 9a)
 
 Applied by `run_authenticate` before a frame can enter the aggregate; the pure
