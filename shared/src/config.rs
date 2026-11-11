@@ -58,6 +58,9 @@ pub const MIN_POOL_PASS_FRACTION: f32 = 0.5;
 /// Fraction of the depth threshold used as the pool hard floor when
 /// `[liveness] pool_hard_floor` is `0` (derived).
 pub const POOL_HARD_FLOOR_FRACTION: f32 = 0.5;
+/// Lowest accepted explicit `[liveness] pool_hard_floor`, as a fraction of the
+/// depth threshold. A floor near 0 would switch the per-frame rule off.
+pub const MIN_POOL_HARD_FLOOR_FRACTION: f32 = 0.25;
 /// Default of `[decision] pool_max_score_spread`: largest allowed difference
 /// between the best and the worst per-frame cosine inside the pool.
 pub const DEFAULT_POOL_MAX_SCORE_SPREAD: f32 = 0.30;
@@ -836,8 +839,8 @@ pub struct LivenessConfig {
 
     /// No pool frame may have a relief below this value, so one photo frame
     /// cannot hide among live ones. `0` (default) derives it as half of
-    /// `authentication.liveness_depth_threshold`; otherwise it must not exceed
-    /// that threshold. It cannot be switched off.
+    /// `authentication.liveness_depth_threshold`; otherwise it must lie between
+    /// 0.25 x and 1 x that threshold. It cannot be switched off.
     #[serde(default)]
     pub pool_hard_floor: f32,
 
@@ -2025,6 +2028,13 @@ impl Config {
             )));
         }
         let hard_floor = self.liveness.pool_hard_floor;
+        let min_hard_floor =
+            self.authentication.liveness_depth_threshold * MIN_POOL_HARD_FLOOR_FRACTION;
+        if hard_floor != 0.0 && hard_floor < min_hard_floor {
+            return Err(ConfigError::Invalid(format!(
+                "liveness.pool_hard_floor = {hard_floor} is below {min_hard_floor} ({MIN_POOL_HARD_FLOOR_FRACTION} x authentication.liveness_depth_threshold); use 0 for the derived floor"
+            )));
+        }
         if hard_floor > self.authentication.liveness_depth_threshold {
             return Err(ConfigError::Invalid(format!(
                 "liveness.pool_hard_floor = {hard_floor} must not exceed authentication.liveness_depth_threshold = {}",
@@ -2268,6 +2278,9 @@ mod tests {
         // A hard floor above the depth threshold would reject frames the
         // threshold accepts: refused.
         assert!(bad("[liveness]\npool_hard_floor = 0.06\n").contains("pool_hard_floor"));
+        // ... and a floor below 0.25 x threshold would disable the rule.
+        assert!(bad("[liveness]\npool_hard_floor = 0.0124\n").contains("pool_hard_floor"));
+        assert!(bad("[liveness]\npool_hard_floor = 0.000000001\n").contains("pool_hard_floor"));
         assert!(bad("[decision]\npool_max_score_spread = 0\n").contains("pool_max_score_spread"));
         assert!(bad("[decision]\npool_max_score_spread = 2.5\n").contains("pool_max_score_spread"));
         assert!(bad("[decision]\npool_max_score_spread = nan\n").contains("pool_max_score_spread"));
@@ -2276,6 +2289,7 @@ mod tests {
             "[liveness]\npool_frames = 0\n",
             "[liveness]\npool_frames = 15\npool_max_gap_frames = 10\n",
             "[liveness]\npool_min_pass_fraction = 0.5\npool_hard_floor = 0.05\n",
+            "[liveness]\npool_hard_floor = 0.0125\n",
             "[authentication]\nauth_frames = 3\n",
         ] {
             let cfg: Config = toml::from_str(ok).unwrap();

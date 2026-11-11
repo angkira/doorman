@@ -118,13 +118,11 @@ impl AuthDecision {
             (AuthOutcome::NoClearFace, _) => failure(
                 "No clear face detected. Please ensure good lighting and look at the camera.",
             ),
-            (AuthOutcome::LivenessRejected, _) => match self.liveness_criterion {
-                Some(criterion) => failure(&format!(
-                    "Liveness check failed (not a live face) [{}: {criterion}].",
-                    crate::liveness::LIVENESS_REJECTED_CODE
-                )),
-                None => failure("Liveness check failed (not a live face)."),
-            },
+            // Generic on purpose: the failing criterion (`liveness_criterion`) is
+            // for daemon logs and shadow records only, never for the client.
+            (AuthOutcome::LivenessRejected, _) => {
+                failure("Liveness check failed (not a live face).")
+            }
             (AuthOutcome::IdentityFloor, _) => failure(&format!(
                 "Face not recognized [{IDENTITY_FLOOR_CODE}]: a frame did not match the enrolled face."
             )),
@@ -207,16 +205,18 @@ mod tests {
             reason(AuthOutcome::LivenessRejected),
             "Liveness check failed (not a live face)."
         );
-        let with_criterion = AuthDecision {
-            liveness_criterion: Some("pool_median"),
-            ..AuthDecision::bare(AuthOutcome::LivenessRejected)
-        };
-        match with_criterion.into_response() {
-            Response::Failure { reason } => assert_eq!(
-                reason,
-                "Liveness check failed (not a live face) [liveness_rejected: pool_median]."
-            ),
-            other => panic!("{other:?}"),
+        // The failing pool criterion never reaches the client (tuning oracle).
+        for criterion in ["pool_hard_floor", "pool_pass_fraction", "pool_median"] {
+            let with_criterion = AuthDecision {
+                liveness_criterion: Some(criterion),
+                ..AuthDecision::bare(AuthOutcome::LivenessRejected)
+            };
+            match with_criterion.into_response() {
+                Response::Failure { reason } => {
+                    assert_eq!(reason, "Liveness check failed (not a live face).")
+                }
+                other => panic!("{other:?}"),
+            }
         }
         match decision(AuthOutcome::NotMatched, Some(0.3)).into_response() {
             Response::Failure { reason } => {

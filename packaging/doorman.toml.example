@@ -141,6 +141,6 @@ retention_days = 14
 # pool_frames = 5               # 0 = off (single deciding-frame check); max 15
 # pool_max_gap_frames = 3       # largest camera frame-sequence gap inside the pool (1..=10)
 # pool_min_pass_fraction = 0.6  # share of frames at or above liveness_depth_threshold (0.5..=1)
-# pool_hard_floor = 0.0         # 0 = 0.5 x liveness_depth_threshold; no frame may be below it
+# pool_hard_floor = 0.0         # 0 = 0.5 x liveness_depth_threshold; else 0.25x..1x the threshold
 # [decision]
 # pool_max_score_spread = 0.30  # best minus worst per-frame cosine inside the pool

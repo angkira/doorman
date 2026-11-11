@@ -224,7 +224,7 @@ mode and the strict sudo profile are not changed by it.
 | `[liveness] pool_frames` | `5` | Pool size, `0..=15`; effective size is `min(pool_frames, authentication.auth_frames)`. |
 | `[liveness] pool_max_gap_frames` | `3` | Largest camera frame-sequence gap between neighbouring pool frames (1 = consecutive; 3 tolerates two skipped camera frames). Range 1..=10. |
 | `[liveness] pool_min_pass_fraction` | `0.6` | Share of pool frames that must reach the depth threshold. Range 0.5..=1. |
-| `[liveness] pool_hard_floor` | `0` | No pool frame may be below this relief. `0` derives `0.5 x liveness_depth_threshold` (0.025). Must not exceed the threshold; cannot be disabled. |
+| `[liveness] pool_hard_floor` | `0` | No pool frame may be below this relief. `0` derives `0.5 x liveness_depth_threshold` (0.025). Must lie between `0.25 x` and `1 x` `liveness_depth_threshold` (0.0125..=0.05 by default); cannot be disabled. |
 | `[decision] pool_max_score_spread` | `0.30` | Best minus worst per-frame cosine in the pool. Range (0, 2]. |
 
 Which frames: the loop still collects `auth_frames` quality frames. The pool is
@@ -254,8 +254,11 @@ The absolute threshold (0.05) is NOT lowered by the pool: a genuine face whose
 relief is 0.037-0.043 on every frame is rejected on the pool exactly as on one
 frame (reported as `pool_pass_fraction`). What the pool adds is robustness to a
 single noisy frame, not a lower bar. A depth model that is missing or errors on
-any pool frame is `liveness_unavailable` (fail closed). The wire answer is
-`Liveness check failed (not a live face) [liveness_rejected: <criterion>].`
+any pool frame is `liveness_unavailable` (fail closed). The wire answer is the
+generic `Liveness check failed (not a live face).` (code `liveness_rejected`):
+the failing criterion and the per-frame values are NOT sent to the client (they
+would be a spoof-tuning oracle) and appear only in the daemon log line and the
+shadow record.
 
 Identity (same pool): every frame at or above `frame_identity_floor` (already
 enforced frame by frame during collection), the MEAN per-frame cosine at or
@@ -275,6 +278,15 @@ Cost: up to `pool_frames` depth inferences per accepted attempt (minus the
 frames already checked), about `pool_frames - 1` more than before; rejected
 attempts that do not reach the pool step cost nothing extra. Measure the
 per-frame depth latency as above and multiply.
+
+`n_of_m` and the strict sudo/PAM profile use the pool for LIVENESS only
+(identity stays with the N-of-M decider): once the decider would accept, the
+last `min(pool_frames, scored frames)` frames must be contiguous and are all
+depth-checked and judged by the same three criteria (a short attempt that
+accepted after N frames gets a smaller pool, never an unchecked frame).
+
+Depth inferences of the pool run after the collection loop and are not bounded
+by the authentication deadline (at most `pool_frames - 1` extra inferences).
 
 Limits: the contiguity bound is in camera frames, so a host whose processing
 is slower than about three camera frames per scored frame will see

@@ -280,6 +280,56 @@ mod tests {
         assert_eq!(PoolPolicy::from_config(&c, 0.4).unwrap().hard_floor, 0.04);
     }
 
+    // Exact-boundary tests: each comparison is inclusive on the accepting side.
+    #[test]
+    fn hard_floor_boundary_is_inclusive() {
+        let p = policy();
+        let at = [p.hard_floor, 0.2, 0.2, 0.2, 0.2];
+        assert_eq!(judge_liveness(&at, &p).failed, None);
+        let below = [p.hard_floor - 1e-6, 0.2, 0.2, 0.2, 0.2];
+        assert_eq!(
+            judge_liveness(&below, &p).failed,
+            Some(CRITERION_HARD_FLOOR)
+        );
+    }
+
+    #[test]
+    fn identity_floor_boundary_is_inclusive() {
+        let p = policy();
+        assert_eq!(p.identity_floor, 0.30);
+        assert!(judge_identity(&[0.30, 0.5, 0.5, 0.5, 0.5], &p).is_ok());
+        assert_eq!(
+            judge_identity(&[0.30 - 1e-6, 0.5, 0.5, 0.5, 0.5], &p),
+            Err(CRITERION_IDENTITY_FLOOR)
+        );
+    }
+
+    #[test]
+    fn identity_mean_boundary_is_inclusive() {
+        let p = PoolPolicy {
+            similarity_threshold: 0.5,
+            ..policy()
+        };
+        assert_eq!(judge_identity(&[0.5, 0.5], &p), Ok(0.5));
+        assert_eq!(
+            judge_identity(&[0.5, 0.499], &p),
+            Err(CRITERION_IDENTITY_MEAN)
+        );
+    }
+
+    #[test]
+    fn identity_spread_boundary_is_inclusive() {
+        let p = PoolPolicy {
+            max_score_spread: 0.5,
+            ..policy()
+        };
+        assert!(judge_identity(&[0.5, 1.0], &p).is_ok());
+        assert_eq!(
+            judge_identity(&[0.49, 1.0], &p),
+            Err(CRITERION_IDENTITY_SPREAD)
+        );
+    }
+
     #[test]
     fn genuine_pool_passes() {
         let v = judge_liveness(&[0.2, 0.18, 0.21, 0.19, 0.2], &policy());

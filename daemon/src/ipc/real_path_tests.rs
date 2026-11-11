@@ -1272,6 +1272,27 @@ fn reason(decision: AuthDecision) -> String {
 }
 
 #[tokio::test]
+async fn n_of_m_uses_the_pool_for_liveness_and_checks_every_accepting_frame() {
+    let n_of_m = |c: &mut Config| c.decision.mode = DecisionMode::NOfM;
+    // N-of-M accepts after 3 frames; the middle photo frame was never depth
+    // checked before the pool covered n_of_m.
+    let script = [LiveOwner, Photo, LiveOwner, LiveOwner, LiveOwner];
+    let off = pool_run(&script, 5, None, |c| {
+        n_of_m(c);
+        c.liveness.pool_frames = 0;
+    })
+    .await;
+    assert_eq!(off.decision.outcome, AuthOutcome::Matched, "the old gap");
+    let on = pool_run(&script, 5, None, n_of_m).await;
+    assert_eq!(on.decision.outcome, AuthOutcome::LivenessRejected);
+    assert_eq!(on.decision.liveness_criterion, Some("pool_hard_floor"));
+    // A genuine sequence is accepted; every one of the 3 accepting frames is checked.
+    let genuine = pool_run(&[LiveOwner; 5], 5, None, n_of_m).await;
+    assert_eq!(genuine.decision.outcome, AuthOutcome::Matched);
+    assert_eq!(genuine.depth_calls, 3);
+}
+
+#[tokio::test]
 async fn pool_accepts_a_genuine_sequence_and_checks_every_pool_frame_once() {
     let run = pool_run(&[LiveOwner; 5], 5, None, |_| {}).await;
     assert_eq!(run.decision.outcome, AuthOutcome::Matched);
@@ -1295,7 +1316,10 @@ async fn pool_closes_the_unchecked_middle_frames_gap() {
     let on = pool_run(&script, 5, None, |_| {}).await;
     assert_eq!(on.decision.outcome, AuthOutcome::LivenessRejected);
     assert_eq!(on.decision.liveness_criterion, Some("pool_hard_floor"));
-    assert!(reason(on.decision).contains("[liveness_rejected: pool_hard_floor]"));
+    assert_eq!(
+        reason(on.decision),
+        "Liveness check failed (not a live face)."
+    );
 }
 
 #[tokio::test]

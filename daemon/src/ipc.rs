@@ -570,10 +570,10 @@ async fn decide_core(
     // the last `size` scored frames, which must be adjacent in capture order.
     // Every scored frame is kept (at most `auth_frames`, `Arc` images) so the
     // pool can be depth-checked and averaged as a whole.
-    let pool_policy = match &sequential {
-        None => doormand::pool::PoolPolicy::from_config(&state.config, threshold),
-        Some(_) => None,
-    };
+    // `n_of_m` and the strict sudo/PAM profile use the same pool for LIVENESS
+    // only (identity stays with the N-of-M decider): every frame of the last
+    // contiguous frames it accepted on is depth-checked and judged as a pool.
+    let pool_policy = doormand::pool::PoolPolicy::from_config(&state.config, threshold);
     let mut pool_entries: Vec<PoolEntry> = Vec::new();
     let mut frames_seen = 0usize;
     // Frames not accepted by the multi-face gate / the frame-age guard.
@@ -777,6 +777,7 @@ async fn decide_core(
                         &stored_embeddings,
                     );
                     debug!("Frame {}: template score {:.4}", i, score);
+                    pool_score = score;
                     shadow.similarity(score);
                     shadow.frame_event(FrameEvent::Judged);
                     sequential_step =
@@ -960,7 +961,8 @@ async fn decide_core(
     // Pool: the decision frames are the last `size` scored frames, and they must
     // be adjacent in camera capture order. Otherwise there is no pool to judge.
     let mut pool_range = 0..passed_embeddings.len();
-    if let Some(policy) = &pool_policy {
+    // (`n_of_m`: checked below, only for an attempt that would be accepted.)
+    if let (Some(policy), true) = (&pool_policy, sequential.is_none()) {
         let sequences: Vec<u64> = pool_entries.iter().map(|e| e.sequence).collect();
         match doormand::pool::select_tail(&sequences, policy.size, policy.max_gap) {
             Ok(start) => pool_range = start..pool_entries.len(),
@@ -1015,10 +1017,46 @@ async fn decide_core(
     // Pool identity: every pool frame, their mean and their spread must agree
     // with the enrolled face; a pool that mixes identities is not recognized.
     let mut pool_report: Option<doormand::pool::PoolReport> = None;
+    if let (Some(policy), true, true) = (&pool_policy, sequential.is_some(), matched) {
+        // `n_of_m` accepts after as few as N frames: the pool is the last
+        // `min(size, scored)` frames, which must be contiguous like any pool.
+        let sequences: Vec<u64> = pool_entries.iter().map(|e| e.sequence).collect();
+        let size = policy.size.min(sequences.len());
+        match doormand::pool::select_tail(&sequences, size, policy.max_gap) {
+            Ok(start) => pool_range = start..pool_entries.len(),
+            Err(shape) => {
+                warn!(
+                    "Authentication for {}: no contiguous liveness pool of {} frames ({:?}; sequences {:?}, max gap {})",
+                    username, size, shape, sequences, policy.max_gap
+                );
+                let (outcome, timing_outcome, code) =
+                    insufficient_frames_outcome(multi_face_dropped);
+                return rejected_frame(
+                    state,
+                    &mut timing,
+                    RejectedFrame {
+                        outcome,
+                        timing_outcome,
+                        code,
+                    },
+                    &attempt_id,
+                    username,
+                    raw_face_frames,
+                    frames_seen,
+                    liveness,
+                );
+            }
+        }
+    }
     if let Some(policy) = &pool_policy {
         let entries = &pool_entries[pool_range.clone()];
         let scores: Vec<f32> = entries.iter().map(|e| e.score).collect();
-        let identity_failed = doormand::pool::judge_identity(&scores, policy).err();
+        // Identity of an `n_of_m` attempt is the N-of-M decider's business.
+        let identity_failed = if sequential.is_none() {
+            doormand::pool::judge_identity(&scores, policy).err()
+        } else {
+            None
+        };
         if matched {
             if let Some(criterion) = identity_failed {
                 warn!(
