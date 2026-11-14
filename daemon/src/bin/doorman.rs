@@ -187,6 +187,42 @@ enum DatasetAction {
 }
 
 #[derive(Subcommand)]
+enum KeyAction {
+    /// Seal a fresh data key to the TPM and install the unit drop-in, so the
+    /// daemon decrypts embeddings.bin from the next restart on. Also seals the
+    /// current store to v4 on the first enrolled save. Root only; prints the
+    /// restart command (the drop-in takes effect only after a restart).
+    Enroll {
+        /// PCR set the key seals to (default "7": SecureBoot state; see
+        /// docs/STORAGE-ENCRYPTION.md for the fragility tradeoff).
+        #[arg(long, value_name = "PCRS", default_value = "7")]
+        tpm_pcrs: String,
+        /// Also enroll a PIN-wrapped recovery blob (asked via
+        /// systemd-ask-password, terminal is not echoed).
+        #[arg(long)]
+        pin: bool,
+    },
+    /// Show sealed-store state: file sealed? key loaded? PIN enrolled? Needs no
+    /// root and carries no secrets.
+    Status,
+    /// Load the PIN-unwrapped data key into the running daemon (PIN mode only,
+    /// no restart). Root only; the PIN is asked via systemd-ask-password.
+    Unlock,
+    /// Generate a fresh data key and re-seal the store with it. Refuses when
+    /// the file is sealed and no PIN recovery is enrolled (a lost new key
+    /// would strand the store). Root only.
+    Rotate {
+        /// Also enroll (or replace) the PIN-wrapped recovery blob.
+        #[arg(long)]
+        pin: bool,
+        /// PCR set the rotated key seals to (only when a TPM drop-in already
+        /// exists; otherwise the credential is left untouched — PIN-only mode).
+        #[arg(long, value_name = "PCRS", default_value = "7")]
+        tpm_pcrs: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Enroll a new user (records from the daemon's current camera source).
     Enroll {
@@ -309,6 +345,13 @@ enum Command {
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+    /// At-rest encryption of embeddings.bin (see docs/STORAGE-ENCRYPTION.md):
+    /// seal a data key to the TPM, enroll a PIN recovery blob, unlock, rotate.
+    /// Mutating operations need root; `status` works for every local user.
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
     },
     /// Diagnose the system (OS, desktop/PAM, GPU/EP, camera, install state). Read-only.
     Doctor,
@@ -473,6 +516,24 @@ fn main() {
             let send = transport(&sockets);
             match cli_pad::cmd_calibrate(&send, ttl.as_deref(), *end, *status, cli.json, is_root())
             {
+                Ok(0) => Ok(()),
+                Ok(code) => std::process::exit(code),
+                Err(e) => Err(CliError::new(e)),
+            }
+        }
+        Command::Key { action } => {
+            let send = transport(&sockets);
+            let result = match action {
+                KeyAction::Status => cli_pad::cmd_key_status(&send, cli.json),
+                KeyAction::Unlock => cli_pad::cmd_key_unlock(&send, cli.json, is_root()),
+                KeyAction::Enroll { tpm_pcrs, pin } => {
+                    cli_pad::cmd_key_enroll(&send, tpm_pcrs, *pin, cli.json, is_root())
+                }
+                KeyAction::Rotate { pin, tpm_pcrs } => {
+                    cli_pad::cmd_key_rotate(&send, *pin, tpm_pcrs, cli.json, is_root())
+                }
+            };
+            match result {
                 Ok(0) => Ok(()),
                 Ok(code) => std::process::exit(code),
                 Err(e) => Err(CliError::new(e)),

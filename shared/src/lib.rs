@@ -62,6 +62,17 @@ pub enum Request {
     CalibrateStatus,
     /// End calibration mode now: root only.
     CalibrateEnd,
+    /// Load the at-rest encryption data key into the daemon (root only, never
+    /// persisted by the daemon; a restart forgets it). The 32-byte key travels
+    /// as a JSON byte array over the local socket only.
+    UnlockStorage { key: Vec<u8> },
+    /// Swap the loaded data key and re-seal the store with it (root only).
+    /// The in-memory user set is authoritative; the file is rewritten sealed
+    /// with the new key. Fails closed: on any error the old key and file stay.
+    RotateStorage { key: Vec<u8> },
+    /// Sealed-store state (file sealed? key loaded? PIN enrolled?); read-only,
+    /// open to every local user. Carries no key material.
+    StorageKeyStatus,
 }
 
 /// Wire envelope for a request: the `Request` fields stay at the top level of
@@ -153,6 +164,19 @@ pub enum ResponseData {
     DaemonStatus { info: DaemonInfo },
     DetectionResult { result: DetectionInfo },
     Calibration { info: CalibrationInfo },
+    StorageKey { info: StorageKeyInfo },
+}
+
+/// State of the at-rest sealed store (see `docs/STORAGE-ENCRYPTION.md`).
+/// Carries no key material and no identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageKeyInfo {
+    /// The embeddings file on disk is a sealed (v4) envelope.
+    pub sealed: bool,
+    /// The data key is currently loaded in daemon RAM (decrypt possible).
+    pub loaded: bool,
+    /// A PIN-wrapped recovery blob exists next to the embeddings file.
+    pub pin_enrolled: bool,
 }
 
 /// State of calibration mode (see `docs/PAD-PROTOCOL.md`). Carries no identity.
@@ -220,6 +244,11 @@ pub struct DaemonInfo {
 pub const SOCKET_PATH: &str = "/run/doorman/doorman.sock";
 pub const DATA_DIR: &str = "/var/lib/doorman";
 pub const EMBEDDINGS_FILE: &str = "embeddings.bin";
+
+/// Failure reason when the embeddings file is sealed (v4) but no data key is
+/// loaded: the daemon refuses the operation instead of guessing. Stable string,
+/// matched by the CLI and the rollout scripts.
+pub const STORAGE_LOCKED_REASON: &str = "storage_locked";
 
 /// Get the full path to the embeddings file
 pub fn embeddings_path() -> PathBuf {

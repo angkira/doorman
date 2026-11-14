@@ -12,6 +12,7 @@ mod ml;
 mod pipeline;
 mod shadow_pad;
 mod storage;
+mod storage_key;
 mod timing;
 
 use anyhow::Result;
@@ -435,8 +436,19 @@ async fn main() -> Result<()> {
     };
 
     info!("Initializing storage...");
+    // At-rest data key (ROUND 10): systemd decrypts the TPM-sealed credential
+    // into $CREDENTIALS_DIRECTORY before the service starts. Absent = no
+    // sealed store configured (or PIN mode: `doorman key unlock` loads it at
+    // runtime). A sealed file without a key aborts startup (fail closed).
+    let data_key = match storage_key::load_from_credentials_dir() {
+        Ok(k) => k,
+        Err(e) => {
+            error!("Refusing to start: storage credential unusable: {e:#}");
+            return Err(e);
+        }
+    };
     let storage = Arc::new(RwLock::new(
-        storage::Storage::new_with_dir(&config.daemon.data_dir).await?,
+        storage::Storage::new_with_dir_and_key(&config.daemon.data_dir, data_key).await?,
     ));
 
     info!("Initializing camera...");

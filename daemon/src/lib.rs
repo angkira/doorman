@@ -16,6 +16,7 @@ pub mod pad_protocol;
 pub mod pad_stats;
 pub mod pool;
 pub mod storage;
+pub mod storage_key;
 pub mod sudo_policy;
 pub mod test_report;
 pub mod timing;

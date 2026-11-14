@@ -49,6 +49,10 @@ pub const DENIED_ADMIN: &str = "administrative operation requires root";
 /// Reason for refusing to start or end calibration mode. Calibration relaxes
 /// the failure budget, so it needs uid 0 itself; `[ipc] admin_uids` do not count.
 pub const DENIED_CALIBRATE: &str = "calibration mode requires root (uid 0): run it with sudo";
+/// Reason for refusing a storage-key operation. Loading the data key unlocks
+/// the sealed store, so it needs uid 0 itself; `[ipc] admin_uids` do not count.
+pub const DENIED_STORAGE_KEY: &str =
+    "storage key management requires root (uid 0): run it with sudo";
 
 /// Kernel-reported credentials of the connecting process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,15 +97,26 @@ pub fn authorize(
             }
         }
         // Read-only, no biometric data and no user names.
-        Request::Status | Request::CalibrateStatus => Decision::Allow,
-        // Relaxes the failure budget: root only, deliberately NOT `is_admin`
-        // (a configured admin uid must not be able to switch the budget off).
-        Request::Calibrate { .. } | Request::CalibrateEnd => {
+        Request::Status | Request::CalibrateStatus | Request::StorageKeyStatus => Decision::Allow,
+        // Relaxes the failure budget, unlocks the sealed store, or rotates its
+        // key: root only, deliberately NOT `is_admin` (a configured admin uid
+        // must not be able to switch these off / on).
+        Request::Calibrate { .. }
+        | Request::CalibrateEnd
+        | Request::UnlockStorage { .. }
+        | Request::RotateStorage { .. } => {
             if peer.uid == 0 {
                 Decision::Allow
             } else {
                 Decision::Denied {
-                    reason: DENIED_CALIBRATE,
+                    reason: if matches!(
+                        req,
+                        Request::UnlockStorage { .. } | Request::RotateStorage { .. }
+                    ) {
+                        DENIED_STORAGE_KEY
+                    } else {
+                        DENIED_CALIBRATE
+                    },
                 }
             }
         }
@@ -346,6 +361,9 @@ pub fn request_name(req: &Request) -> &'static str {
         Request::Calibrate { .. } => "calibrate",
         Request::CalibrateStatus => "calibrate_status",
         Request::CalibrateEnd => "calibrate_end",
+        Request::UnlockStorage { .. } => "unlock_storage",
+        Request::RotateStorage { .. } => "rotate_storage",
+        Request::StorageKeyStatus => "storage_key_status",
         Request::Shutdown => "shutdown",
         Request::DetectAndRecognize => "detect_and_recognize",
         Request::GetLatestDetection => "get_latest_detection",
@@ -777,6 +795,47 @@ mod tests {
             );
         }
         assert!(DENIED_CALIBRATE.contains("root"), "the reason says why");
+    }
+
+    #[test]
+    fn storage_unlock_is_root_only_status_is_open() {
+        let admin = IpcConfig {
+            admin_uids: vec![3000],
+            trusted_uids: vec![2000],
+            ..IpcConfig::default()
+        };
+        let unlock = Request::UnlockStorage { key: vec![1u8; 32] };
+        let rotate = Request::RotateStorage { key: vec![2u8; 32] };
+        let denied = Decision::Denied {
+            reason: DENIED_STORAGE_KEY,
+        };
+        for uid in [ALICE, BOB, 2000, 3000, 65534] {
+            for req in [&unlock, &rotate] {
+                assert_eq!(
+                    authorize(&peer(uid), req, &admin, resolve),
+                    denied,
+                    "uid {uid} must be refused unlock/rotate (admin_uids and trusted_uids do not count)"
+                );
+            }
+            assert_eq!(
+                authorize(&peer(uid), &Request::StorageKeyStatus, &admin, resolve),
+                Decision::Allow
+            );
+        }
+        for req in [&unlock, &rotate, &Request::StorageKeyStatus] {
+            assert_eq!(
+                authorize(&peer(0), req, &admin, resolve),
+                Decision::Allow,
+                "root: {req:?}"
+            );
+        }
+        assert!(DENIED_STORAGE_KEY.contains("root"), "the reason says why");
+        assert_eq!(request_name(&unlock), "unlock_storage");
+        assert_eq!(request_name(&rotate), "rotate_storage");
+        assert_eq!(
+            request_name(&Request::StorageKeyStatus),
+            "storage_key_status"
+        );
     }
 
     #[test]

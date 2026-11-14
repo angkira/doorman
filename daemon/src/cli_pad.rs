@@ -388,3 +388,360 @@ pub fn cmd_config_edit(
     println!("{}", config_edit::RESTART_HINT);
     Ok(0)
 }
+
+// ---------------------------------------------------------------------------
+// storage key (`doorman key ...`; see docs/STORAGE-ENCRYPTION.md)
+// ---------------------------------------------------------------------------
+
+/// The command the operator must run when this process is not root.
+pub fn key_sudo_instruction(args: &str) -> String {
+    format!("storage key management needs root. Run: sudo doorman key{args}")
+}
+
+fn storage_key_of(response: Response) -> Result<doorman_shared::StorageKeyInfo, String> {
+    match response {
+        Response::Success {
+            data: Some(ResponseData::StorageKey { info }),
+            ..
+        } => Ok(info),
+        Response::Failure { reason } | Response::Denied { reason } => Err(reason),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+fn print_storage_key(info: &doorman_shared::StorageKeyInfo) {
+    println!(
+        "sealed file: {}   key loaded: {}   PIN enrolled: {}",
+        on_off(info.sealed),
+        on_off(info.loaded),
+        on_off(info.pin_enrolled)
+    );
+    if info.sealed && !info.loaded {
+        println!("The store is LOCKED: face auth and enrollment refuse with `storage_locked`.");
+        println!("Load the key: restart (TPM credential) or: sudo doorman key unlock");
+    }
+    if !info.sealed && info.loaded {
+        println!(
+            "The key is loaded but the file is not sealed yet: the next store write seals it (v4)."
+        );
+    }
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+/// `doorman key status`. World-readable, no secrets.
+pub fn cmd_key_status(send: Transport<'_>, json: bool) -> Result<i32, String> {
+    let response = send(&Request::StorageKeyStatus, STATUS_TIMEOUT)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
+        );
+    }
+    print_storage_key(&storage_key_of(response)?);
+    Ok(0)
+}
+
+/// Read one secret line without echo via systemd-ask-password; falls back to
+/// an echoed stdin read (warned) when it is unavailable.
+fn ask_secret(prompt: &str) -> Result<String, String> {
+    if let Ok(out) = std::process::Command::new("systemd-ask-password")
+        .arg(prompt)
+        .output()
+    {
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches('\n')
+                .to_string());
+        }
+    }
+    eprintln!(
+        "warning: systemd-ask-password unavailable; the PIN will echo. Prefer a local terminal."
+    );
+    eprint!("{prompt}: ");
+    use std::io::Write as _;
+    std::io::stderr()
+        .flush()
+        .map_err(|e| format!("cannot prompt: {e}"))?;
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
+        .map_err(|e| format!("cannot read PIN: {e}"))?;
+    Ok(line.trim_end_matches('\n').to_string())
+}
+
+/// Write secret bytes with mode 0600 at creation (`create_new`: never clobbers).
+pub fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    use std::io::Write as _;
+    f.write_all(bytes)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("cannot fsync {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Best-effort shred of a temp key file (overwrite + remove).
+fn shred_file(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let zeros = vec![0u8; meta.len().min(4096) as usize];
+        let _ = std::fs::write(path, &zeros);
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+/// `doorman key unlock`. Root only. Reads the PIN sidecar (as root), unwraps
+/// the data key locally, and hands it to the daemon over the root-only IPC.
+/// The PIN and the key never touch the disk outside their 0600 homes.
+pub fn cmd_key_unlock(send: Transport<'_>, json: bool, is_root: bool) -> Result<i32, String> {
+    if !is_root {
+        eprintln!("{}", key_sudo_instruction(" unlock"));
+        return Ok(1);
+    }
+    let data_dir = PathBuf::from(doorman_shared::DATA_DIR);
+    let blob_path = doormand::storage_key::pin_blob_path(&data_dir);
+    let text = std::fs::read_to_string(&blob_path)
+        .map_err(|e| format!("no PIN enrolled ({}: {e})", blob_path.display()))?;
+    let blob: doormand::storage_key::PinBlob =
+        serde_json::from_str(&text).map_err(|e| format!("PIN blob unreadable: {e}"))?;
+    let pin = ask_secret("doorman storage PIN")?;
+    let key = doormand::storage_key::unwrap_with_pin(&blob, &pin).map_err(|e| format!("{e:#}"))?;
+    let response = send(
+        &Request::UnlockStorage { key: key.to_vec() },
+        STATUS_TIMEOUT,
+    )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
+        );
+    }
+    match response {
+        Response::Success {
+            data: Some(ResponseData::StorageKey { info }),
+            ..
+        } => {
+            print_storage_key(&info);
+            Ok(0)
+        }
+        Response::Failure { reason } | Response::Denied { reason } => Err(reason),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+/// `doorman key enroll [--tpm-pcrs 7] [--pin]`. Root only. First-time setup:
+/// refuses when the live store is already sealed or keyed (use `rotate` for a
+/// live store — a fresh enroll key would orphan the live one). Generates the
+/// data key, seals it to the TPM via `systemd-creds encrypt`, installs the
+/// unit drop-in, and optionally writes the PIN sidecar. Takes effect on
+/// restart; the store file itself is sealed by the daemon on its first write
+/// after that (with the `.v3.bak` backup). Never touches embeddings.bin.
+pub fn cmd_key_enroll(
+    send: Transport<'_>,
+    tpm_pcrs: &str,
+    with_pin: bool,
+    json: bool,
+    is_root: bool,
+) -> Result<i32, String> {
+    if !is_root {
+        let mut args = String::from(" enroll");
+        if tpm_pcrs != "7" {
+            args.push_str(&format!(" --tpm-pcrs {tpm_pcrs}"));
+        }
+        if with_pin {
+            args.push_str(" --pin");
+        }
+        eprintln!("{}", key_sudo_instruction(&args));
+        return Ok(1);
+    }
+    let status = storage_key_of(send(&Request::StorageKeyStatus, STATUS_TIMEOUT)?)?;
+    if status.sealed || status.loaded {
+        return Err(
+            "the live store is already sealed or keyed; use `sudo doorman key rotate` instead (a fresh enroll key would orphan the live one)".into(),
+        );
+    }
+    if std::process::Command::new("systemd-creds")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        return Err(
+            "systemd-creds is missing or unusable (systemd >= 248 with +TPM2 required)".into(),
+        );
+    }
+    // Temp key file outside the data dir, 0600 from creation.
+    let tmp = std::env::temp_dir().join(format!("doorman-key-{}.bin", std::process::id()));
+    let key = doormand::storage_key::DataKey::generate().map_err(|e| format!("{e:#}"))?;
+    write_secret_file(&tmp, key.bytes())?;
+    let sealed = run_tpm_seal(&tmp, tpm_pcrs);
+    shred_file(&tmp);
+    let sealed = sealed?;
+    let dropin = doormand::storage_key::render_dropin(&sealed).map_err(|e| format!("{e:#}"))?;
+    let dropin_path = doormand::storage_key::dropin_path();
+    if let Some(parent) = dropin_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&dropin_path, dropin)
+        .map_err(|e| format!("cannot write {}: {e}", dropin_path.display()))?;
+    if with_pin {
+        let pin = ask_secret("new doorman storage PIN")?;
+        let again = ask_secret("repeat the PIN")?;
+        if pin != again {
+            return Err("PINs do not match; nothing enrolled".into());
+        }
+        let blob = doormand::storage_key::wrap_with_pin(key.bytes(), &pin)
+            .map_err(|e| format!("{e:#}"))?;
+        let text = serde_json::to_string_pretty(&blob).map_err(|e| format!("{e}"))?;
+        let blob_path =
+            doormand::storage_key::pin_blob_path(&PathBuf::from(doorman_shared::DATA_DIR));
+        if blob_path.exists() {
+            return Err(format!(
+                "PIN sidecar {} already exists; refusing to overwrite",
+                blob_path.display()
+            ));
+        }
+        write_secret_file(&blob_path, text.as_bytes())?;
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"enrolled": true, "tpm_pcrs": tpm_pcrs, "pin": with_pin})
+        );
+    }
+    println!("sealed key installed: {}", dropin_path.display());
+    if with_pin {
+        println!("PIN recovery enrolled.");
+    }
+    println!("Takes effect on restart: sudo systemctl restart doormand");
+    println!("The store seals on the first write after that (backup: embeddings.bin.v3.bak).");
+    Ok(0)
+}
+
+/// Run `systemd-creds encrypt` over `key_file` and return its stdout
+/// (`SetCredentialEncrypted=` line). Shared by enroll and rotate.
+fn run_tpm_seal(key_file: &Path, pcrs: &str) -> Result<String, String> {
+    let (prog, argv) = doormand::storage_key::tpm_seal_argv(key_file, pcrs);
+    let out = std::process::Command::new(&prog)
+        .args(&argv)
+        .output()
+        .map_err(|e| format!("cannot run {prog}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemd-creds encrypt failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    String::from_utf8(out.stdout).map_err(|e| format!("sealed key is not UTF-8: {e}"))
+}
+
+/// `doorman key rotate [--pin]`. Root only. Refuses when the file is sealed
+/// and no PIN recovery exists (a lost new key would strand the store). Order:
+/// PIN blob first (recovery for the new key), daemon rekey, drop-in last, so
+/// every prefix of a crash still leaves a recovery path.
+pub fn cmd_key_rotate(
+    send: Transport<'_>,
+    with_pin: bool,
+    tpm_pcrs: &str,
+    json: bool,
+    is_root: bool,
+) -> Result<i32, String> {
+    if !is_root {
+        eprintln!(
+            "{}",
+            key_sudo_instruction(if with_pin { " rotate --pin" } else { " rotate" })
+        );
+        return Ok(1);
+    }
+    let status = storage_key_of(send(&Request::StorageKeyStatus, STATUS_TIMEOUT)?)?;
+    if !status.loaded {
+        return Err(
+            "store key is not loaded (restart with the credential, or unlock first)".into(),
+        );
+    }
+    if status.sealed && !status.pin_enrolled && !with_pin {
+        return Err(
+            "refusing: the file is sealed and no PIN recovery is enrolled; re-run with --pin"
+                .into(),
+        );
+    }
+    let new_key = doormand::storage_key::DataKey::generate().map_err(|e| format!("{e:#}"))?;
+    if with_pin {
+        let pin = ask_secret("new doorman storage PIN")?;
+        let again = ask_secret("repeat the PIN")?;
+        if pin != again {
+            return Err("PINs do not match; nothing rotated".into());
+        }
+        let blob = doormand::storage_key::wrap_with_pin(new_key.bytes(), &pin)
+            .map_err(|e| format!("{e:#}"))?;
+        // Atomic replace of the sidecar: 0600 temp + rename in the same dir.
+        let blob_path =
+            doormand::storage_key::pin_blob_path(&PathBuf::from(doorman_shared::DATA_DIR));
+        let tmp = blob_path.with_extension("pin.tmp");
+        write_secret_file(
+            &tmp,
+            serde_json::to_string_pretty(&blob)
+                .map_err(|e| format!("{e}"))?
+                .as_bytes(),
+        )?;
+        std::fs::rename(&tmp, &blob_path)
+            .map_err(|e| format!("cannot replace {}: {e}", blob_path.display()))?;
+    }
+    let response = send(
+        &Request::RotateStorage {
+            key: new_key.bytes().to_vec(),
+        },
+        STATUS_TIMEOUT,
+    )?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?
+        );
+    }
+    match response {
+        Response::Success {
+            data: Some(ResponseData::StorageKey { info }),
+            ..
+        } => {
+            print_storage_key(&info);
+            // Keep the boot credential in step with the live key, but only
+            // when a TPM drop-in already exists (PIN-only mode has none and
+            // must stay that way).
+            let dropin_path = doormand::storage_key::dropin_path();
+            if dropin_path.exists() {
+                let tmp =
+                    std::env::temp_dir().join(format!("doorman-key-{}.bin", std::process::id()));
+                write_secret_file(&tmp, new_key.bytes())?;
+                let sealed = run_tpm_seal(&tmp, tpm_pcrs);
+                shred_file(&tmp);
+                let sealed = sealed?;
+                let dropin =
+                    doormand::storage_key::render_dropin(&sealed).map_err(|e| format!("{e:#}"))?;
+                std::fs::write(&dropin_path, dropin)
+                    .map_err(|e| format!("cannot write {}: {e}", dropin_path.display()))?;
+                println!("boot credential re-sealed: {}", dropin_path.display());
+            } else {
+                println!(
+                    "no TPM drop-in present (PIN-only mode); next boot needs `key unlock` again"
+                );
+            }
+            println!("Restart to confirm the new key chain: sudo systemctl restart doormand");
+            Ok(0)
+        }
+        Response::Failure { reason } | Response::Denied { reason } => Err(reason),
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}

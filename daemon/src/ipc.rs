@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use chrono::Timelike;
 use doorman_shared::config::DecisionMode;
 use doorman_shared::{
-    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StreamMessage,
-    ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD,
+    DaemonInfo, EnrollmentPhase, Request, Response, ResponseData, StorageKeyInfo, StreamMessage,
+    ENROLL_DURATION_SECS, SIMILARITY_THRESHOLD, STORAGE_LOCKED_REASON,
 };
 use doormand::decision::{AuthDecision, AuthOutcome};
 use doormand::ipc_policy::{self, Gatekeeper, PeerCred};
@@ -119,6 +119,9 @@ async fn dispatch(state: &DaemonState, peer: PeerCred, request: Request) -> Resp
         Request::Calibrate { ttl_secs } => handle_calibrate(state, &peer, ttl_secs),
         Request::CalibrateStatus => calibration_response(state),
         Request::CalibrateEnd => handle_calibrate_end(state, &peer),
+        Request::UnlockStorage { key } => handle_unlock_storage(state, &peer, &key).await,
+        Request::RotateStorage { key } => handle_rotate_storage(state, &peer, &key).await,
+        Request::StorageKeyStatus => storage_key_response(state).await,
         Request::Shutdown => {
             info!("Shutdown requested");
             Response::Success {
@@ -2338,6 +2341,85 @@ fn handle_calibrate_end(state: &DaemonState, peer: &PeerCred) -> Response {
         ),
     }
     calibration_response(state)
+}
+
+/// `StorageKeyStatus`: world-readable, carries no key material.
+async fn storage_key_response(state: &DaemonState) -> Response {
+    let storage = state.storage.read().await;
+    let data_dir = std::path::Path::new(&state.config.daemon.data_dir);
+    Response::Success {
+        message: None,
+        data: Some(ResponseData::StorageKey {
+            info: StorageKeyInfo {
+                sealed: crate::storage::Storage::file_is_sealed(
+                    &data_dir.join(doorman_shared::EMBEDDINGS_FILE),
+                ),
+                loaded: storage.key_loaded(),
+                pin_enrolled: crate::storage_key::pin_blob_path(data_dir).exists(),
+            },
+        }),
+    }
+}
+
+/// `UnlockStorage`: only reached for uid 0 (`ipc_policy::authorize`). Loads
+/// the data key and re-reads the store without a restart; a wrong key changes
+/// nothing (in-memory state untouched, file untouched).
+async fn handle_unlock_storage(state: &DaemonState, peer: &PeerCred, key: &[u8]) -> Response {
+    let key = match crate::storage_key::DataKey::from_slice(key) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(peer_uid = peer.uid, "storage unlock refused: {e:#}");
+            return Response::Failure {
+                reason: format!("{STORAGE_LOCKED_REASON}: {e:#}"),
+            };
+        }
+    };
+    let mut storage = state.storage.write().await;
+    match storage.set_data_key(key) {
+        Ok(()) => {
+            info!(
+                peer_uid = peer.uid,
+                "storage unlocked: sealed store re-read"
+            );
+            drop(storage);
+            storage_key_response(state).await
+        }
+        Err(e) => {
+            warn!(peer_uid = peer.uid, "storage unlock failed: {e:#}");
+            Response::Failure {
+                reason: format!("{STORAGE_LOCKED_REASON}: {e:#}"),
+            }
+        }
+    }
+}
+
+/// `RotateStorage`: only reached for uid 0 (`ipc_policy::authorize`). Swaps
+/// the loaded key and re-seals the file with it; a failure keeps the old key
+/// and the old file.
+async fn handle_rotate_storage(state: &DaemonState, peer: &PeerCred, key: &[u8]) -> Response {
+    let key = match crate::storage_key::DataKey::from_slice(key) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(peer_uid = peer.uid, "storage rotate refused: {e:#}");
+            return Response::Failure {
+                reason: format!("{STORAGE_LOCKED_REASON}: {e:#}"),
+            };
+        }
+    };
+    let mut storage = state.storage.write().await;
+    match storage.rekey(key) {
+        Ok(()) => {
+            info!(peer_uid = peer.uid, "storage key rotated; store re-sealed");
+            drop(storage);
+            storage_key_response(state).await
+        }
+        Err(e) => {
+            warn!(peer_uid = peer.uid, "storage rotate failed: {e:#}");
+            Response::Failure {
+                reason: format!("{STORAGE_LOCKED_REASON}: {e:#}"),
+            }
+        }
+    }
 }
 
 async fn handle_status(state: &DaemonState) -> Response {
