@@ -677,6 +677,16 @@ pub fn cmd_key_rotate(
                 .into(),
         );
     }
+    // Without a TPM drop-in and without a new PIN blob the rotated key would
+    // live only in daemon RAM: the next restart would lock the sealed store
+    // with no recovery except the .bak file.
+    let dropin_path = doormand::storage_key::dropin_path();
+    if !dropin_path.exists() && !with_pin {
+        return Err(
+            "refusing: no TPM drop-in present and no --pin given; the rotated key would be lost on restart"
+                .into(),
+        );
+    }
     let new_key = doormand::storage_key::DataKey::generate().map_err(|e| format!("{e:#}"))?;
     if with_pin {
         let pin = ask_secret("new doorman storage PIN")?;
@@ -720,7 +730,6 @@ pub fn cmd_key_rotate(
             // Keep the boot credential in step with the live key, but only
             // when a TPM drop-in already exists (PIN-only mode has none and
             // must stay that way).
-            let dropin_path = doormand::storage_key::dropin_path();
             if dropin_path.exists() {
                 let tmp =
                     std::env::temp_dir().join(format!("doorman-key-{}.bin", std::process::id()));
@@ -730,8 +739,12 @@ pub fn cmd_key_rotate(
                 let sealed = sealed?;
                 let dropin =
                     doormand::storage_key::render_dropin(&sealed).map_err(|e| format!("{e:#}"))?;
-                std::fs::write(&dropin_path, dropin)
-                    .map_err(|e| format!("cannot write {}: {e}", dropin_path.display()))?;
+                std::fs::write(&dropin_path, dropin).map_err(|e| {
+                    format!(
+                        "store re-sealed BUT the boot credential was NOT updated (cannot write {}: {e}): restart would lock the store; recover with `key unlock` (PIN) or restore the .v3.bak backup",
+                        dropin_path.display()
+                    )
+                })?;
                 println!("boot credential re-sealed: {}", dropin_path.display());
             } else {
                 println!(
