@@ -448,9 +448,29 @@ pub fn cmd_key_status(send: Transport<'_>, json: bool) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Read one secret line without echo via systemd-ask-password; falls back to
-/// an echoed stdin read (warned) when it is unavailable.
+/// `systemctl daemon-reload` so a fresh/changed drop-in takes effect on the
+/// next restart. Reloading does not restart any service; safe to automate.
+fn daemon_reload() -> Result<(), String> {
+    let out = std::process::Command::new("systemctl")
+        .arg("daemon-reload")
+        .output()
+        .map_err(|e| format!("cannot run systemctl daemon-reload: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl daemon-reload failed: {}; run it by hand, then restart doormand",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Read one secret line. Prefers the controlling terminal with echo disabled
+/// (works under sudo in a real terminal); then systemd-ask-password; last
+/// resort is an echoed stdin read (warned).
 fn ask_secret(prompt: &str) -> Result<String, String> {
+    if let Ok(line) = ask_tty(&format!("{prompt}: ")) {
+        return Ok(line);
+    }
     if let Ok(out) = std::process::Command::new("systemd-ask-password")
         .arg(prompt)
         .output()
@@ -461,9 +481,7 @@ fn ask_secret(prompt: &str) -> Result<String, String> {
                 .to_string());
         }
     }
-    eprintln!(
-        "warning: systemd-ask-password unavailable; the PIN will echo. Prefer a local terminal."
-    );
+    eprintln!("warning: no terminal and systemd-ask-password unavailable; the PIN will echo.");
     eprint!("{prompt}: ");
     use std::io::Write as _;
     std::io::stderr()
@@ -473,6 +491,55 @@ fn ask_secret(prompt: &str) -> Result<String, String> {
     std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
         .map_err(|e| format!("cannot read PIN: {e}"))?;
     Ok(line.trim_end_matches('\n').to_string())
+}
+
+/// Prompt on /dev/tty with echo off (no new deps: `stty` from coreutils).
+/// Fails when there is no controlling terminal (piped CI, some multiplexers).
+fn ask_tty(prompt: &str) -> Result<String, String> {
+    use std::process::Stdio;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|e| format!("no controlling terminal: {e}"))?;
+    let hold = tty
+        .try_clone()
+        .map_err(|e| format!("cannot clone /dev/tty: {e}"))?;
+    let off = std::process::Command::new("stty")
+        .arg("-echo")
+        .stdin(hold)
+        .stdout(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot run stty: {e}"))?;
+    if !off.success() {
+        return Err("stty -echo failed".into());
+    }
+    let line = (|| {
+        use std::io::Write as _;
+        let mut stderr = std::io::stderr();
+        stderr
+            .write_all(prompt.as_bytes())
+            .map_err(|e| format!("cannot prompt: {e}"))?;
+        stderr.flush().map_err(|e| format!("cannot prompt: {e}"))?;
+        let mut line = String::new();
+        std::io::BufReader::new(&tty)
+            .read_line(&mut line)
+            .map_err(|e| format!("cannot read PIN: {e}"))?;
+        Ok::<_, String>(line.trim_end_matches('\n').to_string())
+    })();
+    // Best-effort echo restore, whatever happened above.
+    let _ = std::process::Command::new("stty")
+        .arg("echo")
+        .stdin(Stdio::from(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open("/dev/tty")
+                .map_err(|e| format!("cannot reopen /dev/tty: {e}"))?,
+        ))
+        .stdout(Stdio::null())
+        .status();
+    eprintln!();
+    line
 }
 
 /// Write secret bytes with mode 0600 at creation (`create_new`: never clobbers).
@@ -596,6 +663,8 @@ pub fn cmd_key_enroll(
     }
     std::fs::write(&dropin_path, dropin)
         .map_err(|e| format!("cannot write {}: {e}", dropin_path.display()))?;
+    // The drop-in is inert until systemd reloads: do that now (no restart).
+    daemon_reload()?;
     if with_pin {
         let pin = ask_secret("new doorman storage PIN")?;
         let again = ask_secret("repeat the PIN")?;
@@ -745,6 +814,8 @@ pub fn cmd_key_rotate(
                         dropin_path.display()
                     )
                 })?;
+                // Inert until reload; the restart below (printed) picks it up.
+                daemon_reload()?;
                 println!("boot credential re-sealed: {}", dropin_path.display());
             } else {
                 println!(
