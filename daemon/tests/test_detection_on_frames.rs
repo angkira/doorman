@@ -1,6 +1,5 @@
-use doormand::ml::MLPipeline;
 use doorman_shared::Config;
-use image;
+use doormand::ml::MLPipeline;
 use std::env;
 
 #[tokio::test]
@@ -9,7 +8,9 @@ async fn test_video_frame_detection() {
     let mut config = Config::default();
     config.ml.models_dir = format!("{}/.local/share/doorman/models", home);
 
-    let pipeline = MLPipeline::new(&config).await.expect("Failed to create ML pipeline");
+    let pipeline = MLPipeline::new(&config)
+        .await
+        .expect("Failed to create ML pipeline");
 
     for i in 1..=5 {
         let frame_path = format!("/tmp/test_frame_{}.png", i);

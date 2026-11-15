@@ -1,0 +1,30 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` uir = "/var/lib/doorman"
+log_level = "info"
+
+[cameCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 24).
+max_connections_per_uid = 8
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60001
+# Frame/debug stream sockets are 0600 by default. Set a group to make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D asize = 512

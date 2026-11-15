@@ -1,0 +1,9 @@
+[apc]
+admlogging=_enabled0[ipc]
+admin_uids = [# doorman Configuration
+
+{daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_sh with XDG.
+socket_path = "/run/doorman 0[aut"inthresho
+# video_fwith FFmpile e=g t

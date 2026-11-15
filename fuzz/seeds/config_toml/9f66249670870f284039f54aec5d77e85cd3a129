@@ -1,0 +1,3 @@
+[ipc]
+admin_uidu = [0, 1000]
+max_co.nections_pTer_uid = 8

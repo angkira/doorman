@@ -20,7 +20,7 @@ fn test_default_config() {
     assert_eq!(config.authentication.auth_frames, 10);
     assert_eq!(config.authentication.timeout_secs, 3);
 
-    assert_eq!(config.enrollment.enroll_frames, 20);
+    assert_eq!(config.enrollment.enroll_frames, 40);
     assert_eq!(config.enrollment.min_valid_frames, 5);
 
     assert_eq!(config.preprocessing.image_width, 256);
@@ -28,8 +28,9 @@ fn test_default_config() {
 
     assert!(!config.dataset.logging_enabled);
     assert!(!config.dataset.keep_raw_frames);
-    assert_eq!(config.dataset.raw_frame_bundle_size, 10);
-    assert_eq!(config.dataset.max_capture_packs_per_day, 500);
+    assert_eq!(config.dataset.raw_frame_bundle_size, 5);
+    assert_eq!(config.dataset.max_capture_packs_per_day, 20);
+    assert_eq!(config.dataset.retention_days, 14);
     assert_eq!(config.dataset.raw_frame_jpeg_quality, 92);
     assert_eq!(config.dataset.max_attempt_records_per_day, 50_000);
 }

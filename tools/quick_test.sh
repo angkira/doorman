@@ -51,7 +51,7 @@ elif [ "$VRAM_PERCENT" -gt 85 ]; then
     echo "  2. Try GPU backend anyway (may OOM)"
     echo "  3. Close heavy apps and retry"
     echo ""
-    read -p "Choice [1/2/3]: " choice
+    read -rp "Choice [1/2/3]: " choice
     case $choice in
         2)
             echo "Trying GPU backend..."

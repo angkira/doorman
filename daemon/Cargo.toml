@@ -2,6 +2,8 @@
 name = "doormand"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [[bin]]
 name = "doormand"
@@ -56,7 +58,7 @@ clap = { workspace = true }
 #   - backend-ort-cuda  -> ort/cuda + download-binaries
 # This keeps `download-binaries` and `load-dynamic` from being enabled together
 # (which would download a CPU dylib that the ROCm dynamic-load path then ignores).
-ort = { version = "2.0.0-rc.12", optional = true, default-features = false }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
 
 # ROCm pre-flight only: dlopen libamdhip64 to ask hipGetDeviceCount whether HIP
 # sees a usable GPU BEFORE registering the ROCm EP (ORT's ROCm init does an
@@ -94,7 +96,16 @@ signal-hook-tokio = { version = "0.4", features = ["futures-v0_3"] }
 futures = "0.3"
 
 # Permissions
-nix = { version = "0.31", features = ["user", "fs"] }
+nix = { version = "0.31", features = ["user", "fs", "signal", "mman"] }
+
+# At-rest encryption of embeddings.bin (ROUND 10, v4 sealed envelope):
+# ChaCha20-Poly1305 for the file and the PIN recovery blob (no AES-NI
+# assumption across dev hardware), Argon2id for the PIN wrap key, `zeroize`
+# for in-RAM key hygiene, `getrandom` for nonces/salts.
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.3"
 
 # Timestamps
 chrono = "0.4"
@@ -105,6 +116,14 @@ chrono = "0.4"
 # routes zbus onto the existing tokio reactor instead of its async-io default, so
 # it shares the daemon's runtime in the --no-default-features ROCm build too.
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+sha2 = "0.10"
+
+# Comment- and format-preserving TOML editing for `doorman config set|unset`.
+# The `toml` crate (a parser/serializer) rewrites the whole file and drops
+# comments; toml_edit is the editing library of the same project and is already
+# in the lock file (0.25.x, build-time via proc-macro-crate). Parse + display
+# only, no serde feature.
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 
 [features]
 # Default dev/preview build: CPU ONNX Runtime + cross-platform mock camera +

@@ -1,0 +1,21 @@
+,cdex = 1
+width = 1024   # Camera native resolutio. (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"	
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-securi0
+[auth]
+threshold = 2.4

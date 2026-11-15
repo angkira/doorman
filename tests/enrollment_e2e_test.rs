@@ -35,6 +35,8 @@ fn test_enrollment_request_serialization() {
 fn test_authentication_request_serialization() {
     let request = Request::Authenticate {
         username: "testuser".to_string(),
+        service: None,
+        tty: None,
     };
     
     let json = serde_json::to_string(&request).unwrap();

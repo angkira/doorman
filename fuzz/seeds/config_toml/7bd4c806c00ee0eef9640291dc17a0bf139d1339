@@ -1,0 +1,27 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command soobal cap is 64).
+max_connections_per_uid = 8
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Frame/debug stream sockets are 0600 by default. Set a group to make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: izer: EdgeFace-S (edgeface_s.onnx), 112x112, 256-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFASNetV2-SE (minifasnet_v2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

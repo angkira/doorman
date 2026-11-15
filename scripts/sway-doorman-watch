@@ -2,7 +2,7 @@
 set -u
 
 log="${DOORMAN_SWAY_WATCH_LOG:-/tmp/sway-doorman-watch.log}"
-user="${1:-${USER:-angkira}}"
+user="${1:-${USER:?set USER}}"
 locker="${2:-swaylock}"
 socket="${DOORMAN_SOCKET:-/run/doorman/doorman.sock}"
 interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"
@@ -26,6 +26,7 @@ interval="${DOORMAN_SWAY_POLL_INTERVAL:-2}"
                 echo "[$(date -Is)] $locker still alive; killing"
                 pkill -KILL -u "$user" -x "$locker" >/dev/null 2>&1 || true
             fi
+            # shellcheck disable=SC2015 # best-effort: '|| true' must run on either failure
             command -v swaymsg >/dev/null 2>&1 && swaymsg "output * power on" >/dev/null 2>&1 || true
             exit 0
         fi

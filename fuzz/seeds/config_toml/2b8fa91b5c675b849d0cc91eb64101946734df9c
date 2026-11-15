@@ -1,0 +1,6 @@
+# doorman Configuraution (verified with FFmpeg test)
+height = 214
+fpmon 30
+# video_file = era]
+device_index = 0
+width = 102512

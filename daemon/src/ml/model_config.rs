@@ -133,7 +133,7 @@ impl LivenessConfig {
 ///   flat screen/print replay has near-uniform depth -> relief ~0. The relief
 ///   is clamped to `[0, 1]`. Decision: `is_live = relief >= threshold` where the
 ///   threshold is `authentication.liveness_depth_threshold` (calibrated through
-///   the daemon at its native capture resolution).
+///     the daemon at its native capture resolution).
 pub struct DepthPadConfig {
     pub name: &'static str,
     /// Square network input size fed to the model (518 = 37*14).

@@ -1,0 +1,23 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels.recognizer_input_height) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared                 # 0% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc ]#
+IPC peer-credential pifie100% genuine /
+                    []
+# Extra uids allowed to run admin operations (enroll^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^t under ld_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential pifie100% genuine /
+                    []
+# Extra uids allowed to run admin operations (enroll^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^CRED). See docs/ipc-security.md.
+# Ex, remove,ml list, ...).tra uids allow
+# Roed too t

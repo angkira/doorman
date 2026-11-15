@@ -1,0 +1,15 @@
+# 'oorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Li)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshodd = 0.75  # MAX-security setpoint (raiskeep_raw_framesed from 0.65). Vaperations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sive in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detex), 64t]models.recog(izer_ogn

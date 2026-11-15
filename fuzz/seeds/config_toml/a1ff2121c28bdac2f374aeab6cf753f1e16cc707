@@ -1,0 +1,21 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI defaula_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing 5). Validated on LFW + real-binary
+                             # tideo: live Lgenuine 0.85-ow are retained for forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

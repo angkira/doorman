@@ -1,0 +1,35 @@
+[ipc]
+arman Configuration
+
+[daemon]
+#. Validated ok LFW + real-bin""""""""""""ary
+    """"""" SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels.recognizer_input_heightan bind it under ProtectSys "ort" (ONNX Runtime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+devtem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/"in/doorman"
+log_level = "info"
+
+[camera]
+device_indmx = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+hegiht = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """ar/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" ice = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised froschema_ver555555555555555555555555=555555555555555550043064666885380141455555555555555555555rts GPU)
+backend = "tract"d ok LFW + real-bin""""""""""""ary
+    """"""""" """"""""""""""""

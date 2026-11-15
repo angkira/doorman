@@ -1,0 +1,43 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)																										r
+'																											 socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg			
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/dib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device =are retained for forward-compat and are n 1000]
+max_conTer_ =ot consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

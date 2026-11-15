@@ -1,0 +1,40 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH).-- user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera nati~e resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = 0
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allow false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_frames = false
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
+max_attempt_recodata_dirday = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filtewidthe = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters livroup to make thee = 512

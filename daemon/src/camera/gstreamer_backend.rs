@@ -70,9 +70,22 @@ impl GStreamerCamera {
             ));
         }
 
+        // The pipeline is pinned to /dev/video0; refuse it when it is virtual.
+        {
+            use super::device_guard::{
+                enforce_sysfs, resolve_node, RealNodeFs, DEV_ROOT, SYSFS_VIDEO4LINUX,
+            };
+            let node = resolve_node(None, 0, std::path::Path::new(DEV_ROOT), &RealNodeFs)?;
+            enforce_sysfs(
+                &node,
+                std::path::Path::new(SYSFS_VIDEO4LINUX),
+                config.camera.allow_virtual_devices,
+            )?;
+        }
+
         // Build pipeline string
         // v4l2src: Direct access to V4L2 camera (works reliably)
-        // queue: Buffer frames for smooth playback  
+        // queue: Buffer frames for smooth playback
         // videoconvert: Convert whatever format camera provides to RGB
         // videoscale: Scale to requested resolution
         // capsfilter: Enforce exact output format (RGB at requested dimensions)
@@ -259,9 +272,9 @@ impl CameraBackend for GStreamerCamera {
 
         // Wait for pipeline to actually reach PLAYING state
         let timeout = Duration::from_secs(5);
-        let (state_change, current_state, _pending_state) = 
+        let (state_change, current_state, _pending_state) =
             pipeline.state(gst::ClockTime::from_mseconds(timeout.as_millis() as u64));
-        
+
         match (state_change, current_state) {
             (Ok(_), gst::State::Playing) => {
                 info!("GStreamer pipeline is PLAYING");

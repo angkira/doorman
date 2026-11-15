@@ -1,0 +1,18 @@
+# dopports GPU)guration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimMust match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overri[ipc]
+adm,in_uids ="""")"""""""""""""""""""""ifgsnet_v2se.onnx), 1288128, A8
+doorman"
+log_level = "info"
+
+[camera]
+dev
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mxnry_z Recogn

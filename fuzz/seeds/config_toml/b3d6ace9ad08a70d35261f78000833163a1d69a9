@@ -1,0 +1,15 @@
+schema_ver555555555555555555555555=55555555555555555555# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/ru55555555555555555555555555555555555555sion = 1
+.mp4"  # For 5555555555555555555555555555555555555555555555555555=555555555sion = 1
+.mp4"  # For testinu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[aut module /
+# CLimilarieeeeet.4
+ye_

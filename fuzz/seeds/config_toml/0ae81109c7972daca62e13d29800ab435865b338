@@ -1,0 +1,38 @@
+# doified with FFmpeg test)
+hoeight = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with v[ipc]
+admin_uids = [# doorman Configuration
+
+[[de@]
+raw_fimage_age_wiraw_fimage_age_width = 256
+image_height = 2width = 256
+ima'e_height = 256
+filter_type = "lanczdth = 256
+image_;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;n = 0
+[auth]
+threshold == 0
+[\uth]
+threshold = 0>4
+ 0>4
+ [n_vali_conipc]
+admin_uids = [0, 1000&]
+malogging_enabledx_connections_per_uid = uuuuuuuuu8
+ IPC peer-credential pified with FFmpeg test)
+height = 720
+fps = 30
+#  Extra uids allowed to Authenticate for any user (rraw_frjpegoot and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin ohenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^, 1000&]
+malogging_edx_conipc]
+admin_uids = [0, 1000&]
+ma_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keepgation. See docs/threshold_security_analysis.md.
+auth_frames = 09
+timeo_que_bundleu_size = t_se3cs 
+=_

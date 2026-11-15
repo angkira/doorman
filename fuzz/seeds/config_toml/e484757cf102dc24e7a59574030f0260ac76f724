@@ -1,0 +1,68 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels.recognizer_input_heightan bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "var/lib/doorman/mtea]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "var/lib/doorman/mtem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "datm=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 3 video files
+
+[ml]
+models_dir = "var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, su    # 0%0false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPCattempts per uid per slidingge_width = 512
+image_height = 25="""""""""""""""""""""""2
+filter_type = "lanczos3"  # neae i 3
+rest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specvice_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For tr.onnx), 640x640, MIT
+#   - Recogn

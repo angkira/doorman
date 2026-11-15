@@ -45,7 +45,11 @@ impl<S> tracing_subscriber::Layer<S> for PlacementCounter
 where
     S: tracing::Subscriber,
 {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         struct Visitor<'a>(&'a mut String);
         impl tracing::field::Visit for Visitor<'_> {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
@@ -117,7 +121,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 struct ModelSpec {
@@ -127,7 +135,12 @@ struct ModelSpec {
     input_name_hint: &'static str,
 }
 
-fn time_runs(session: &mut Session, input_shape: [usize; 4], data: &[f32], iters: usize) -> (f64, Vec<f32>) {
+fn time_runs(
+    session: &mut Session,
+    input_shape: [usize; 4],
+    data: &[f32],
+    iters: usize,
+) -> (f64, Vec<f32>) {
     // warmup (CoreML compiles on first run)
     let warm = Value::from_array((input_shape, data.to_vec())).unwrap();
     let out = session.run(ort::inputs![warm]).unwrap();
@@ -149,13 +162,10 @@ fn main() {
     use tracing_subscriber::prelude::*;
 
     let args: Vec<String> = std::env::args().collect();
-    let models_dir = args
-        .get(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            PathBuf::from(home).join(".local/share/doorman/models")
-        });
+    let models_dir = args.get(1).map(PathBuf::from).unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(home).join(".local/share/doorman/models")
+    });
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100);
     // Optional 3rd arg: only benchmark models whose name contains this substring
     // (case-insensitive). Lets each model be isolated in its own process so the
@@ -171,15 +181,33 @@ fn main() {
         .init();
 
     let specs = [
-        ModelSpec { name: "YuNet detector", file: "face_detection_yunet_2023mar.onnx", size: 640, input_name_hint: "input" },
-        ModelSpec { name: "EdgeFace recog", file: "edgeface_s.onnx", size: 112, input_name_hint: "input" },
-        ModelSpec { name: "MiniFASNet live", file: "minifasnet_v2se.onnx", size: 128, input_name_hint: "input" },
+        ModelSpec {
+            name: "YuNet detector",
+            file: "face_detection_yunet_2023mar.onnx",
+            size: 640,
+            input_name_hint: "input",
+        },
+        ModelSpec {
+            name: "EdgeFace recog",
+            file: "edgeface_s.onnx",
+            size: 112,
+            input_name_hint: "input",
+        },
+        ModelSpec {
+            name: "MiniFASNet live",
+            file: "minifasnet_v2se.onnx",
+            size: 128,
+            input_name_hint: "input",
+        },
     ];
 
     println!("models_dir = {}", models_dir.display());
     println!("iters      = {}\n", iters);
 
-    println!("{:<18} {:>12} {:>12} {:>9} {:>12} {:>12}", "model", "CPU ms", "CoreML ms", "speedup", "cos(out)", "maxabsΔ");
+    println!(
+        "{:<18} {:>12} {:>12} {:>9} {:>12} {:>12}",
+        "model", "CPU ms", "CoreML ms", "speedup", "cos(out)", "maxabsΔ"
+    );
     println!("{}", "-".repeat(80));
 
     for spec in &specs {
@@ -199,7 +227,11 @@ fn main() {
             let v = ((x * 7 + y * 13 + c * 29) % 256) as f32;
             // YuNet wants 0..255; recog/live want roughly [-1,1] or [0,1] —
             // value range doesn't change op placement or relative timing.
-            if spec.size == 640 { v } else { v / 255.0 }
+            if spec.size == 640 {
+                v
+            } else {
+                v / 255.0
+            }
         });
 
         // ---- CPU ----

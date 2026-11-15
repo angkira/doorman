@@ -1,0 +1,4 @@
+[ipc]
+admdu = [1, 1000]
+max_conect.ions_pTer_in_uidu = [0, 1000]
+max_co.nections_pTer_uid = 8

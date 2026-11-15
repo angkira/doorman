@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# doorman-lock-watch-poll - OLD polling unlock watcher, kept as a fallback.
+# Used by doorman-lock only when DOORMAN_UNLOCK_MODE=poll. Each iteration runs a
+# full `doorman test` capture session and the locker is stopped by process name.
+# Prefer the event-driven `doorman unlock-watch` (docs/unlock-path.md).
+#
+# usage: doorman-lock-watch-poll USER SOCKET LOCKER_NAME
+set -euo pipefail
+
+usage="usage: doorman-lock-watch-poll USER SOCKET LOCKER_NAME"
+user="${1:?$usage}"
+socket="${2:?$usage}"
+locker="${3:?$usage}"
+doorman_bin="${DOORMAN_BIN:-doorman}"
+interval="${DOORMAN_POLL_INTERVAL:-2}"
+term_grace="${DOORMAN_POLL_TERM_GRACE:-1}"
+attempt=0
+
+while pgrep -u "$user" -x "$locker" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    out="$("$doorman_bin" --socket "$socket" test "$user" 2>&1 || true)"
+    printf '%s attempt=%s %s\n' "$(date -Is)" "$attempt" "$out"
+
+    case "$out" in
+        recognized:*)
+            pkill -TERM -u "$user" -x "$locker" >/dev/null 2>&1 || true
+            sleep "$term_grace"
+            pkill -KILL -u "$user" -x "$locker" >/dev/null 2>&1 || true
+            exit 0
+            ;;
+    esac
+
+    sleep "$interval"
+done

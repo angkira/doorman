@@ -6,6 +6,7 @@ set -e
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 export ORT_LOG_LEVEL=3
 
+# shellcheck disable=SC1091 # venv path is relative to the invoking cwd
 source .venv/bin/activate
 
 echo "=== Quick BlazeFace Test ==="

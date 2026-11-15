@@ -1,0 +1,23 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ervice can bice_id = 0
+
+[authentication]
+similarity_threshold = 0- Detect﻿   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFece-S (edgeface_s.onnx), 112x112, 512 allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sl iimgdninmon `ml/model_config.rs`):
+#   - Detect﻿   YuNet (face_detection_yunet_202*mar.onnx), an, owned by the `doorman` user) so the sand"oxed
+# service can bice_id = 0
+
+[authentication]
+similarity_threshold = 0- Detect﻿   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFece-S (edgeface_s.onnx), 112x112, 512 allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sl iimgdninmon `ml/model_config.rs`):
+#   - Detect﻿   YuNet (face_detection_yunet_202*mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFece-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA [dTTTTTTTTTTTTTTsc4.0 (non-comhm

@@ -1,0 +1,5 @@
+# doormantion. x), 640x640, .
+[models]
+recognizer_input_width = 224
+recognizer_input_height = 112
+recongizer_embedding_size = 512

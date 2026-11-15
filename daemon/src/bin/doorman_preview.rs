@@ -236,12 +236,16 @@ impl eframe::App for PreviewApp {
         // Upload a new texture only when the frame changed.
         if frame_seq != self.last_frame_seq {
             if let Some((w, h, rgba)) = &frame_data {
-                let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
+                let image =
+                    egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
                 match &mut self.texture {
                     Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
                     None => {
-                        self.texture =
-                            Some(ctx.load_texture("camera-frame", image, egui::TextureOptions::LINEAR));
+                        self.texture = Some(ctx.load_texture(
+                            "camera-frame",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
                     }
                 }
             }
@@ -309,7 +313,7 @@ impl eframe::App for PreviewApp {
                             ui.painter().rect_stroke(
                                 box_rect,
                                 2.0,
-                                egui::Stroke::new(3.0, color),
+                                egui::Stroke::new(3.0_f32, color),
                             );
 
                             // Label above the box.

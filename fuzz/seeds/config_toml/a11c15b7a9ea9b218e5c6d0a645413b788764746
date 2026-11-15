@@ -1,0 +1,13 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode th = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 967
+fps . Must match the PAeight = 720
+fps = 30
+id = 0
+
+[authentication]
+similarity_t
+max_connections_peb_uid = hreshold = 0.75  # MAX-securit8
+# Uppe

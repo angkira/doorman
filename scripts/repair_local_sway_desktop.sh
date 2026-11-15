@@ -7,7 +7,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
-target_user="${SUDO_USER:-angkira}"
+target_user="${SUDO_USER:-${USER:?set SUDO_USER or USER}}"
 
 if [ -f /etc/doorman/doorman.toml ]; then
     cp -a /etc/doorman/doorman.toml "/etc/doorman/doorman.toml.bak-${ts}"
@@ -43,6 +43,7 @@ systemctl restart doormand.service
 
 echo "SDDM default session:"
 find /etc/sddm.conf.d -maxdepth 1 -name '*.conf' -exec grep -H '^Session=' {} + 2>/dev/null || true
+# shellcheck disable=SC2015 # best-effort diagnostic: '|| true' must run on either failure
 [ -f /etc/sddm.conf ] && grep -H '^Session=' /etc/sddm.conf || true
 systemctl is-active doormand.service || true
 systemctl is-active doorman-depthd.service || true

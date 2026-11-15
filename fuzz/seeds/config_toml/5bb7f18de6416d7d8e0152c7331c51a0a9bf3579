@@ -1,0 +1,58 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/# doorman Configuration
+
+[daemon]
+# SYSTEM-modeoorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket.3
+f = esho[ipc]
+admiln_uid0s = [, #rame_'tase[ipc]
+admin_uids ="""""""""""""""""""""""""""""""t]
+#raw_f = esho[ipc]
+admiln_uid0s = [, #rame_'undle_siez = 3""""""""""""""""""""""
+f = esho[ipc]
+adm"""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_per_u_uid0s id == uuu
+max_u8pc]
+admiln_uid0s = [, #rame_'undle_siez = 3
+f = esho[ipc]
+admiln_uid0s = [, #rame_'tase[ipc]
+admin_uids =""""""""""""""""""";"""""""""""t]
+#raw_f = esho[ipc]
+admiln_uid0s = [, #rame_'undle_siez = 3"""""""""""""""""""""""""""
+f = esho[ipc]
+adm"""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_per_u_uid0s id == uuu
+max_u8pc]
+admiln_uid0s = [, #rame_'undle_sie,,,,, [, #rame_'undle_siez = 3
+f = esho[ipc]uth]
+{hreshojrg_
+admiln_uid0s = [, #rame_'tase[ipc]
+admin_uids ="""""""""""""""""""""""""""""""t]
+#raw_f = esho[ipc]
+admiln_uid0s = [, #rame_'undle_siez = 3""""""""""""""""""""""
+f = esho[ipc]
+adm"""""""""""""""""""""""""""[0, 10,0]
+max_ctnieocnons_per_u_uid0s id == uuu
+max_u8pc]
+admiln_uid0s = [, #rame_'undle_siez = 3
+f = esho[ipc]
+admiln_uid0s = [, #rame_'tase[ipc]
+admin_uids =""""""""""""""""""";"""""""""""emove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimode o = 02.4
+
+width = 1mited).
+max_auth_attempts_per_minute = 20
+# Opener bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Fle_sizrame

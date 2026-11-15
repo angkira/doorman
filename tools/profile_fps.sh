@@ -22,7 +22,7 @@ NC='\033[0m' # No Color
 echo -e "${BLUE}=== Doorman iGPU FPS Profiling (MIGraphX) ===${NC}"
 echo "Backend: MIGraphX (AMD iGPU ROCm)"
 echo "Test duration: ${TEST_DURATION}s per config"
-echo "FPS variants: ${FPS_VARIANTS[@]}"
+echo "FPS variants: ${FPS_VARIANTS[*]}"
 echo "Results directory: $RESULTS_DIR"
 echo ""
 
@@ -42,7 +42,7 @@ monitor_gpu() {
     
     if [ "$HAS_RADEONTOP" = true ]; then
         # Run radeontop in dump mode
-        timeout ${duration}s radeontop -d - -l 1 > "$output_file" 2>&1 || true
+        timeout "${duration}s" radeontop -d - -l 1 > "$output_file" 2>&1 || true
     fi
 }
 
@@ -52,6 +52,7 @@ extract_daemon_stats() {
     local output_file=$2
     
     echo "=== Performance Statistics ===" > "$output_file"
+    # shellcheck disable=SC2129 # simple sequential report appends
     echo "" >> "$output_file"
     
     # Extract FPS measurements
@@ -74,6 +75,7 @@ extract_daemon_stats() {
     detection_fps=$(grep "Detection processing:" "$log_file" | awk '{print $NF}' | sed 's/ fps//' | awk '{sum+=$1; count++} END {if(count>0) print sum/count; else print 0}')
     recognition_fps=$(grep "Recognition processing:" "$log_file" | awk '{print $NF}' | sed 's/ fps//' | awk '{sum+=$1; count++} END {if(count>0) print sum/count; else print 0}')
     
+    # shellcheck disable=SC2129 # simple sequential report appends
     echo "Average Camera Capture: $capture_fps fps" >> "$output_file"
     echo "Average Detection: $detection_fps fps" >> "$output_file"
     echo "Average Recognition: $recognition_fps fps" >> "$output_file"
@@ -175,6 +177,7 @@ EOF
     
     # Wait for GPU monitor to finish
     if [ "$HAS_RADEONTOP" = true ]; then
+        # shellcheck disable=SC2086 # left unquoted: quoting an empty pid would change wait semantics
         wait $gpu_pid 2>/dev/null || true
     fi
     
@@ -210,7 +213,7 @@ EOF
 
 # Run tests for each FPS variant
 for fps in "${FPS_VARIANTS[@]}"; do
-    run_test $fps
+    run_test "$fps"
     sleep 2  # Cool down between tests
 done
 
@@ -263,6 +266,7 @@ for fps in "${FPS_VARIANTS[@]}"; do
     echo "### ${fps} FPS" >> "$REPORT"
     echo "" >> "$REPORT"
     if [ -f "$RESULTS_DIR/fps_${fps}/stats.txt" ]; then
+        # shellcheck disable=SC2129 # simple sequential report appends
         echo "\`\`\`" >> "$REPORT"
         cat "$RESULTS_DIR/fps_${fps}/stats.txt" >> "$REPORT"
         echo "\`\`\`" >> "$REPORT"

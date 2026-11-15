@@ -1,0 +1,89 @@
+# doorman Coays allowed).
+trusted_uids = [n_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables aset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
+max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_w= false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables aset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
+max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active mten and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 8
+s_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
+max_attempt_records_per_day = 50000
+# Ageinged by `doorman dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFASNetV2-SE (minifase_nvt2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consum by the
+# shipped backend.
+[models]
+recognizer_input_width = 056
+recognizer_input_height = 112
+recognizer_embedding_size = 512

@@ -1,0 +1,23 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorma - Detect﻿   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFece-S (edgeface_s.onnx), 112x112, 512 allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sl iimgdninmon `ml/model_config.rs`):
+#   dule /
+# CLI default (doorman_shared:nfo"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFm2-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Liveness:   MiniFASNetV2-SE (minifasnet_v2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

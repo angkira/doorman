@@ -1,0 +1,49 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# Rman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'undkend = "tUUUUUUU Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_threads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Valida;ed on LFW + real-binary
+                             # video: live genuine 0orst impostor 0.52 -> 100% genuine /
+                             # 0% false-accept under P.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% 
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with vnticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/off: no files are written and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+keep_raw_[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = 6
+s_per_day = :0
+raw_frame_jpeg_quality = 92
+# Daily cap for high-volume opt-in R&D logging. 0 disables attempt writes.
+max_attempt_records_per_day = 50000
+# Age used by `doorman dataset purge` when --older-than is omitted (never ae active mten and the authentication gallery is untouched.
+logging_enabled = false
+# Raw frame persistence stays off; M1 writes embeddings-only records.
+on `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2024mar.onnx), 640x640, MIT
+#   - Recogn

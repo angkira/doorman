@@ -124,8 +124,13 @@ pub fn inspect_dataset(data_dir: &Path) -> Result<DatasetReport> {
         .iter()
         .filter(|attempt| !matches!(attempt.outcome, Outcome::Rejected))
         .count();
-    let (capture_packs, capture_frames) = crate::dataset::capture_stats(data_dir)
-        .with_context(|| format!("failed to inspect capture packs under {}", data_dir.display()))?;
+    let (capture_packs, capture_frames) =
+        crate::dataset::capture_stats(data_dir).with_context(|| {
+            format!(
+                "failed to inspect capture packs under {}",
+                data_dir.display()
+            )
+        })?;
 
     Ok(DatasetReport {
         schema_version: 1,
@@ -221,7 +226,11 @@ struct ValidationReport {
     validated_at_utc: String,
 }
 
-fn write_validation(candidate_dir: &Path, validation: ValidationMetrics, passed: bool) -> Result<()> {
+fn write_validation(
+    candidate_dir: &Path,
+    validation: ValidationMetrics,
+    passed: bool,
+) -> Result<()> {
     std::fs::create_dir_all(candidate_dir)
         .with_context(|| format!("failed to create {}", candidate_dir.display()))?;
     let report = ValidationReport {
@@ -265,7 +274,9 @@ fn read_jsonl_prefix<T: for<'de> Deserialize<'de>>(dir: &Path, prefix: &str) -> 
     }
 
     let mut paths = Vec::new();
-    for entry in std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -285,9 +296,8 @@ fn read_jsonl_prefix<T: for<'de> Deserialize<'de>>(dir: &Path, prefix: &str) -> 
             if line.trim().is_empty() {
                 continue;
             }
-            let record = serde_json::from_str(line).with_context(|| {
-                format!("failed to parse {} line {}", path.display(), idx + 1)
-            })?;
+            let record = serde_json::from_str(line)
+                .with_context(|| format!("failed to parse {} line {}", path.display(), idx + 1))?;
             records.push(record);
         }
     }
@@ -298,9 +308,7 @@ fn read_jsonl_prefix<T: for<'de> Deserialize<'de>>(dir: &Path, prefix: &str) -> 
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::dataset::{
-        AttemptConditions, GallerySpreadStats, GtSource, LabelEvent, Outcome,
-    };
+    use crate::dataset::{AttemptConditions, GallerySpreadStats, GtSource, LabelEvent, Outcome};
 
     fn write_jsonl<T: serde::Serialize>(path: &std::path::Path, value: &T) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -457,7 +465,10 @@ mod tests {
         let data_dir = tmp.path().join("data");
         let models_dir = tmp.path().join("models");
         let dataset_dir = data_dir.join("dataset");
-        write_jsonl(&dataset_dir.join("attempts-20260623.jsonl"), &sample_attempt());
+        write_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt(),
+        );
         write_jsonl(&dataset_dir.join("labels-20260623.jsonl"), &sample_label());
 
         let report = super::run_offline_training(&data_dir, &models_dir, 1).unwrap();
@@ -476,12 +487,17 @@ mod tests {
         let data_dir = tmp.path().join("data");
         let models_dir = tmp.path().join("models");
         let dataset_dir = data_dir.join("dataset");
-        write_jsonl(&dataset_dir.join("attempts-20260623.jsonl"), &sample_attempt());
+        write_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt(),
+        );
         write_jsonl(&dataset_dir.join("labels-20260623.jsonl"), &sample_label());
 
         let err = super::run_offline_training(&data_dir, &models_dir, 2).unwrap_err();
 
-        assert!(err.to_string().contains("not enough confirmed-genuine labels"));
+        assert!(err
+            .to_string()
+            .contains("not enough confirmed-genuine labels"));
         assert!(!models_dir.join("projector").exists());
     }
 
@@ -491,7 +507,10 @@ mod tests {
         let data_dir = tmp.path().join("data");
         let models_dir = tmp.path().join("models");
         let dataset_dir = data_dir.join("dataset");
-        write_jsonl(&dataset_dir.join("attempts-20260623.jsonl"), &sample_attempt());
+        write_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt(),
+        );
         write_jsonl(&dataset_dir.join("labels-20260623.jsonl"), &sample_label());
         let report = super::run_offline_training(&data_dir, &models_dir, 1).unwrap();
 
@@ -517,7 +536,10 @@ mod tests {
         let data_dir = tmp.path().join("data");
         let models_dir = tmp.path().join("models");
         let dataset_dir = data_dir.join("dataset");
-        write_jsonl(&dataset_dir.join("attempts-20260623.jsonl"), &sample_attempt());
+        write_jsonl(
+            &dataset_dir.join("attempts-20260623.jsonl"),
+            &sample_attempt(),
+        );
         write_jsonl(&dataset_dir.join("labels-20260623.jsonl"), &sample_label());
         let report = super::run_offline_training(&data_dir, &models_dir, 1).unwrap();
 

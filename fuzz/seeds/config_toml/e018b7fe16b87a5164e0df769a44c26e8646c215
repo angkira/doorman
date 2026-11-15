@@ -1,0 +1,35 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified wiht FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ca]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+backend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpuWthreads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                      
+recognizer_input_height = 112
+recognizer_embedding_size = 512

@@ -1,0 +1,17 @@
+scheolin_uids = [# doorman Configuration
+
+{daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_sh with XDG.
+socket_path = "/run/doorman 0[aut"inthresho
+# vd =
+
+[[ld =
+
+[[ut"me_varsithhold = hr.shold =
+
+[[ut".""8
+ut"me_vaithhold = hr.shold =
+
+
+[[ut".""8

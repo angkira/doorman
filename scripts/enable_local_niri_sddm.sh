@@ -20,13 +20,15 @@ if [ -e "$target" ]; then
     printf 'backup: %s.bak-%s\n' "$target" "$stamp"
 fi
 
-cat > "$target" <<'EOF'
+autologin_user="${SUDO_USER:?run via sudo from the account that should autologin}"
+
+cat > "$target" <<EOF
 [General]
 Numlock=on
 DisplayServer=x11
 
 [Autologin]
-User=angkira
+User=${autologin_user}
 Session=niri.desktop
 Relogin=false
 

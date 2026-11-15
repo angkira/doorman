@@ -1,0 +1,35 @@
+﻿schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # For testing with vidr ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[cameCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enrde overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[cameCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove,oll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 24).
+max for one WaitForMatch (event-driven undock); larger requests
+# are clamped. See docs/unlock-path.md.
+waitor "ort" (ONNX Runtime, supports GP attempts per usd per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# 
+threshold Opener bou= nd (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.mU)
+bac[dat2.5aset]
+r
+aw_face_frame_'undkend = "

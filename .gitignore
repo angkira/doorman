@@ -4,7 +4,6 @@
 
 # Rust
 target/
-Cargo.lock
 *.so
 *.dylib
 *.dll
@@ -101,3 +100,8 @@ benchmark_results/
 # ncnn-Vulkan build prefix (static libncnn + converted depth.ncnn) produced by
 # scripts/build_ncnn.sh + scripts/convert_ncnn.sh / `doorman install --ncnn`.
 /.ncnn-prefix/
+
+# Benchmark harness output and recorded datasets (may contain face images)
+/bench/results/
+/bench/data/
+/docs/bench/results/

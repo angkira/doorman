@@ -1,0 +1,246 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Model-free feature set: no ONNX Runtime download, no models, no camera.
+  # ORT-dependent code paths (latency, directory-mode accuracy) are exercised
+  # on the owner's host, see docs/bench/README.md.
+  FEATURES: --no-default-features --features camera-mock,camera-ffmpeg,preview
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev libpam0g-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --no-default-features --features camera-mock,camera-ffmpeg,preview -- -D warnings
+
+      - name: Clippy (ORT code paths, load-dynamic, no download)
+        run: cargo clippy --locked --workspace --all-targets --no-default-features --features backend-ort-rocm,camera-mock,camera-ffmpeg,preview -- -D warnings
+
+      - name: Test
+        # test_video_frame_detection builds a real ML pipeline and needs the ORT backend.
+        run: cargo test --locked --workspace $FEATURES -- --skip test_video_frame_detection
+
+      - name: Build doorman-bench
+        run: cargo build --locked -p doorman-bench --no-default-features
+
+      - name: Bench smoke on synthetic data
+        # Only algorithmic invariants are asserted (in bench/tests/cli.rs, run
+        # above). This step additionally exercises the shipped binary end to end.
+        run: |
+          B=target/debug/doorman-bench
+          D="$RUNNER_TEMP/bench-smoke"
+          $B synth --out "$D" --seed 1
+          $B accuracy --scores "$D/accuracy_scores.csv" --out "$D/report"
+          $B liveness --scores "$D/liveness_scores.csv" --out "$D/report"
+          test -s "$D/report/accuracy.md"
+          test -s "$D/report/liveness_roc.csv"
+
+      - name: Bench latency (needs models and the ort feature)
+        run: |
+          echo "SKIPPED: latency needs ONNX model files and a doorman-bench build with --features ort."
+          echo "CI builds the model-free subset; run 'doorman-bench latency' on a host with models (docs/bench/README.md)."
+
+  ort-typecheck:
+    # Type-checks the ORT code paths (cfg feature = "_ort") without linking or
+    # downloading ONNX Runtime: backend-ort-rocm uses ort/load-dynamic.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev libpam0g-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+
+      - name: Type-check the ORT backend (load-dynamic, no download)
+        run: >
+          cargo check --locked -p doormand --all-targets --no-default-features
+          --features backend-ort-rocm,camera-mock,camera-ffmpeg,preview
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Shellcheck all tracked shell scripts
+        run: |
+          # Tracked *.sh plus extensionless files whose first line is a shell
+          # shebang (packaging/, scripts/). .plans/, docs/ and Markdown are
+          # excluded so prose with code fences is never parsed as shell.
+          {
+            git ls-files -z -- '*.sh'
+            git ls-files -z | xargs -0 awk 'FNR == 1 && /^#!(\/usr\/bin\/env (ba)?sh|\/bin\/(ba)?sh)([ \t]|$)/ { printf "%s%c", FILENAME, 0 } FNR == 1 { nextfile }'
+          } | grep -zv -e '^\.plans/' -e '^docs/' -e '\.md$' | sort -zu | xargs -0 shellcheck
+
+  python:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        # numpy: tests/test_rnd_depth_fusion_experiment.py (floor as in pyproject.toml).
+        run: python -m pip install pytest "numpy>=1.26.0"
+
+      - name: Byte-compile Python sources
+        run: python -m compileall -q src tests
+
+      - name: Test
+        run: PYTHONPATH=src python -m pytest tests -q
+
+  deb:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang dpkg-dev libclang-dev libpam0g-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+
+      - name: Validate Debian packaging
+        run: bash scripts/check_deb_packaging.sh
+
+      - name: Build Debian package
+        run: bash scripts/build_deb.sh
+
+      - name: Inspect package
+        run: |
+          for deb in target/debian/dist/*.deb; do
+            dpkg-deb -I "$deb"
+            dpkg-deb -c "$deb"
+          done
+
+  systemd-security:
+    # Offline exposure score of the packaged unit must not get worse than
+    # packaging/systemd/security-exposure.max (needs systemd >= 252; 24.04 has 255).
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Exposure score
+        run: bash scripts/check_systemd_security.sh
+
+  supply-chain:
+    # Advisories, yanked crates, licenses and sources, see deny.toml.
+    # Ignored advisories carry a reason and a review date there.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          arguments: --locked
+
+  fuzz:
+    # 60 s per target on nightly (libFuzzer). Verified locally; the seeded
+    # stable equivalents run in the normal test job (daemon/tests/fuzz_smoke.rs).
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ipc_request_line, config_toml, embeddings_file]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly branch
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: fuzz
+        # The repo rust-toolchain.toml pins stable; fuzzing needs nightly (-Zsanitizer).
+        # Write new inputs to the gitignored corpus/ dir; seeds/ stays read-only.
+        run: mkdir -p corpus/${{ matrix.target }} && cargo +nightly fuzz run ${{ matrix.target }} corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- -max_total_time=60
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+
+  pam-module:
+    # The real pam_doorman.so under pamtester against a fake daemon socket
+    # (tests/test_pam_module.py). pamtester runs in a private mount namespace
+    # with a temp dir bind-mounted over /etc/pam.d, so it needs sudo.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpam0g-dev pamtester pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: PAM module under pamtester
+        # REQUIRE_PAM_TESTS=1 turns a skip into a failure: a skip proves nothing.
+        run: REQUIRE_PAM_TESTS=1 PYTHONPATH=src python -m pytest tests/test_pam_module.py -q -rs

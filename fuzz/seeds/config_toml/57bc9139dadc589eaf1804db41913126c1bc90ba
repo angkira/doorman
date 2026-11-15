@@ -1,0 +1,12 @@
+[ipc]
+amera native resolution (verified with FFmpeg test)
+height = 720kend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort  MAXheight = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """ar/lib/doorman/models"
+
+# Backe-s""""""""""""

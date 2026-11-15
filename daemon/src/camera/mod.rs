@@ -12,6 +12,7 @@
 //! headless CI) without a physical camera.
 
 use anyhow::Result;
+use doorman_shared::config::CameraBackendChoice;
 use doorman_shared::Config;
 use image::DynamicImage;
 
@@ -59,10 +60,38 @@ mod gstreamer_backend;
 #[cfg(feature = "camera-gstreamer")]
 pub use gstreamer_backend::GStreamerCamera;
 
+pub mod gate;
+
+#[cfg(any(
+    feature = "camera-ffmpeg",
+    feature = "camera-gstreamer",
+    feature = "camera-v4l2",
+    feature = "camera-nokhwa",
+    test
+))]
+pub mod device_guard;
+
+pub mod probe;
+
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod native_frames;
+
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod native_cooldown;
+
+#[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa", test))]
+mod format_select;
+
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 mod v4l2_backend;
 #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
 pub use v4l2_backend::V4L2Camera;
+
+#[allow(dead_code)] // unused without the ffmpeg backend
+/// May the ffmpeg backend be tried for `choice`? "native" never falls back to it.
+fn ffmpeg_allowed(choice: CameraBackendChoice) -> bool {
+    choice != CameraBackendChoice::Native
+}
 
 /// Backend enum for the unified camera.
 enum CameraBackendInner {
@@ -73,6 +102,8 @@ enum CameraBackendInner {
     GStreamer(GStreamerCamera),
     #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
     V4L2(V4L2Camera),
+    /// Camera whose frames come from a closure (fault injection in tests).
+    Scripted(Box<dyn FnMut() -> Result<DynamicImage> + Send>),
 }
 
 /// Public Camera type with automatic fallback to the mock backend.
@@ -100,6 +131,34 @@ impl Camera {
         }
     }
 
+    /// Create a synthetic-frame camera (no device, no ffmpeg). For tests.
+    pub fn synthetic(width: u32, height: u32, fps: u32) -> Self {
+        Self {
+            inner: CameraBackendInner::Mock(MockCamera::synthetic(width, height, fps)),
+        }
+    }
+
+    /// Camera whose frames come from `next` (fault injection in tests).
+    pub fn scripted(next: impl FnMut() -> Result<DynamicImage> + Send + 'static) -> Self {
+        Self {
+            inner: CameraBackendInner::Scripted(Box::new(next)),
+        }
+    }
+
+    /// Name of the active backend, for logging.
+    pub fn backend_name(&self) -> &'static str {
+        match &self.inner {
+            CameraBackendInner::Mock(cam) => cam.backend_name(),
+            #[cfg(feature = "camera-ffmpeg")]
+            CameraBackendInner::Ffmpeg(cam) => cam.backend_name(),
+            #[cfg(feature = "camera-gstreamer")]
+            CameraBackendInner::GStreamer(cam) => cam.backend_name(),
+            #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
+            CameraBackendInner::V4L2(cam) => cam.backend_name(),
+            CameraBackendInner::Scripted(_) => "scripted",
+        }
+    }
+
     pub async fn new_with_config(config: &Config) -> Result<Self> {
         // Try GStreamer first (PipeWire-integrated, Linux).
         #[cfg(feature = "camera-gstreamer")]
@@ -111,21 +170,46 @@ impl Camera {
                         inner: CameraBackendInner::GStreamer(cam),
                     });
                 }
-                Err(e) => tracing::warn!("GStreamer camera failed: {}, trying next backend", e),
+                Err(e) => tracing::warn!("GStreamer camera failed: {:#}, trying next backend", e),
             }
         }
 
         // Then V4L2 / native webcam (nokhwa).
+        // Only accepted after it delivered a real first frame (see probe.rs).
         #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
-        {
-            match V4L2Camera::new_with_config(config).await {
-                Ok(cam) => {
-                    tracing::info!("Using V4L2/nokhwa camera backend");
-                    return Ok(Self {
-                        inner: CameraBackendInner::V4L2(cam),
-                    });
+        match native_cooldown::decide(&config.camera, native_cooldown::global()) {
+            native_cooldown::NativeDecision::Try => {
+                let key = native_cooldown::NativeKey::from_config(&config.camera);
+                let started = std::time::Instant::now();
+                match V4L2Camera::new_with_config(config).await {
+                    Ok(cam) => {
+                        native_cooldown::global().clear(&key);
+                        tracing::info!(
+                            "Using V4L2/nokhwa camera backend (selected after {} ms)",
+                            started.elapsed().as_millis()
+                        );
+                        return Ok(Self {
+                            inner: CameraBackendInner::V4L2(cam),
+                        });
+                    }
+                    Err(e) => {
+                        let reason = format!("{e:#}");
+                        tracing::warn!(
+                            "V4L2/nokhwa camera failed after {} ms: {reason}, trying next backend",
+                            started.elapsed().as_millis()
+                        );
+                        native_cooldown::global().record_failure(key, reason);
+                    }
                 }
-                Err(e) => tracing::warn!("V4L2/nokhwa camera failed: {}, trying next backend", e),
+            }
+            native_cooldown::NativeDecision::SkipCooling(failed) => tracing::info!(
+                "native backend skipped: failed {}s ago: {} (retry after native_failure_cooldown_secs = {})",
+                failed.age.as_secs(),
+                failed.reason,
+                config.camera.native_failure_cooldown_secs
+            ),
+            native_cooldown::NativeDecision::SkipByConfig => {
+                tracing::info!("[camera] backend = \"ffmpeg\": skipping the native backend")
             }
         }
 
@@ -133,7 +217,7 @@ impl Camera {
         // nokhwa's AVFoundation path hangs). Degrades to mock if ffmpeg is
         // missing or the OS denies camera access.
         #[cfg(feature = "camera-ffmpeg")]
-        {
+        if ffmpeg_allowed(config.camera.backend) {
             match FfmpegCamera::new_with_config(config).await {
                 Ok(cam) => {
                     tracing::info!("Using ffmpeg live webcam backend");
@@ -141,7 +225,7 @@ impl Camera {
                         inner: CameraBackendInner::Ffmpeg(cam),
                     });
                 }
-                Err(e) => tracing::warn!("ffmpeg webcam failed: {}, falling back to mock", e),
+                Err(e) => tracing::warn!("ffmpeg webcam failed: {:#}, falling back to mock", e),
             }
         }
 
@@ -166,6 +250,7 @@ impl Camera {
             CameraBackendInner::GStreamer(cam) => cam.capture_frame(),
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(cam) => cam.capture_frame(),
+            CameraBackendInner::Scripted(next) => next(),
         }
     }
 
@@ -178,6 +263,7 @@ impl Camera {
             CameraBackendInner::GStreamer(cam) => cam.capture_frames(count),
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(cam) => cam.capture_frames(count),
+            CameraBackendInner::Scripted(next) => (0..count).filter_map(|_| next().ok()).collect(),
         }
     }
 
@@ -199,6 +285,11 @@ impl Camera {
         frames
     }
 
+    /// `true` when frames are synthetic (no real camera could be opened).
+    pub fn is_mock(&self) -> bool {
+        matches!(self.inner, CameraBackendInner::Mock(_))
+    }
+
     #[allow(dead_code)]
     pub fn is_open(&self) -> bool {
         match &self.inner {
@@ -209,6 +300,25 @@ impl Camera {
             CameraBackendInner::GStreamer(_) => true,
             #[cfg(any(feature = "camera-v4l2", feature = "camera-nokhwa"))]
             CameraBackendInner::V4L2(_) => true,
+            CameraBackendInner::Scripted(_) => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_choice_selects_which_backends_are_tried() {
+        // (choice, ffmpeg tried); whether native is tried is `native_cooldown::decide`.
+        let table = [
+            (CameraBackendChoice::Auto, true),
+            (CameraBackendChoice::Native, false),
+            (CameraBackendChoice::Ffmpeg, true),
+        ];
+        for (choice, ffmpeg) in table {
+            assert_eq!(ffmpeg_allowed(choice), ffmpeg, "{choice:?}");
         }
     }
 }

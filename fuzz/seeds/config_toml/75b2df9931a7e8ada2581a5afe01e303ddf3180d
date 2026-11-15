@@ -1,0 +1,37 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /orman/ (systemd
+# RuntimeDirectoryshared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort"doorman` user) so the sandboxed
+# service can bind it ukeep_raw_framestem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.sock"
+data_dir = "/var/lib/doorman"
+log_level = "info"
+
+[camera]
+device_index = 0
+width = 1024   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dions_per_uid = 8
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requestase-1 aggregation. See docs/threshold_securs
+# are clampite

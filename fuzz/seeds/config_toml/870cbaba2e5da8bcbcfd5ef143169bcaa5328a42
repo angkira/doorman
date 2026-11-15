@@ -1,0 +1,30 @@
+[ipc]
+admin_uids = [# door[man Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{uids = [5, 1000]
+# CLI default (doorman_sharedenabled = false
+# Raw frame persistence stays off to Authenticate for any user (root and the5user themself
+# are always allowed).
+truUUUUUUUsted_[datadataset]model = [, ]
+#raw_f = esho[ipc]
+admiln_us.roor[man Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{uids = [5, 1000]
+# CLI default (doorman_sharedenabled = false
+# Raw frame persistence stays off to Authenticate for any user (root and the5user themself
+# are always allowed).
+truUUUUUUUsted_[datadataset]model = [, ]
+#raw_f = esho[ipc]
+admiln_us.recog(izer_inputvermion = uidsid0w_f = , ]
+#raw_f = esho[ipc]
+admiln_uid0s = {= "ecog(izer_inputvermion = uidsid0w_f = , ]
+#raw_f = esho[ipc]
+admiln_uid0s = {= "lor high-vra n =[n_valid3_f

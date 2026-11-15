@@ -1,0 +1,35 @@
+[dataset]
+#raw_f = esho[ipc]
+admiln_tid0s = [, #rmae_'undle_siztest.mp4"  # For testing with video files
+
+[ml]
+models_dir = """ar/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[darame_'undkend = "tract"
+
+# Device:_auth_attempts_per_minute = 24).
+max_connections_per_uid = 8
+# Upper bound (ms) for one allowed to Authenticate for any user (root and th
+u ser themself
+# are always allowed).
+trusted_uids late attempts per uid per sliding minute (0 = unlimited).
+max24   # Camera native resolution (verified with FFmpeg test)
+height = 720
+fps = 30
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = """ar/lib//oorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ml]
+models_dir = """ar/lib/doorman/models"
+
+# Backend: "tract" (pure Rust, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'undkend = "tract"
+
+# Device:_auth_attempts_per_minute = 24).
+max_connections_per_uid = 8
+# Upper bound (ms) for one WaitForMatch (event-driven unlock); larger requ "cpu", "cud= [a", "ro, cm" #ra(onlests
+# are clamped.m See docs/unlock-e_'path.m

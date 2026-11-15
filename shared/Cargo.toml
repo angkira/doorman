@@ -2,6 +2,8 @@
 name = "doorman-shared"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 serde = { workspace = true }
@@ -10,3 +12,4 @@ thiserror = { workspace = true }
 toml = "1.0"
 dirs = "6.0"
 
+libc = "0.2"

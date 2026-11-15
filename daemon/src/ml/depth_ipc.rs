@@ -59,7 +59,11 @@ pub fn resolve_socket_path(fallback: &str) -> String {
 }
 
 /// Encode a request header (does NOT include the pixel body).
-pub fn encode_req_header(width: u32, height: u32, bbox: (f32, f32, f32, f32)) -> [u8; REQ_HEADER_LEN] {
+pub fn encode_req_header(
+    width: u32,
+    height: u32,
+    bbox: (f32, f32, f32, f32),
+) -> [u8; REQ_HEADER_LEN] {
     let mut buf = [0u8; REQ_HEADER_LEN];
     buf[0..4].copy_from_slice(&REQ_MAGIC.to_le_bytes());
     buf[4..8].copy_from_slice(&width.to_le_bytes());
@@ -92,7 +96,11 @@ pub fn decode_req_header(buf: &[u8; REQ_HEADER_LEN]) -> Option<ReqHeader> {
         f32::from_le_bytes(buf[20..24].try_into().unwrap()),
         f32::from_le_bytes(buf[24..28].try_into().unwrap()),
     );
-    Some(ReqHeader { width, height, bbox })
+    Some(ReqHeader {
+        width,
+        height,
+        bbox,
+    })
 }
 
 /// Encode a response (status + relief).

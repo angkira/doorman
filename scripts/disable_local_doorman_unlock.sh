@@ -7,7 +7,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
-target_user="${SUDO_USER:-angkira}"
+target_user="${SUDO_USER:-${USER:?set SUDO_USER or USER}}"
 
 if [ -f /etc/doorman/doorman.toml ]; then
     cp -a /etc/doorman/doorman.toml "/etc/doorman/doorman.toml.bak-disable-unlock-${ts}"

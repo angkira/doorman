@@ -1,0 +1,20 @@
+[ipc]
+admin_uids = [# doorman Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+soroot and the us
+er themself
+# are always allowed).
+trusted_uids = [n_ 10
+timeout_secs ='''
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-securitycamera.warmup_frames.md.
+# Extrc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the us
+er themself
+# are always allowed).
+trusted_uids = [n_valid_frames = 5
+
+[d

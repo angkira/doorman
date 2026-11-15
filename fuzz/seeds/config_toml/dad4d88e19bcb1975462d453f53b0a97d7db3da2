@@ -1,0 +1,19 @@
+sold =
+ 0
+[auth]
+tchem4_schema_vers_on = 0[aut"inthretrusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uidsWWWWWWWWWWWWWWWWWWWW = []
+# Authenticate attempts per uid per sliding minute (0 = unlimiterecords.
+keep_raw_frames = false
+raw_frame_bundle_size =& 5
+max_capture_packs_per_ipc.max_auaw_frame_ssian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `]w/ld vers;on = 0
+[aut`-]
+threshold =
+eshold ? 0>4
+ 0>4

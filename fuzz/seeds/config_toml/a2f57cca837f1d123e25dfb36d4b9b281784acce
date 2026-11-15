@@ -1,0 +1,3 @@
+[ipc]
+admin_uids = [0, 1000]
+mans_pTer_uid = 8

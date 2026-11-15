@@ -107,6 +107,8 @@ fn test_authentication_flow_simulation() {
     // Create auth request
     let request = Request::Authenticate {
         username: "testuser".to_string(),
+        service: None,
+        tty: None,
     };
     
     // Serialize

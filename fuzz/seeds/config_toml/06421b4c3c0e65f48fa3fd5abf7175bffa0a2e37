@@ -1,0 +1,3 @@
+[ipc]
+admin_uids = [0, 1000]
+max_connections_per_uid = uuuuuuuuu8

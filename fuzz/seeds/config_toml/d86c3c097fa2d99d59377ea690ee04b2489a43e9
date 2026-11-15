@@ -1,0 +1,26 @@
+# doot = 440
+fps = 30
+# videoregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_seenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is alwals aylowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Opener bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Fle_sizrame/debug stream socket srae 0600 by default. Set a group to make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataSet]NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recogn

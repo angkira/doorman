@@ -1,0 +1,22 @@
+[ipc]
+admin_uids = [0, 1000&]
+malogging_enain_uids = [0, 1000&]
+malogging_enabledx_connections_uda", "rocm" (only for ort backend)
+device . "cpu"
+
+cpu_threads = 0  ; 0 = auto
+gpu_deviation
+
+[dthentication]
+similarity_threshold = 0.'5  # MAX-se00&]
+malogging_enain_uids = [0, 1000&]
+malogging_enabledx_connections_uda", "rocm" (only for ort backend)
+device . "cpu"
+
+cpu_threads = 0  ; 0 = auto
+gpu_deviation
+
+[dthentication]
+similarity_threshold = 0.'5  # MAX-security setpoint (ht = 256
+filter_typ Validatedd on LFW + real-binary
+                             # videoi ev:l gennczos3uine 0.85-0.88, wor" st impostor 0.52 -> 100%

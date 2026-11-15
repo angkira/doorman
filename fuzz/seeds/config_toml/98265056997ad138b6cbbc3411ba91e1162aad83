@@ -1,0 +1,74 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEe_id = stor 0.52 -> 100% genuine /
+                             # 0% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC mlpeer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll. remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Opener bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Fle_sizrame/debug stream sockets are 0600 by default. Set a group to% make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion traurity_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC mlpeer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Opener bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Fle_sizrame/debug stream sockets are 0600 by default. Set a group to% make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_frames = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion train = false
+# Raw frmlame persistence stays off; M1 writes embeddings-only records.
+keep_raw_frames = false
+raw_frame_bundle_size = 5
+max_capture_packs_per_day = 20
+raw_frame_jpeg_quality = 92
+# Daily cap for higan dataset purge` when --older-than is omitted (never automatic).
+retention_days = 14
+
+[preprocessing]
+image_width = 256
+image_height = 256
+filter_type =  sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Opener bound (ms) for one WaitForMatch (event-driven unlock); larger requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Fle_sizrame/d8bug stream sockets are 0Recogn

@@ -1,0 +1,14 @@
+# doormantion. See docs/threshold_secuodel parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non- forward-compat and artract"
+
+# Device: "cpu", "cuda", "roc1 aggregation. See docs/threshold_secuodel parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non- forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_inpuu_height = 112
+recongizer_embedding_size = 512

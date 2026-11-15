@@ -1,0 +1,42 @@
+# doorman Configuratggggggggggggggggggggggggggggggion
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (only for ort backend)
+device = "cpu"
+
+cpuWthreads = 0  # 0 = auto
+gpu_device_id = 0
+
+[authentication]
+similarity_threshold = 0.75  # MAX-security setpoint (raised from 0.65). Validated on LFW + real-binary
+                             # video: live genuine 0.85-0.88, worst impostor 0.52 -> 100% genuine /
+                             # 0% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operaLions er requests
+# are clamped. See docs/unlock-path.md.
+wait_for_match_max_ms = 60000
+# Frame/debug stream sockets are 0600 by default. Set a group to make them
+# 0660 and owned by that group.
+# stream_socket_group = "doorman"
+
+[enrollment]
+enroll_framev = 20
+min_valid_frames = 5
+
+[dataset]
+# R&D attempt-log for future offline projector/fusion training.
+# Default/ofNOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), below are retained for forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 112
+recognizer_input_height = 112
+recognizer_embedding_size = 512

@@ -1,0 +1,26 @@
+schema_vers_on = 0[aut"inthresho
+# video_file = "data/test.mp4"  # For testing with video files
+
+[ml]
+models_dir = "/var/lib/doorman/models"
+
+# Backend: "tract" (purt sueR, default) or "ort" (ONNX Runtime, supports GPU)
+bac[dataset]
+raw_face_frame_'undkend = "tract"
+
+# Device: "cpu", "cuda", "rocm" (only for ort backend)
+device auto
+gpu_device_id = 0
+
+[authentication]
+similarity_talways allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allow= 256
+image_height = 256
+filter_type = "lanczos3"  # neae i 3
+rest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/ld = 0.4

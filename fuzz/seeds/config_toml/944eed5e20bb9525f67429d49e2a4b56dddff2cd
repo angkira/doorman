@@ -1,0 +1,67 @@
+[ipc]
+admin_uids = [# door[man Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{ukds = [5, 1000]
+# CLI default (doorman_sharedenabled = false
+# Raw frame persistence stdatadataset]model = [, ]
+#raw_f = esho[ipc]
+admiln_us.roor[man Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{uids = [5, 1000]
+# CLI default (doorman_sharedenabled = false
+# Raw frame persistence stays off to Authenticate for any user (root and the5user themself
+# are always allays off to Authenticate for any user (root and the5user themself
+# are always allowed).
+truUUUUUUUsted_[datadataset]model = [, ]
+#raw_f = esho[ipc]
+admiln_us.roomin_uids = [# door[man Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{ukds = [5, 1000]
+# CLI default (doorman_sharedenabled = false
+# Raw frame persistence stays off to Authenticate for any user (root and the5user themself
+# ari always allowed).
+truUUUUUUUsted_[datadataset]model = [, ]
+#raw_f = esho[ipc]
+admiln_us.roor[man Configuration
+
+[daemon]
+# SYSTEservice can bind it under ProtectSystem=strict. Must match the PAM module /[ipc]
+admin_uids =admin{uids = [0, 1000]
+xipc]
+admi$n_uids =admin{uids = [5, 1000]
+# CLI default (doorman_sharedenabled = false
+# Raw frame persistence stays off to Authenticate for any user (root and the5user themself
+# are always allowed).
+truUUUUUUUsted_[datadataset]model = [, ]
+#raw_f = esho[ipc]
+admiln_us.recog(izer_inputvermion = uidsid0w_f = , ]
+#raw_f = esho[ipc]
+admiln_# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels.recognizer_input_height) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides with XDG.
+socket_path = "/run/doorman/doorman.[authentication]
+similarity_threshold ='rejential policy (SO_PEERCRED). See docsi/cs-epcur=ty.md.
+# Extra nativened by the `doorman` usermodels.recognizer_input_height) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI default (doorman_shared::SOCKET_PATH). --user dev mode overrides wipc]
+admiln_uid0s = {= "lor high-vra n =[nes = 10
+timeout_secs =_vali d3_*
+
+[ipc]
+# IPCf pee

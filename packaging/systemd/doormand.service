@@ -9,7 +9,7 @@
 #
 # Prerequisites created by `make install`:
 #   - system user/group `doorman` (member of `video` for camera access)
-#   - /var/lib/doorman           (0750, owned by doorman:doorman) — embeddings
+#   - /var/lib/doorman           (0700, owned by doorman:doorman) — embeddings
 #   - /var/lib/doorman/models    — ONNX models (or symlink to /usr/share/doorman/models)
 #
 # NOTE: this is the SYSTEM unit. For single-user dev on a desktop with PipeWire,
@@ -64,15 +64,16 @@ RestrictNamespaces=true
 # Writable paths: embeddings/state and the listening socket.
 # systemd creates /run/doorman (RuntimeDirectory) as doorman:doorman.
 StateDirectory=doorman
+StateDirectoryMode=0700
 RuntimeDirectory=doorman
 ReadWritePaths=/var/lib/doorman
 
 # Camera device access. ProtectSystem=strict makes /dev mostly read-only and
-# DevicePolicy=closed denies devices by default; explicitly allow video nodes.
+# DevicePolicy=closed denies devices by default; explicitly allow video nodes only.
+# No GPU nodes (/dev/dri, /dev/kfd, /dev/nvidia*): inference is CPU. See docs/systemd-hardening.md.
 DevicePolicy=closed
 DeviceAllow=/dev/video0 rw
 DeviceAllow=char-video4linux rw
-DeviceAllow=/dev/dri rw
 
 # Resource ceilings — single-camera CPU inference is light.
 MemoryMax=1G

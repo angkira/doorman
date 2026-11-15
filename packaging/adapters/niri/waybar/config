@@ -30,7 +30,7 @@
   "custom/launcher": {
     "format": "",
     "tooltip": "Launcher",
-    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click launcher"
+    "on-click": "$HOME/.config/waybar-niri/waybar-niri-click launcher"
   },
   "niri/workspaces": {
     "all-outputs": true,
@@ -58,15 +58,15 @@
   "niri/language": {
     "format": "kb {shortDescription}",
     "tooltip-format": "{long}",
-    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click language-next",
-    "on-click-right": "/home/angkira/.config/waybar-niri/waybar-niri-click language-prev"
+    "on-click": "$HOME/.config/waybar-niri/waybar-niri-click language-next",
+    "on-click-right": "$HOME/.config/waybar-niri/waybar-niri-click language-prev"
   },
   "network": {
     "format-wifi": "wifi {essid}",
     "format-ethernet": "eth {ipaddr}",
     "format-disconnected": "offline",
     "tooltip-format": "{ifname}: {ipaddr}/{cidr}",
-    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click network"
+    "on-click": "$HOME/.config/waybar-niri/waybar-niri-click network"
   },
   "pulseaudio": {
     "format": "{icon} {volume}%",
@@ -78,16 +78,16 @@
         "vol"
       ]
     },
-    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click audio",
+    "on-click": "$HOME/.config/waybar-niri/waybar-niri-click audio",
     "on-click-right": "pavucontrol"
   },
   "custom/igpu": {
-    "exec": "/home/angkira/.local/bin/waybar-gpu igpu",
+    "exec": "$HOME/.local/bin/waybar-gpu igpu",
     "interval": 2,
     "tooltip": "AMD Phoenix iGPU"
   },
   "custom/dgpu": {
-    "exec": "/home/angkira/.local/bin/waybar-gpu dgpu",
+    "exec": "$HOME/.local/bin/waybar-gpu dgpu",
     "interval": 2,
     "tooltip": "AMD Radeon AI PRO R9700 dGPU"
   },
@@ -110,12 +110,12 @@
   "custom/lock": {
     "format": "",
     "tooltip": "Lock",
-    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click lock"
+    "on-click": "$HOME/.config/waybar-niri/waybar-niri-click lock"
   },
   "custom/power": {
     "format": "",
     "tooltip": "Power menu",
-    "on-click": "/home/angkira/.config/waybar-niri/waybar-niri-click power",
+    "on-click": "$HOME/.config/waybar-niri/waybar-niri-click power",
     "on-click-right": "wlogout"
   }
 }

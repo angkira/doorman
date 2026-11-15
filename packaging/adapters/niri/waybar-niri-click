@@ -6,10 +6,10 @@ printf '%s %s\n' "$(date -Is)" "$name" >> /tmp/waybar-niri-click.log
 
 case "$name" in
   launcher)
-    exec /home/angkira/.local/bin/sway-menu
+    exec "$HOME/.local/bin/sway-menu"
     ;;
   lock)
-    exec /home/angkira/.local/bin/doorman-lock
+    exec "$HOME/.local/bin/doorman-lock"
     ;;
   power)
     if command -v wlogout >/dev/null 2>&1; then

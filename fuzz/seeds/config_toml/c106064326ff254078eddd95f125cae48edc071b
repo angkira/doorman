@@ -1,0 +1,27 @@
+ 0 = auto.52 -> 100% genuine /
+                             # 0% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin oper00% genuine /
+                             # 0% false-accept under Phase-1 aggregation. See docs/threshold_security_analysis.md.
+auth_frames = 10
+timeout_secs = 3
+
+[ipc]
+# IPC peer-credential policy (SO_PEERCRED). See docs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remer sliding minute (0 = unlimited).
+max_auth_attempts_per_minute = 20
+# Open command [ipc]
+admin_uid0s = [, 1000]connections per peer uid (0 = unlimited; global cap is 64).
+max_connections_per_uid = 8
+max_co.nections_p
+# UTerpper bound (ms

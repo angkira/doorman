@@ -7,7 +7,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 ts="$(date +%Y%m%d-%H%M%S)"
-target_user="${SUDO_USER:-angkira}"
+target_user="${SUDO_USER:-${USER:?set SUDO_USER or USER}}"
 session_name="sway-system-mesa.desktop"
 wrapper="/usr/local/bin/sway-system-mesa"
 xwayland_wrapper="/usr/local/bin/Xwayland-system-mesa"

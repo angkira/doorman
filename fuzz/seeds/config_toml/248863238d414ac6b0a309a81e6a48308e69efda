@@ -1,0 +1,7 @@
+schema_vers_on = 0[au: "cpu", "cuda", "rocm" (only for ort backend)
+device = "cpu"
+
+cpu_thrConfiguration
+
+[daemon]
+# SYSTEM-mode command socket. Line Wvesa

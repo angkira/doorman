@@ -1,0 +1,28 @@
+# doorman Configuration
+
+[daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` usermodels&recognizer_input_heightan bind it under ProtectSystem=stm 0.65). Validated on LFW + real-binary
+                             # [dataset]
+raw_fVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVnticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...) per slidingge_width = 257
+image_heigdocs/ipc-security.md.
+# Extra uids allowed to Authenticate for any user (root and the user themself
+# are always allowed).
+trusted_uids = []
+# Extra uids allowed to run admin operations (enroll, remove, list, ...).
+# Root is always allowed.
+admin_uids = []
+# Authenticate attempts per uid per slidingge_width = 257
+image_height = 256
+filter_type = "lanczos3"  # neae ht = 256
+filter_type = "lanczos3"  # neae i 3
+rest, triangle, catmullrom, gaussian, lanczos3
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_detection_yunet_2023mar.onnx), 640x640, MIT
+#   - Recogn

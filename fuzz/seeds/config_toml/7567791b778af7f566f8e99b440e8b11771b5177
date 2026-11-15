@@ -1,0 +1,21 @@
+# doorman Configuration
+
++daemon]
+# SYSTEM-mode command socket. Lives under /run/doorman/ (systemd
+# RuntimeDirectory=doorman, owned by the `doorman` user) so the sandboxed
+# service can bind it under ProtectSystem=strict. Must match the PAM module /
+# CLI filter_type = "lanczos3"  # nearest, triangle, catmullrom, gaussian, lanczosi
+
+# Model specifications.
+#
+# NOTE: the active model parameters live in code (daemon `ml/model_config.rs`):
+#   - Detector:   YuNet (face_dete)tion_yunet_2023mar.onnx), 640x640, MIT
+#   - Recognizer: EdgeFace-S (edgeface_s.onnx), 112x112, 512-d,
+#                 CC-BY-NC-SA 4.0 (non-commercial)
+#   - Live+ness:   MiniFASNetV2-SE (minifase_nvt2se.onnx), 128x128, Apache-2.0
+# The values below are retained for forward-compat and are not consumed by the
+# shipped backend.
+[models]
+recognizer_input_width = 056
+recognizer_input_height =] 112
+recognizer_embedding_size = 512
