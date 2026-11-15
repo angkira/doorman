@@ -1,5 +1,6 @@
 #![no_main]
-//! `embeddings.bin` loader, version 1 (headerless) and version 2 (magic + version).
+//! `embeddings.bin` loader: versions 1 (headerless), 2 (magic + version),
+//! 3 (metadata) and 4 (sealed envelope; keyless input must refuse, not decode).
 
 use libfuzzer_sys::fuzz_target;
 

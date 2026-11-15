@@ -204,6 +204,15 @@ fn legacy_file(users: &[UserEmbedding]) -> Vec<u8> {
 #[test]
 fn embeddings_loader_never_panics() {
     let users = vec![synthetic_user("alice", 3, 8), synthetic_user("bob", 1, 4)];
+    // A sealed file without the key must refuse (None), never panic: the
+    // fuzzer has no key, so v4 inputs exercise the locked path.
+    let sealed_key = [42u8; 32];
+    let sealed = Storage::encode_sealed(&users, &sealed_key).unwrap();
+    let mut sealed_cut = sealed.clone();
+    sealed_cut.truncate(20);
+    let mut sealed_bitflip = sealed.clone();
+    let n = sealed_bitflip.len();
+    sealed_bitflip[n - 1] ^= 1;
     let seeds = vec![
         Storage::encode_embeddings(&users).unwrap(),
         Storage::encode_embeddings(&[]).unwrap(),
@@ -211,11 +220,16 @@ fn embeddings_loader_never_panics() {
         legacy_file(&[]),
         b"DRMNEMB\0".to_vec(),
         b"DRMNEMB\0\x02\x00\x00\x00".to_vec(),
+        sealed,
+        sealed_cut,
+        sealed_bitflip,
     ];
     let dict: &[&[u8]] = &[
         b"DRMNEMB\0",
         b"\x01\x00\x00\x00",
         b"\x02\x00\x00\x00",
+        b"\x03\x00\x00\x00",
+        b"\x04\x00\x00\x00",
         b"\xff\xff\xff\xff\xff\xff\xff\xff",
         b"\x00\x00\x00\x00\x00\x00\x00\x00",
         b"\x00\x00\xc0\x7f",
@@ -240,6 +254,12 @@ fn embeddings_header_cases_are_explicit_errors() {
     v2.extend_from_slice(&u64::MAX.to_le_bytes());
     assert_eq!(embeddings_file(&v2), None);
     assert_eq!(embeddings_file(b"DRMNEMB\0\x63\x00\x00\x00"), None);
+    // A sealed header without the key is a refusal, not a decode: the fuzzer
+    // (keyless) must never get plaintext or a panic out of v4.
+    assert_eq!(embeddings_file(b"DRMNEMB\0\x04\x00\x00\x00"), None);
+    let sealed = Storage::encode_sealed(&[synthetic_user("alice", 1, 4)], &[7u8; 32]).unwrap();
+    assert_eq!(embeddings_file(&sealed), None);
+    assert_eq!(embeddings_file(&sealed[..sealed.len() / 2]), None);
 }
 
 #[test]

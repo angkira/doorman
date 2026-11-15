@@ -73,6 +73,8 @@ doorman list                # show enrolled users
 doorman test "$USER"        # run a real authenticate via the daemon
 doorman remove "$USER"      # remove an enrollment
 doorman status              # daemon version, uptime, camera, models, users, calibration
+sudo doorman key enroll --pin   # opt-in at-rest encryption: TPM-sealed key + PIN recovery (docs/STORAGE-ENCRYPTION.md)
+doorman key status         # sealed? key loaded? PIN enrolled? (no secrets, any user)
 sudo doorman calibrate      # measuring session: no failure-budget pauses, 45 min, self-ending
 doorman pad run             # guided photo/video/print attack screening (docs/PAD-PROTOCOL.md)
 sudo doorman config set ipc.face_max_judged_failures 5   # validated, atomic, comments kept

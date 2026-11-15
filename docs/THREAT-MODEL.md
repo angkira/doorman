@@ -110,9 +110,9 @@ frames: **accepted**.
 
 | STRIDE | Threat | Existing mitigation | Residual risk | Status |
 |---|---|---|---|---|
-| I | Template theft | directory 0700, files 0600 created with that mode (`daemon/src/storage.rs`), owner `doorman`; dataset dirs 0700/files 0600 | stored as plain `f32` vectors, no encryption; readable by root, by the `doorman` uid, and by any backup that copies `/var/lib/doorman` | partial (see ISO/IEC 24745 section) |
-| T | Replace a template with the attacker's (persistent backdoor) | atomic write (tmp + fsync + rename), private modes | no integrity tag; anyone with write access as `doorman` or root can silently enroll a face | accepted (needs daemon compromise or root) |
-| T | Malformed `embeddings.bin` crashes or hangs the daemon | decoder returns explicit errors for bad magic/version/truncation; fuzzed v1 and v2 (no panic or unbounded allocation in the short runs); NaN vectors compare false against the threshold | a corrupt file stops the daemon at startup (fail closed; password still works) | mitigated |
+| I | Template theft | directory 0700, files 0600 created with that mode (`daemon/src/storage.rs`), owner `doorman`; dataset dirs 0700/files 0600; opt-in sealed store: v4 AEAD envelope (ChaCha20-Poly1305, per-write nonce), TPM2-sealed data key + optional PIN wrap (`docs/STORAGE-ENCRYPTION.md`) | sealed file is opaque off-host; plaintext layouts still readable by root, by the `doorman` uid, and by backups that copy `/var/lib/doorman` (encrypt or exclude backups) | partial (see ISO/IEC 24745 section) |
+| T | Replace a template with the attacker's (persistent backdoor) | atomic write (tmp + fsync + rename), private modes; sealed store: any modification fails AEAD authentication and the daemon refuses to load it | unsealed layouts have no integrity tag; anyone with write access as `doorman` or root can silently enroll a face | accepted for plaintext (needs daemon compromise or root); mitigated when sealed |
+| T | Malformed `embeddings.bin` crashes or hangs the daemon | decoder returns explicit errors for bad magic/version/truncation; fuzzed v1, v2, v3 and v4 (no panic or unbounded allocation in the short runs); NaN vectors compare false against the threshold; sealed input without the key is a refusal, not a decode | a corrupt file stops the daemon at startup (fail closed; password still works) | mitigated |
 | I | Raw frames stored for R&D | dataset capture is off by default, retention + `doorman dataset purge`, 0700/0600 | when enabled, raw face images sit unencrypted next to the templates | partial |
 | R | Who enrolled whom | root-only `Enroll`; logged | no signed enrollment record | accepted |
 
@@ -249,12 +249,12 @@ text checks it:
 
 | Property | doorman today |
 |---|---|
-| Confidentiality | file permissions only: `embeddings.bin` 0600 in `/var/lib/doorman` 0700, owner `doorman` (`daemon/src/storage.rs`). Plain 512-d `f32` vectors, bincode. No encryption. |
-| Integrity | none beyond atomic replace (tmp file, fsync, rename) and decode errors on malformed files. No MAC; a modified file with valid structure loads. |
+| Confidentiality | 0600 in 0700 (owner `doorman`) by default; opt-in sealed v4 envelope (AEAD, TPM2-sealed data key + optional PIN, `docs/STORAGE-ENCRYPTION.md`). Plaintext layouts remain plain `f32` bincode. |
+| Integrity | atomic replace + decode errors; the sealed v4 envelope adds an authentication tag (tamper = fail closed). Unsealed layouts still have no MAC. |
 | Irreversibility | no protection: the stored vector is the model's embedding. Whether a face-like image can be reconstructed from an EdgeFace embedding is not assessed here; the literature says it can for some models, so treat templates as sensitive personal data. |
 | Unlinkability | no: the same person enrolled on two hosts with the same model yields comparable vectors. |
 | Renewability | manual only: `doorman remove` + re-enroll. The face itself cannot be renewed; only the stored template. |
-| Format versioning | v1 (headerless) and v2 (magic `DRMNEMB\0` + version) loaders exist and are fuzzed; a v1 file is backed up before upgrade (`embeddings.bin.v1.bak`, same 0600 mode). |
+| Format versioning | v1 (headerless), v2 (magic `DRMNEMB\0` + version), v3 (+ per-template metadata) and sealed v4 loaders exist and are fuzzed; upgrades back up once (`.v1.bak` / `.v2.bak` / `.v3.bak`, same 0600 mode); a sealed file without the key aborts startup (fail closed). |
 
 ### Who the protections would stop
 
@@ -314,12 +314,7 @@ convenience tool; mentioned for completeness.
 ### Recommendation
 
 1. Do not implement the random projection (C) or a separate HMAC (B).
-2. If the project wants to claim any alignment with 24745, implement **A** as
-   format v3: AEAD with a systemd-credential key, header authenticated as
-   associated data, migration from v1/v2 that also seals or removes
-   `embeddings.bin.v1.bak`, a v3 fuzz seed, and a documented recovery step
-   (`doorman remove` + re-enroll after key loss). Fall back to the current plain
-   v2 (with a warning) only when no credential is configured.
+2. ~~If the project wants to claim any alignment with 24745, implement **A**~~ Implemented as **A′** (ROUND 10, `docs/STORAGE-ENCRYPTION.md`; deviations from the sketch below: format is v4 because v3 was taken by template metadata; TPM preferred over host key; Argon2id PIN wrap added; no plaintext fallback — a sealed store without a key fails closed instead of warning; fallback for unsealed stores is unchanged behavior): AEAD with a systemd-credential key, header authenticated as associated data, migration from v1/v2/v3 with the `.bak` chain, v4 fuzz seeds, and a documented recovery step (`doorman remove` + re-enroll after key loss, or restore the `.bak`).
 3. Before that, cheap and independent of crypto: refuse to start when
    `embeddings.bin` or the state directory is group/world-accessible (the
    storage code sets modes on creation but does not check existing files), and
