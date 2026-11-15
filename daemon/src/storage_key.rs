@@ -275,7 +275,9 @@ pub fn dropin_path() -> PathBuf {
 
 /// `systemd-creds encrypt` argv sealing the key file with the host TPM.
 /// `pcrs` is e.g. `"7"` (see docs/STORAGE-ENCRYPTION.md for the tradeoff).
-/// CLI-side only: pure builder, executed by `doorman key enroll`.
+/// `encrypt` always takes two positionals (`INPUT OUTPUT`); with `-p` the
+/// sealed `SetCredentialEncrypted=` line goes to stdout and `-` (stdout) is
+/// passed as OUTPUT. CLI-side only: pure builder, executed by `doorman key`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn tpm_seal_argv(key_file: &Path, pcrs: &str) -> (String, Vec<String>) {
     (
@@ -288,6 +290,7 @@ pub fn tpm_seal_argv(key_file: &Path, pcrs: &str) -> (String, Vec<String>) {
             format!("--name={CREDENTIAL_NAME}"),
             "-p".to_string(),
             key_file.as_os_str().to_string_lossy().into_owned(),
+            "-".to_string(),
         ],
     )
 }
@@ -370,6 +373,7 @@ mod tests {
         assert!(args.contains(&"--with-key=tpm2".to_string()));
         assert!(args.contains(&"--tpm2-pcrs=7".to_string()));
         assert!(args.contains(&"--name=doorman-storage-key".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
         let dropin = render_dropin("SetCredentialEncrypted=doorman-storage-key: ABCDEF\n").unwrap();
         assert!(dropin.contains("[Service]"));
         assert!(dropin.contains("SetCredentialEncrypted=doorman-storage-key: ABCDEF"));
