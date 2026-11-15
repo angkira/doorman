@@ -41,12 +41,16 @@ fn fuzz_resolver(name: &str) -> Option<u32> {
 }
 
 fn is_admin_request(req: &Request) -> bool {
+    // Mirrors `authorize()`: only Status-like reads are open to every local
+    // user. Everything else needs uid 0 or an admin uid, so the gate must
+    // never Allow it for the fuzz peer. Keep in sync with `ipc_policy.rs`.
     !matches!(
         req,
         Request::Authenticate { .. }
             | Request::WaitForMatch { .. }
             | Request::Status
             | Request::CalibrateStatus
+            | Request::StorageKeyStatus
     )
 }
 

@@ -402,8 +402,17 @@ pub async fn read_gated_request<R: AsyncBufRead + Unpin>(
         bail!("request line exceeds {MAX_REQUEST_LINE_BYTES} bytes");
     }
     let line = std::str::from_utf8(&line).context("request line is not valid UTF-8")?;
-    let env: RequestEnvelope =
+    // The `type` tag must be a string. Serde's internally-tagged enums also
+    // accept variant indices (`{"type":14}` decodes like the 14th variant),
+    // an obscure alias no legitimate client sends (the CLI and PAM module
+    // always serialize the string form). Reject it here so the gate only
+    // ever sees the documented wire shape.
+    let value: serde_json::Value =
         serde_json::from_str(line.trim()).context("Failed to parse request")?;
+    if !value.get("type").is_some_and(serde_json::Value::is_string) {
+        anyhow::bail!("request 'type' must be a string");
+    }
+    let env: RequestEnvelope = serde_json::from_value(value).context("Failed to parse request")?;
     Ok(match gate.check(peer, &env) {
         Ok(()) => Gated::Allowed(env.request),
         Err(resp) => Gated::Rejected(resp),

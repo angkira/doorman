@@ -110,6 +110,12 @@ fn ipc_request_lines_never_panic_and_never_over_grant() {
         r#"{"type":"shutdown","protocol_version":null}"#,
         r#"{"type":"detect_and_recognize"}"#,
         r#"{"type":"get_latest_detection"}"#,
+        r#"{"type":"storage_key_status"}"#,
+        // Integer tags are variant indices in serde's internally-tagged
+        // enums; the gate rejects them before decoding (see read_gated_request).
+        r#"{"type":14}"#,
+        r#"{"type":4}"#,
+        r#"{"type":0}"#,
     ]);
     let dict: &[&[u8]] = &[
         b"\"type\"",
@@ -138,6 +144,31 @@ fn ipc_request_lines_never_panic_and_never_over_grant() {
     assert!(
         allowed > 0 && rejected > 0,
         "{allowed} allowed, {rejected} rejected"
+    );
+}
+
+#[test]
+fn integer_type_tags_are_refused_string_status_is_allowed() {
+    // Serde reads `{"type":N}` as the Nth variant; the gate rejects non-string
+    // tags before decoding, so none of these may reach authorization.
+    for raw in [
+        r#"{"type":14}"#,
+        r#"{"type":4}"#,
+        r#"{"type":0}"#,
+        r#"{"type":5}"#,
+        "[1,2,3]",
+        "42",
+        r#""status""#,
+    ] {
+        assert_eq!(
+            ipc_request_line(raw.as_bytes()),
+            IpcOutcome::Unparsed,
+            "{raw}"
+        );
+    }
+    assert_eq!(
+        ipc_request_line(br#"{"type":"storage_key_status"}"#),
+        IpcOutcome::Allowed("storage_key_status")
     );
 }
 

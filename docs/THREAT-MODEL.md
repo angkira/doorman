@@ -163,7 +163,7 @@ the document itself advises FIDO2 or a fingerprint reader.
 | T | Malicious crate / typosquat | lock file + `cargo deny` sources; no build scripts audited | no `cargo vet`, no vendoring, large GUI tree (eframe) in the default build | open |
 | T | Compromised GitHub Action | `permissions: contents: read`; every action pinned to a full commit SHA (tag in a trailing comment) | pins must be bumped by hand (no Dependabot configured); a malicious upstream commit that we later bump to is not caught | mitigated |
 | T | Tampered release artifact / models | `fetch_models.sh` checks SHA-256 | no signed releases or SBOM | open |
-| T | Parser bugs in untrusted-input paths | fuzz targets and seeded tests for IPC lines, config, embeddings (this change) | no continuous fuzzing beyond a 60 s CI run; image/ONNX/camera decoders are not fuzzed | partial |
+| T | Parser bugs in untrusted-input paths | fuzz targets and seeded tests for IPC lines, config, embeddings (this change); integer `type` tags rejected before decoding (serde maps them to variant indices) | no continuous fuzzing beyond a 60 s CI run; image/ONNX/camera decoders are not fuzzed | partial |
 
 ## Biometric-specific threats
 
